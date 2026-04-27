@@ -13,13 +13,16 @@ return [
         'crm.deal.get' => 'https://llumar.bitrix24.kz/rest/13/d58tgvvw264z07u5/crm.deal.get.json',
         'crm.deal.productrows.get' => 'https://llumar.bitrix24.kz/rest/13/eovptmewpkx5dt7u/crm.deal.productrows.get.json',
         'crm.deal.productrows.set' => 'https://llumar.bitrix24.kz/rest/13/ev7sa3pxlnh2tn8g/crm.deal.productrows.set.json',
-        'crm.deal.update' => 'https://llumar.bitrix24.kz/rest/13/35eizcjklzg4egue/crm.deal.update.json'
+        'crm.deal.update' => 'https://llumar.bitrix24.kz/rest/13/35eizcjklzg4egue/crm.deal.update.json',
+        // Add one more when ready:
+        // 'crm.product.list' => 'https://.../crm.product.list.json'
     ],
 
     // Product available stock field in Bitrix product catalog.
     // Example: UF_CRM_STOCK_M
     'product_available_field' => 'UF_CRM_STOCK_M',
     'product_update_method' => 'crm.product.update',
+    'product_list_method' => 'crm.product.list',
 
     // Where movement log is sent in Bitrix (usually timeline comment in deal).
     // If deal_id is missing, movement sync will be skipped.
