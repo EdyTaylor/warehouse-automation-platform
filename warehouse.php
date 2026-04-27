@@ -6,6 +6,7 @@ header('Content-Type: text/html; charset=utf-8');
 require 'db.php';
 $db = getDB();
 require 'menu.php';
+require_once __DIR__ . '/functions/stock_movements.php';
 
 
 // 🔥 УДАЛЕНИЕ
@@ -60,6 +61,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST'
             $product['roll_length'],
             $min
         ]);
+
+        logAndSyncMovement($db, [
+            'product_id' => $product_id,
+            'roll_id' => intval($db->lastInsertId()),
+            'movement_type' => 'receipt',
+            'quantity_m' => floatval($product['roll_length']),
+            'quantity_rolls' => 1,
+            'price_per_unit' => isset($product['purchase_price']) ? floatval($product['purchase_price']) : 0,
+            'total' => isset($product['purchase_price']) ? floatval($product['purchase_price']) : 0,
+            'comment' => 'Оприходование в приложении'
+        ]);
     }
 
     echo "<p style='color:green;'>Добавлено: $quantity</p>";
@@ -106,6 +118,17 @@ if (isset($_POST['action']) && $_POST['action'] === 'writeoff') {
                 VALUES (?, 'writeoff', ?, 0, 0, NULL, NULL)
             ");
             $stmt->execute([$roll['product_id'], $meters]);
+
+            logAndSyncMovement($db, [
+                'product_id' => intval($roll['product_id']),
+                'roll_id' => $roll_id,
+                'movement_type' => 'writeoff',
+                'quantity_m' => $meters,
+                'quantity_rolls' => 0,
+                'price_per_unit' => 0,
+                'total' => 0,
+                'comment' => 'Ручное списание в warehouse.php'
+            ]);
 
             echo "<p style='color:orange;'>Списано: $meters м</p>";
         }
@@ -155,6 +178,16 @@ if (isset($_POST['sell_rolls'])) {
         ");
         $stmt->execute([$product_id, $qty, $price, $total]);
 
+        logAndSyncMovement($db, [
+            'product_id' => $product_id,
+            'movement_type' => 'sale_roll',
+            'quantity_m' => 0,
+            'quantity_rolls' => $qty,
+            'price_per_unit' => $price,
+            'total' => $total,
+            'comment' => 'Продажа рулонов'
+        ]);
+
         echo "<p style='color:green;'>Продано рулонов: $qty | $total</p>";
     }
 }
@@ -188,6 +221,16 @@ if (isset($_POST['sell_meters'])) {
             VALUES (?, 'meter', ?, ?, ?)
         ");
         $stmt->execute([$product_id, $meters, $price, $total]);
+
+        logAndSyncMovement($db, [
+            'product_id' => $product_id,
+            'movement_type' => 'sale_meter',
+            'quantity_m' => $meters,
+            'quantity_rolls' => 0,
+            'price_per_unit' => $price,
+            'total' => $total,
+            'comment' => 'Продажа в метрах'
+        ]);
 
         echo "<p style='color:green;'>Продано $meters м | $total</p>";
 

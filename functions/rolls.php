@@ -5,6 +5,7 @@ function getAvailableRolls($db, $product_id) {
     $stmt = $db->prepare("
         SELECT * FROM rolls 
         WHERE product_id = ?
+        AND reserved = 0
         AND current_length > 0
         ORDER BY current_length ASC
     ");
@@ -98,6 +99,7 @@ function allocateMeters($db, $product_id, $meters, $config = []) {
     $stmt = $db->prepare("
         SELECT * FROM rolls
         WHERE product_id = ?
+        AND reserved = 0
         AND status = 'active'
         AND current_length >= ?
         ORDER BY current_length ASC

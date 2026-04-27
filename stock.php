@@ -12,7 +12,8 @@ $stock = $db->query("
         products.name,
         COUNT(CASE WHEN rolls.status = 'active' THEN 1 END) as full_rolls,
         COUNT(CASE WHEN rolls.status = 'cut' THEN 1 END) as cut_rolls,
-        SUM(rolls.current_length) as total_meters
+        SUM(rolls.current_length) as total_meters,
+        SUM(CASE WHEN rolls.reserved = 0 THEN rolls.current_length ELSE 0 END) as free_meters
     FROM products
     LEFT JOIN rolls ON rolls.product_id = products.id
     GROUP BY products.id
@@ -27,6 +28,7 @@ $stock = $db->query("
     <th>Целые рулоны</th>
     <th>Обрезки</th>
     <th>Всего метров</th>
+    <th>Свободно (м)</th>
 </tr>
 
 <?php foreach ($stock as $s): ?>
@@ -35,6 +37,7 @@ $stock = $db->query("
     <td><?= $s['full_rolls'] ?></td>
     <td><?= $s['cut_rolls'] ?></td>
     <td><?= round($s['total_meters'], 2) ?></td>
+    <td><?= round($s['free_meters'], 2) ?></td>
 </tr>
 <?php endforeach; ?>
 </table>

@@ -4,6 +4,7 @@ error_reporting(E_ALL);
 
 require __DIR__ . '/../../db.php';
 $db = getDB();
+require_once __DIR__ . '/../../functions/stock_movements.php';
 
 $data = json_decode(file_get_contents("php://input"), true);
 
@@ -53,16 +54,34 @@ try {
 
             if ($remaining <= 0) break;
 
-            $take = min($roll['current_length'], $remaining);
+            $reservedLen = isset($roll['reserved_length']) ? floatval($roll['reserved_length']) : 0;
+            $take = min($reservedLen, $remaining);
+
+            if ($take <= 0) {
+                continue;
+            }
+
             $new_length = $roll['current_length'] - $take;
 
             $status = ($new_length <= 0) ? 'sold' : 'cut';
 
             $db->prepare("
                 UPDATE rolls 
-                SET current_length=?, status=?, reserved=0
+                SET current_length=?, status=?, reserved=0, deal_id=NULL, reserved_length=0
                 WHERE id=?
             ")->execute([$new_length, $status, $roll['id']]);
+
+            logAndSyncMovement($db, [
+                'product_id' => $product_id,
+                'roll_id' => intval($roll['id']),
+                'movement_type' => 'sale_meter',
+                'quantity_m' => $take,
+                'quantity_rolls' => 0,
+                'price_per_unit' => $price,
+                'total' => $take * $price,
+                'deal_id' => $deal_id,
+                'comment' => 'Закрытие сделки и фактическое списание'
+            ]);
 
             $remaining -= $take;
         }

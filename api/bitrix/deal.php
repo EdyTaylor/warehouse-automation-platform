@@ -4,6 +4,7 @@ error_reporting(E_ALL);
 
 require __DIR__ . '/../../db.php';
 $db = getDB();
+require_once __DIR__ . '/../../functions/stock_movements.php';
 
 $data = json_decode(file_get_contents("php://input"), true);
 
@@ -80,9 +81,19 @@ foreach ($products as $p) {
 
         $db->prepare("
             UPDATE rolls 
-            SET reserved=1, deal_id=?
+            SET reserved=1, deal_id=?, reserved_length=?
             WHERE id=?
-        ")->execute([$deal_id, $roll['id']]);
+        ")->execute([$deal_id, $take, $roll['id']]);
+
+        logAndSyncMovement($db, [
+            'product_id' => $product_id,
+            'roll_id' => intval($roll['id']),
+            'movement_type' => 'reserve',
+            'quantity_m' => $take,
+            'quantity_rolls' => 0,
+            'deal_id' => $deal_id,
+            'comment' => 'Резерв из входящего webhook сделки'
+        ]);
 
         $reserved_rolls[] = [
             "roll_id" => $roll['id'],

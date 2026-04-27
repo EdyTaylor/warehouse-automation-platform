@@ -41,7 +41,7 @@ try {
 $stmt = $db->prepare("
     SELECT SUM(current_length) as total_length 
     FROM rolls 
-    WHERE product_id = ? AND current_length > 0
+    WHERE product_id = ? AND reserved = 0 AND current_length > 0
 ");
 $stmt->execute([$product_id]);
 

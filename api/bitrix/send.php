@@ -1,8 +1,11 @@
 <?php
 
 function sendToBitrix($method, $data = []) {
-
-    $webhook = "https://YOUR_DOMAIN.bitrix24.kz/rest/1/XXXXXXXX/";
+    static $config = null;
+    if ($config === null) {
+        $config = require __DIR__ . '/config.php';
+    }
+    $webhook = $config['webhook'];
 
     $url = $webhook . $method;
 
