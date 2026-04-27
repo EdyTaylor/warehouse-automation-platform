@@ -1,6 +1,6 @@
 -- Manual queue for incoming B24 sales that warehouse staff fulfill by chunks.
 
-CREATE TABLE `b24_sale_requests` (
+CREATE TABLE IF NOT EXISTS `b24_sale_requests` (
   `id` int NOT NULL AUTO_INCREMENT,
   `b24_deal_id` int NOT NULL,
   `deal_name` varchar(255) DEFAULT NULL,
@@ -12,7 +12,7 @@ CREATE TABLE `b24_sale_requests` (
   UNIQUE KEY `uq_b24_sale_requests_deal` (`b24_deal_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `b24_sale_lines` (
+CREATE TABLE IF NOT EXISTS `b24_sale_lines` (
   `id` int NOT NULL AUTO_INCREMENT,
   `request_id` int NOT NULL,
   `b24_product_id` int DEFAULT NULL,
@@ -27,7 +27,7 @@ CREATE TABLE `b24_sale_lines` (
   KEY `idx_b24_sale_lines_product` (`product_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `b24_sale_line_cuts` (
+CREATE TABLE IF NOT EXISTS `b24_sale_line_cuts` (
   `id` int NOT NULL AUTO_INCREMENT,
   `line_id` int NOT NULL,
   `roll_id` int NOT NULL,

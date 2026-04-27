@@ -26,12 +26,12 @@ try {
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $action = $_POST['action'] ?? '';
+    $action = isset($_POST['action']) ? $_POST['action'] : '';
 
     if ($action === 'add_cut') {
-        $lineId = intval($_POST['line_id'] ?? 0);
-        $rollId = intval($_POST['roll_id'] ?? 0);
-        $meters = floatval($_POST['meters'] ?? 0);
+        $lineId = intval(isset($_POST['line_id']) ? $_POST['line_id'] : 0);
+        $rollId = intval(isset($_POST['roll_id']) ? $_POST['roll_id'] : 0);
+        $meters = floatval(isset($_POST['meters']) ? $_POST['meters'] : 0);
 
         if ($lineId <= 0 || $rollId <= 0 || $meters <= 0) {
             $error = 'Неверные данные для добавления куска.';
@@ -110,7 +110,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if ($action === 'remove_cut') {
-        $cutId = intval($_POST['cut_id'] ?? 0);
+        $cutId = intval(isset($_POST['cut_id']) ? $_POST['cut_id'] : 0);
         if ($cutId <= 0) {
             $error = 'Некорректный cut_id.';
         } else {
@@ -173,7 +173,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if ($action === 'confirm_line') {
-        $lineId = intval($_POST['line_id'] ?? 0);
+        $lineId = intval(isset($_POST['line_id']) ? $_POST['line_id'] : 0);
         if ($lineId <= 0) {
             $error = 'Некорректная строка.';
         } else {
@@ -288,7 +288,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-$requestId = intval($_GET['request_id'] ?? 0);
+$requestId = intval(isset($_GET['request_id']) ? $_GET['request_id'] : 0);
 $requests = $db->query("
     SELECT *
     FROM b24_sale_requests
