@@ -21,6 +21,7 @@ function getPrice($row, $qty) {
 if ($_SERVER['REQUEST_METHOD'] === 'POST' 
     && !isset($_POST['sell_rolls']) 
     && !isset($_POST['sell_meters']) 
+    && !isset($_POST['delete_roll'])
     && (!isset($_POST['action']) || $_POST['action'] !== 'writeoff')
 ) {
     $product_id = intval($_POST['product_id']);
@@ -56,6 +57,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST'
         ));
     }
     $success_msg = "✅ Добавлено рулонов: $quantity";
+}
+
+// 🔥 УДАЛЕНИЕ РУЛОНА (только не для проданных/списанных)
+if (isset($_POST['delete_roll'])) {
+    $rollId = intval($_POST['delete_roll']);
+    $rollStmt = $db->prepare("SELECT * FROM rolls WHERE id = ?");
+    $rollStmt->execute(array($rollId));
+    $rollToDelete = $rollStmt->fetch(PDO::FETCH_ASSOC);
+    if (!$rollToDelete) {
+        $error_msg = "Рулон не найден";
+    } else {
+        if (in_array($rollToDelete['status'], array('sold', 'written_off', 'waste'), true)) {
+            $error_msg = "Проданные/списанные рулоны удалять нельзя";
+        } else {
+            $db->prepare("DELETE FROM rolls WHERE id = ?")->execute(array($rollId));
+            $success_msg = "✅ Рулон #{$rollId} удален";
+        }
+    }
 }
 
 // 🔥 СПИСАНИЕ
@@ -207,6 +226,10 @@ if (isset($_POST['sell_meters'])) {
 $filterProductId = intval(isset($_GET['product_id']) ? $_GET['product_id'] : 0);
 $filterStatus = isset($_GET['status']) ? trim($_GET['status']) : '';
 $filterSearch = isset($_GET['q']) ? trim($_GET['q']) : '';
+$viewMode = isset($_GET['view']) ? trim($_GET['view']) : 'active'; // active | history | all
+$onlyScrap = isset($_GET['only_scrap']) && $_GET['only_scrap'] === '1';
+$lowStockThreshold = floatval(isset($_GET['low_stock_below']) ? $_GET['low_stock_below'] : 0);
+$withoutNameOnly = isset($_GET['without_name']) && $_GET['without_name'] === '1';
 
 // Получаем данные с улучшенной обработкой
 $rolls = array();
@@ -226,6 +249,21 @@ try {
         $like = '%' . $filterSearch . '%';
         $params[] = $like;
         $params[] = $like;
+    }
+    if ($viewMode === 'active') {
+        $where[] = "r.status NOT IN ('sold','written_off','waste')";
+    } elseif ($viewMode === 'history') {
+        $where[] = "r.status IN ('sold','written_off','waste')";
+    }
+    if ($onlyScrap) {
+        $where[] = "r.status = 'scrap'";
+    }
+    if ($lowStockThreshold > 0) {
+        $where[] = "r.current_length < ?";
+        $params[] = $lowStockThreshold;
+    }
+    if ($withoutNameOnly) {
+        $where[] = "(p.name IS NULL OR p.name = '')";
     }
 
     $sql = "
@@ -268,7 +306,7 @@ try {
                 $roll['product_name'] = $products_data[$roll['product_id']]['name'];
                 $roll['product_roll_length'] = $products_data[$roll['product_id']]['roll_length'];
             } else {
-                $roll['product_name'] = 'Товар #' . $roll['product_id'] . ' (не найден)';
+                $roll['product_name'] = 'Архивный товар (ID ' . $roll['product_id'] . ')';
                 $roll['product_roll_length'] = $roll['original_length'];
             }
         }
@@ -276,7 +314,7 @@ try {
 } catch (Exception $e) {
     $rolls = $db->query("SELECT * FROM rolls ORDER BY id DESC")->fetchAll(PDO::FETCH_ASSOC);
     foreach ($rolls as &$roll) {
-        $roll['product_name'] = 'Товар #' . $roll['product_id'];
+        $roll['product_name'] = 'Архивный товар (ID ' . $roll['product_id'] . ')';
         $roll['product_roll_length'] = $roll['original_length'];
     }
 }
@@ -320,6 +358,32 @@ require 'includes/header.php';
                                 <option value="<?= $st ?>" <?= $filterStatus === $st ? 'selected' : '' ?>><?= $st ?></option>
                             <?php endforeach; ?>
                         </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Режим списка</label>
+                        <select name="view">
+                            <option value="active" <?= $viewMode === 'active' ? 'selected' : '' ?>>Актуальные</option>
+                            <option value="history" <?= $viewMode === 'history' ? 'selected' : '' ?>>История (продано/списано)</option>
+                            <option value="all" <?= $viewMode === 'all' ? 'selected' : '' ?>>Все</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Быстрые фильтры</label>
+                        <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+                            <label style="display:flex; gap:4px; align-items:center;">
+                                <input type="checkbox" name="only_scrap" value="1" <?= $onlyScrap ? 'checked' : '' ?>>
+                                Только обрезки
+                            </label>
+                            <label style="display:flex; gap:4px; align-items:center;">
+                                Остаток меньше
+                                <input type="number" name="low_stock_below" min="0" step="0.1" value="<?= htmlspecialchars((string)$lowStockThreshold) ?>" style="width:90px;">
+                                м
+                            </label>
+                            <label style="display:flex; gap:4px; align-items:center;">
+                                <input type="checkbox" name="without_name" value="1" <?= $withoutNameOnly ? 'checked' : '' ?>>
+                                Без имени товара
+                            </label>
+                        </div>
                     </div>
                     <div class="form-group">
                         <label>Поиск (ID/название)</label>
@@ -454,6 +518,24 @@ require 'includes/header.php';
         <!-- Складские остатки -->
         <div class="card">
             <h2>📋 Складские остатки</h2>
+            <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;">
+                <a class="btn btn-light" href="?view=active">Рабочий склад</a>
+                <a class="btn btn-light" href="?view=history">Архив движения</a>
+                <a class="btn btn-light" href="?view=all">Полный список</a>
+            </div>
+            <?php
+            $counts = array('active' => 0, 'history' => 0);
+            foreach ($rolls as $rr) {
+                if (in_array($rr['status'], array('sold','written_off','waste'), true)) {
+                    $counts['history']++;
+                } else {
+                    $counts['active']++;
+                }
+            }
+            ?>
+            <p class="text-muted">
+                В выборке: актуальных <?= $counts['active'] ?>, исторических <?= $counts['history'] ?>.
+            </p>
             <?php if (count($rolls) > 0): ?>
             <table class="table">
                 <thead>
