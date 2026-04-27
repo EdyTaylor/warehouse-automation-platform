@@ -11,18 +11,27 @@ function sendToBitrix($method, $data = []) {
         $url = $config['method_urls'][$method];
     } else {
         $webhook = isset($config['webhook']) ? $config['webhook'] : '';
-        $url = rtrim($webhook, '/') . '/' . $method;
+        // Bitrix incoming webhooks expect *.json endpoint.
+        $url = rtrim($webhook, '/') . '/' . $method . '.json';
     }
 
     $options = [
         "http" => [
             "header"  => "Content-type: application/json",
             "method"  => "POST",
-            "content" => json_encode($data)
+            "content" => json_encode($data),
+            "timeout" => 15,
+            "ignore_errors" => true
         ]
     ];
 
-    $result = file_get_contents($url, false, stream_context_create($options));
+    $result = @file_get_contents($url, false, stream_context_create($options));
+    if ($result === false) {
+        return [
+            'error' => 'network_error',
+            'error_description' => 'Bitrix request failed for method ' . $method
+        ];
+    }
 
     return json_decode($result, true);
 }
