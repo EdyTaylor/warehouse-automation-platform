@@ -7,6 +7,16 @@ require 'db.php';
 $db = getDB();
 require_once __DIR__ . '/api/bitrix/send.php';
 
+function hasColumn($db, $table, $column) {
+    try {
+        $stmt = $db->prepare("SHOW COLUMNS FROM `$table` LIKE ?");
+        $stmt->execute(array($column));
+        return (bool)$stmt->fetch(PDO::FETCH_ASSOC);
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
 function normalizeNumber($value) {
     $value = str_replace(' ', '', $value);
     $value = str_replace(',', '.', $value);
@@ -87,6 +97,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
+    if ($action === 'move_group') {
+        $productId = intval(isset($_POST['product_id']) ? $_POST['product_id'] : 0);
+        $targetCatalogId = intval(isset($_POST['target_catalog_id']) ? $_POST['target_catalog_id'] : 0);
+        if ($productId <= 0 || $targetCatalogId <= 0 || !hasColumn($db, 'products', 'catalog_id')) {
+            header("Location: products.php?sync_msg=" . urlencode("Некорректные данные для перемещения"));
+            exit;
+        }
+
+        $stmt = $db->prepare("UPDATE products SET catalog_id = ? WHERE id = ?");
+        $stmt->execute(array($targetCatalogId, $productId));
+
+        $stmt = $db->prepare("SELECT b24_product_id FROM products WHERE id = ?");
+        $stmt->execute(array($productId));
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        if ($row && intval($row['b24_product_id']) > 0) {
+            $resp = sendToBitrix('crm.product.update', array(
+                'id' => intval($row['b24_product_id']),
+                'fields' => array('CATALOG_ID' => $targetCatalogId)
+            ));
+            if (is_array($resp) && isset($resp['error'])) {
+                header("Location: products.php?sync_msg=" . urlencode("Группа локально изменена, ошибка Б24: " . (isset($resp['error_description']) ? $resp['error_description'] : $resp['error'])));
+                exit;
+            }
+        }
+
+        header("Location: products.php?sync_msg=" . urlencode("Товар перемещен в каталог #{$targetCatalogId}"));
+        exit;
+    }
+
     if (!empty($_POST['id'])) {
         $stmt = $db->prepare("
             UPDATE products SET
@@ -142,18 +181,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-$products = $db->query("SELECT * FROM products ORDER BY id DESC")->fetchAll(PDO::FETCH_ASSOC);
+$hasCatalogId = hasColumn($db, 'products', 'catalog_id');
+$products = $db->query("SELECT * FROM products ORDER BY " . ($hasCatalogId ? "catalog_id ASC, " : "") . "id DESC")->fetchAll(PDO::FETCH_ASSOC);
 $syncMsg = isset($_GET['sync_msg']) ? $_GET['sync_msg'] : '';
 $page_title = 'Товары';
 require 'includes/header.php';
 ?>
 
 <main class="container">
-<h2>Товары (аварийный режим)</h2>
+<h2>Товары (совместимый режим)</h2>
 <?php if ($syncMsg): ?>
     <p style="color:green;"><?php echo htmlspecialchars($syncMsg); ?></p>
 <?php endif; ?>
-<p>Страница работает в совместимом режиме.</p>
+<p>Каталогизация возвращена по локальному `catalog_id` без рискованных внешних вызовов на открытии страницы.</p>
 
 <form method="POST" style="margin-bottom:12px;">
     <input type="hidden" name="action" value="sync_to_b24">
@@ -181,6 +221,69 @@ require 'includes/header.php';
 </form>
 
 <h3>Список</h3>
+<?php if ($hasCatalogId): ?>
+<?php
+$groups = array();
+foreach ($products as $p) {
+    $cid = isset($p['catalog_id']) ? intval($p['catalog_id']) : 0;
+    if (!isset($groups[$cid])) {
+        $groups[$cid] = array();
+    }
+    $groups[$cid][] = $p;
+}
+?>
+<?php foreach ($groups as $catalogId => $groupProducts): ?>
+<details open style="margin-bottom:12px;">
+<summary><strong><?php echo $catalogId > 0 ? ("Каталог #".$catalogId) : "Без каталога"; ?></strong> — <?php echo count($groupProducts); ?> тов.</summary>
+<table border="1" style="margin-top:8px;">
+<tr>
+<th>ID</th>
+<th>Название</th>
+<th>Метраж</th>
+<th>Цена/м</th>
+<th>Себестоимость</th>
+<th>С доставкой</th>
+<th>1-4</th>
+<th>5-9</th>
+<th>10-19</th>
+<th>20+</th>
+<th>B24 ID</th>
+<th>Каталог</th>
+<th>Переместить</th>
+<th>✏️</th>
+<th>❌</th>
+</tr>
+
+<?php foreach ($groupProducts as $p): ?>
+<tr>
+<td><?php echo $p['id']; ?></td>
+<td><?php echo htmlspecialchars($p['name']); ?></td>
+<td><?php echo $p['roll_length']; ?></td>
+<td><?php echo $p['price_per_meter']; ?></td>
+<td><?php echo $p['purchase_price']; ?></td>
+<td><?php echo $p['delivery_price']; ?></td>
+<td><?php echo $p['price_1_4']; ?></td>
+<td><?php echo $p['price_5_9']; ?></td>
+<td><?php echo $p['price_10_19']; ?></td>
+<td><?php echo $p['price_20_plus']; ?></td>
+<td><?php echo isset($p['b24_product_id']) ? $p['b24_product_id'] : ''; ?></td>
+<td><?php echo isset($p['catalog_id']) ? intval($p['catalog_id']) : ''; ?></td>
+<td>
+    <form method="POST" style="display:inline;">
+        <input type="hidden" name="action" value="move_group">
+        <input type="hidden" name="product_id" value="<?php echo $p['id']; ?>">
+        <input type="number" name="target_catalog_id" min="1" style="width:80px;" placeholder="ID" required>
+        <button type="submit">↔</button>
+    </form>
+</td>
+<td><a href="?edit_id=<?php echo $p['id']; ?>">✏️</a></td>
+<td><a href="?delete_id=<?php echo $p['id']; ?>">❌</a></td>
+</tr>
+<?php endforeach; ?>
+</table>
+</details>
+<?php endforeach; ?>
+<?php else: ?>
 <table border="1">
 <tr>
 <th>ID</th>
@@ -197,7 +300,6 @@ require 'includes/header.php';
 <th>✏️</th>
 <th>❌</th>
 </tr>
-
 <?php foreach ($products as $p): ?>
 <tr>
 <td><?php echo $p['id']; ?></td>
@@ -216,6 +318,7 @@ require 'includes/header.php';
 </tr>
 <?php endforeach; ?>
 </table>
+<?php endif; ?>
 </main>
 
 <?php require 'includes/footer.php'; ?>
