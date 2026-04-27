@@ -7,6 +7,7 @@ require 'db.php';
 $db = getDB();
 require_once __DIR__ . '/functions/stock_movements.php';
 require_once __DIR__ . '/functions/app_settings.php';
+require_once __DIR__ . '/api/bitrix/send.php';
 
 $dashboardMessage = '';
 $dashboardError = '';
@@ -70,7 +71,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     throw new Exception('Товар не найден.');
                 }
 
-                // Keep product purchase price in KZT актуальной для последующих операций.
+                // Keep product purchase price in KGS актуальной для последующих операций.
                 if ($purchasePriceKzt > 0) {
                     $updPrice = $db->prepare("UPDATE products SET purchase_price = ?, roll_length = ? WHERE id = ?");
                     $updPrice->execute([$purchasePriceKzt, $rollLength, $productId]);
@@ -97,6 +98,54 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
 
                 setAppSetting($db, 'usd_rate', number_format($usdRate, 4, '.', ''));
+
+                // Ensure product exists in B24 for two-way sync.
+                $productSyncStmt = $db->prepare("
+                    SELECT id, name, b24_product_id, price_per_meter
+                    FROM products
+                    WHERE id = ?
+                    LIMIT 1
+                ");
+                $productSyncStmt->execute([$productId]);
+                $syncProduct = $productSyncStmt->fetch(PDO::FETCH_ASSOC);
+                if ($syncProduct) {
+                    $priceForB24 = floatval($syncProduct['price_per_meter']) > 0
+                        ? floatval($syncProduct['price_per_meter'])
+                        : floatval($purchasePriceKzt);
+
+                    if (intval($syncProduct['b24_product_id']) > 0) {
+                        $updatePayload = [
+                            'id' => intval($syncProduct['b24_product_id']),
+                            'fields' => [
+                                'NAME' => $syncProduct['name']
+                            ]
+                        ];
+                        if ($priceForB24 > 0) {
+                            $updatePayload['fields']['PRICE'] = $priceForB24;
+                        }
+                        sendToBitrix('crm.product.update', $updatePayload);
+                    } else {
+                        $createPayload = [
+                            'fields' => [
+                                'NAME' => $syncProduct['name']
+                            ]
+                        ];
+                        if ($priceForB24 > 0) {
+                            $createPayload['fields']['PRICE'] = $priceForB24;
+                        }
+                        $createResp = sendToBitrix('crm.product.add', $createPayload);
+                        if (is_array($createResp) && !isset($createResp['error']) && isset($createResp['result'])) {
+                            $newB24Id = intval($createResp['result']);
+                            if ($newB24Id > 0) {
+                                $bindStmt = $db->prepare("UPDATE products SET b24_product_id = ? WHERE id = ?");
+                                $bindStmt->execute([$newB24Id, $productId]);
+                            }
+                        } elseif (is_array($createResp) && isset($createResp['error'])) {
+                            $dashboardError = 'Товар оприходован локально, но не создан в Б24: '
+                                . (isset($createResp['error_description']) ? $createResp['error_description'] : $createResp['error']);
+                        }
+                    }
+                }
 
                 $db->commit();
                 $dashboardMessage = 'Оприходование выполнено: добавлено рулонов ' . $quantity . '.';
@@ -210,11 +259,12 @@ require 'includes/header.php';
                         <input class="form-control" type="number" name="usd_rate" id="receipt_usd_rate" value="<?= htmlspecialchars((string)$usdRateValue) ?>" step="0.0001" min="0.0001" required>
                     </div>
                     <div class="form-group">
-                        <label class="form-label">Цена закупки KZT (за рулон)</label>
+                        <label class="form-label">Цена закупки KGS (за рулон)</label>
                         <input class="form-control" type="number" name="purchase_price_kzt" id="receipt_price_kzt" value="0" step="0.01" min="0">
                     </div>
                 </div>
                 <p class="text-muted">Итого метраж к оприходованию: <b id="receipt_total_meters">30</b> м</p>
+                <p class="text-muted">Конвертация: USD -> KGS по фиксированному курсу.</p>
                 <button type="submit" class="btn btn-success">Оприходовать</button>
             </form>
         </div>

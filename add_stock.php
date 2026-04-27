@@ -245,7 +245,7 @@ $stock = $stmt->fetch(PDO::FETCH_ASSOC);
                 </div>
 
                 <div class="form-group">
-                    <label>Цена закупки за рулон (₽):</label>
+                    <label>Цена закупки за рулон (KGS):</label>
                     <input type="number" name="purchase_price" value="<?= $product['purchase_price'] ?>" step="0.01" min="0">
                     <small>Оставьте 0 если не хотите изменять</small>
                 </div>

@@ -8,6 +8,7 @@ return [
 
     // Method-specific incoming webhooks provided by Bitrix24.
     'method_urls' => [
+        'crm.product.add' => 'https://llumar.bitrix24.kz/rest/13/ip8r13jt88ilpbs2/crm.product.add.json',
         'crm.product.update' => 'https://llumar.bitrix24.kz/rest/13/ip8r13jt88ilpbs2/crm.product.update.json',
         'crm.timeline.comment.add' => 'https://llumar.bitrix24.kz/rest/13/gmtqmb1w19gtcs5l/crm.timeline.comment.add.json',
         'crm.deal.get' => 'https://llumar.bitrix24.kz/rest/13/d58tgvvw264z07u5/crm.deal.get.json',

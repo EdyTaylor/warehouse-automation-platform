@@ -230,10 +230,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $rows = $db->query("
             SELECT id, name, b24_product_id, price_per_meter, " . (hasColumn($db, 'products', 'catalog_id') ? "catalog_id" : "NULL as catalog_id") . "
             FROM products
-            WHERE b24_product_id IS NOT NULL AND b24_product_id <> 0
         ")->fetchAll(PDO::FETCH_ASSOC);
 
         $sent = 0;
+        $createdInB24 = 0;
         $errors = 0;
         foreach ($rows as $row) {
             $fields = [
@@ -245,20 +245,42 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (isset($row['catalog_id']) && intval($row['catalog_id']) > 0) {
                 $fields['CATALOG_ID'] = intval($row['catalog_id']);
             }
-
-            $resp = sendToBitrix('crm.product.update', [
-                'id' => intval($row['b24_product_id']),
-                'fields' => $fields
-            ]);
-
-            if (is_array($resp) && !isset($resp['error'])) {
-                $sent++;
+            if (intval($row['b24_product_id']) > 0) {
+                $resp = sendToBitrix('crm.product.update', [
+                    'id' => intval($row['b24_product_id']),
+                    'fields' => $fields
+                ]);
+                if (is_array($resp) && !isset($resp['error'])) {
+                    $sent++;
+                } else {
+                    $errors++;
+                }
             } else {
-                $errors++;
+                $resp = sendToBitrix('crm.product.add', ['fields' => $fields]);
+                if (is_array($resp) && !isset($resp['error']) && isset($resp['result'])) {
+                    $newB24Id = intval($resp['result']);
+                    if ($newB24Id > 0) {
+                        $updLocal = $db->prepare("UPDATE products SET b24_product_id = ? WHERE id = ?");
+                        $updLocal->execute([$newB24Id, intval($row['id'])]);
+                        $createdInB24++;
+                    } else {
+                        $errors++;
+                    }
+                } else {
+                    $errors++;
+                    if (is_array($resp) && isset($resp['error'])) {
+                        $syncMsg = 'Ошибка создания товара в Б24: '
+                            . (isset($resp['error_description']) ? $resp['error_description'] : $resp['error']);
+                    }
+                }
             }
         }
 
-        header("Location: products.php?sync_msg=" . urlencode("В CRM: отправлено {$sent}, ошибок {$errors}"));
+        $resultMsg = "В CRM: обновлено {$sent}, создано {$createdInB24}, ошибок {$errors}";
+        if (!empty($syncMsg)) {
+            $resultMsg .= ". " . $syncMsg;
+        }
+        header("Location: products.php?sync_msg=" . urlencode($resultMsg));
         exit;
     }
 
