@@ -17,6 +17,20 @@ function hasColumn($db, $table, $column) {
     }
 }
 
+function getBrandFromProductName($name) {
+    $name = trim((string)$name);
+    if ($name === '') {
+        return 'Без бренда';
+    }
+    $parts = preg_split('/\s+/', $name);
+    $first = isset($parts[0]) ? trim($parts[0]) : '';
+    $first = preg_replace('/[^a-zA-Zа-яА-Я0-9_-]/u', '', $first);
+    if ($first === '') {
+        return 'Без бренда';
+    }
+    return $first;
+}
+
 function normalizeNumber($value) {
     $value = str_replace(' ', '', $value);
     $value = str_replace(',', '.', $value);
@@ -184,6 +198,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 $hasCatalogId = hasColumn($db, 'products', 'catalog_id');
 $products = $db->query("SELECT * FROM products ORDER BY " . ($hasCatalogId ? "catalog_id ASC, " : "") . "id DESC")->fetchAll(PDO::FETCH_ASSOC);
 $syncMsg = isset($_GET['sync_msg']) ? $_GET['sync_msg'] : '';
+$b24Config = require __DIR__ . '/api/bitrix/config.php';
+$catalogLabels = array();
+if (isset($b24Config['catalog_labels']) && is_array($b24Config['catalog_labels'])) {
+    $catalogLabels = $b24Config['catalog_labels'];
+}
 $page_title = 'Товары';
 require 'includes/header.php';
 ?>
@@ -226,61 +245,80 @@ require 'includes/header.php';
 $groups = array();
 foreach ($products as $p) {
     $cid = isset($p['catalog_id']) ? intval($p['catalog_id']) : 0;
+    $brand = getBrandFromProductName(isset($p['name']) ? $p['name'] : '');
     if (!isset($groups[$cid])) {
         $groups[$cid] = array();
     }
-    $groups[$cid][] = $p;
+    if (!isset($groups[$cid][$brand])) {
+        $groups[$cid][$brand] = array();
+    }
+    $groups[$cid][$brand][] = $p;
 }
 ?>
-<?php foreach ($groups as $catalogId => $groupProducts): ?>
+<?php foreach ($groups as $catalogId => $brands): ?>
 <details open style="margin-bottom:12px;">
-<summary><strong><?php echo $catalogId > 0 ? ("Каталог #".$catalogId) : "Без каталога"; ?></strong> — <?php echo count($groupProducts); ?> тов.</summary>
-<table border="1" style="margin-top:8px;">
-<tr>
-<th>ID</th>
-<th>Название</th>
-<th>Метраж</th>
-<th>Цена/м</th>
-<th>Себестоимость</th>
-<th>С доставкой</th>
-<th>1-4</th>
-<th>5-9</th>
-<th>10-19</th>
-<th>20+</th>
-<th>B24 ID</th>
-<th>Каталог</th>
-<th>Переместить</th>
-<th>✏️</th>
-<th>❌</th>
-</tr>
+<?php
+$catalogCount = 0;
+foreach ($brands as $brandItems) {
+    $catalogCount += count($brandItems);
+}
+$catalogLabel = $catalogId > 0
+    ? (isset($catalogLabels[$catalogId]) ? $catalogLabels[$catalogId] : ("Каталог #".$catalogId))
+    : "Без каталога";
+?>
+<summary><strong><?php echo htmlspecialchars($catalogLabel); ?></strong> — <?php echo $catalogCount; ?> тов.</summary>
 
-<?php foreach ($groupProducts as $p): ?>
-<tr>
-<td><?php echo $p['id']; ?></td>
-<td><?php echo htmlspecialchars($p['name']); ?></td>
-<td><?php echo $p['roll_length']; ?></td>
-<td><?php echo $p['price_per_meter']; ?></td>
-<td><?php echo $p['purchase_price']; ?></td>
-<td><?php echo $p['delivery_price']; ?></td>
-<td><?php echo $p['price_1_4']; ?></td>
-<td><?php echo $p['price_5_9']; ?></td>
-<td><?php echo $p['price_10_19']; ?></td>
-<td><?php echo $p['price_20_plus']; ?></td>
-<td><?php echo isset($p['b24_product_id']) ? $p['b24_product_id'] : ''; ?></td>
-<td><?php echo isset($p['catalog_id']) ? intval($p['catalog_id']) : ''; ?></td>
-<td>
-    <form method="POST" style="display:inline;">
-        <input type="hidden" name="action" value="move_group">
-        <input type="hidden" name="product_id" value="<?php echo $p['id']; ?>">
-        <input type="number" name="target_catalog_id" min="1" style="width:80px;" placeholder="ID" required>
-        <button type="submit">↔</button>
-    </form>
-</td>
-<td><a href="?edit_id=<?php echo $p['id']; ?>">✏️</a></td>
-<td><a href="?delete_id=<?php echo $p['id']; ?>">❌</a></td>
-</tr>
+<?php foreach ($brands as $brand => $brandProducts): ?>
+<details style="margin:10px 0 0 20px;" open>
+    <summary><strong><?php echo htmlspecialchars($brand); ?></strong> — <?php echo count($brandProducts); ?> тов.</summary>
+    <table border="1" style="margin-top:8px;">
+    <tr>
+    <th>ID</th>
+    <th>Название</th>
+    <th>Метраж</th>
+    <th>Цена/м</th>
+    <th>Себестоимость</th>
+    <th>С доставкой</th>
+    <th>1-4</th>
+    <th>5-9</th>
+    <th>10-19</th>
+    <th>20+</th>
+    <th>B24 ID</th>
+    <th>Каталог</th>
+    <th>Переместить</th>
+    <th>✏️</th>
+    <th>❌</th>
+    </tr>
+
+    <?php foreach ($brandProducts as $p): ?>
+    <tr>
+    <td><?php echo $p['id']; ?></td>
+    <td><?php echo htmlspecialchars($p['name']); ?></td>
+    <td><?php echo $p['roll_length']; ?></td>
+    <td><?php echo $p['price_per_meter']; ?></td>
+    <td><?php echo $p['purchase_price']; ?></td>
+    <td><?php echo $p['delivery_price']; ?></td>
+    <td><?php echo $p['price_1_4']; ?></td>
+    <td><?php echo $p['price_5_9']; ?></td>
+    <td><?php echo $p['price_10_19']; ?></td>
+    <td><?php echo $p['price_20_plus']; ?></td>
+    <td><?php echo isset($p['b24_product_id']) ? $p['b24_product_id'] : ''; ?></td>
+    <td><?php echo isset($p['catalog_id']) ? intval($p['catalog_id']) : ''; ?></td>
+    <td>
+        <form method="POST" style="display:inline;">
+            <input type="hidden" name="action" value="move_group">
+            <input type="hidden" name="product_id" value="<?php echo $p['id']; ?>">
+            <input type="number" name="target_catalog_id" min="1" style="width:80px;" placeholder="ID" required>
+            <button type="submit">↔</button>
+        </form>
+    </td>
+    <td><a href="?edit_id=<?php echo $p['id']; ?>">✏️</a></td>
+    <td><a href="?delete_id=<?php echo $p['id']; ?>">❌</a></td>
+    </tr>
+    <?php endforeach; ?>
+    </table>
+</details>
 <?php endforeach; ?>
-</table>
 </details>
 <?php endforeach; ?>
 <?php else: ?>

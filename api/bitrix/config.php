@@ -29,6 +29,10 @@ return [
     // Example: [23] to sync only "Товары" and exclude "Услуги".
     'sync_catalog_ids' => [],
 
+    // Optional local labels for catalog tree rendering in products.php.
+    // Example: 19 => 'Архитектурные', 20 => 'Авто'
+    'catalog_labels' => [],
+
     // Where movement log is sent in Bitrix (usually timeline comment in deal).
     // If deal_id is missing, movement sync will be skipped.
     'movement_timeline_method' => 'crm.timeline.comment.add'
