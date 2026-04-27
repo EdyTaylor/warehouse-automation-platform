@@ -182,9 +182,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 $products = $db->query("SELECT * FROM products ORDER BY id DESC")->fetchAll(PDO::FETCH_ASSOC);
 $syncMsg = isset($_GET['sync_msg']) ? $_GET['sync_msg'] : '';
 
-require 'menu.php';
+$page_title = 'Товары';
+require 'includes/header.php';
 ?>
 
+<main class="container">
 <h2>Товары</h2>
 
 <?php if ($syncMsg): ?>
@@ -261,3 +263,6 @@ require 'menu.php';
 </tr>
 <?php } ?>
 </table>
+</main>
+
+<?php require 'includes/footer.php'; ?>

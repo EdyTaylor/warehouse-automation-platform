@@ -4,17 +4,11 @@ error_reporting(E_ALL);
 
 require 'db.php';
 $db = getDB();
+$page_title = 'Отчет за все время';
+require 'includes/header.php';
 ?>
 
-<!DOCTYPE html>
-<html lang="ru">
-<head>
-<meta charset="UTF-8">
-<title>Отчет за всё время</title>
-</head>
-<body>
-
-<?php require_once 'menu.php'; ?>
+<main class="container">
 
 <?php
 
@@ -57,7 +51,7 @@ $details = $db->query("
 
 <h3>Сводка</h3>
 
-<table border="1">
+<table class="table">
 <tr>
     <th>Товар</th>
     <th>Количество</th>
@@ -85,7 +79,7 @@ $details = $db->query("
 
 <?php } else { ?>
 
-<table border="1">
+<table class="table">
 <tr>
     <th>Дата</th>
     <th>Время</th>
@@ -137,6 +131,6 @@ $details = $db->query("
 </table>
 
 <?php } ?>
+</main>
 
-</body>
-</html>
+<?php require 'includes/footer.php'; ?>

@@ -5,7 +5,8 @@ header('Content-Type: text/html; charset=utf-8');
 
 require 'db.php';
 $db = getDB();
-require 'menu.php';
+$page_title = 'Остатки';
+require 'includes/header.php';
 
 $stock = $db->query("
     SELECT 
@@ -20,6 +21,7 @@ $stock = $db->query("
 ")->fetchAll(PDO::FETCH_ASSOC);
 ?>
 
+<main class="container">
 <h2>📦 Остатки</h2>
 
 <table border="1">
@@ -53,3 +55,6 @@ foreach ($stock as $s) {
     }
 }
 ?>
+</main>
+
+<?php require 'includes/footer.php'; ?>

@@ -5,7 +5,8 @@ header('Content-Type: text/html; charset=utf-8');
 
 require 'db.php';
 $db = getDB();
-require 'menu.php';
+$page_title = 'Продажи';
+require 'includes/header.php';
 
 
 // 🔥 УДАЛЕНИЕ
@@ -226,6 +227,7 @@ $rolls = $db->query("
 ")->fetchAll(PDO::FETCH_ASSOC);
 ?>
 
+<main class="container">
 <h2>Списание</h2>
 
 <form method="POST">
@@ -244,3 +246,6 @@ $rolls = $db->query("
 
     <button type="submit">Списать</button>
 </form>
+</main>
+
+<?php require 'includes/footer.php'; ?>

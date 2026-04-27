@@ -357,6 +357,12 @@ body {
     color: white;
 }
 
+/* Legacy status labels used in stock tables */
+.status-active { color: var(--success-color); font-weight: 600; }
+.status-sold { color: var(--danger-color); font-weight: 600; }
+.status-cut { color: var(--warning-color); font-weight: 600; }
+.status-scrap { color: var(--secondary-color); font-weight: 600; }
+
 /* Алерты */
 .alert {
     padding: 1rem 1.5rem;

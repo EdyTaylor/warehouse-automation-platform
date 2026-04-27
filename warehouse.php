@@ -255,61 +255,19 @@ try {
 }
 
 $products = $db->query("SELECT * FROM products ORDER BY name")->fetchAll(PDO::FETCH_ASSOC);
+ 
+$page_title = 'Склад';
+require 'includes/header.php';
 ?>
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Управление складом</title>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-        body { font-family: Arial, sans-serif; margin: 2rem; background: #f5f5f5; }
-        .container { max-width: 1200px; margin: 0 auto; }
-        .card { background: white; padding: 1.5rem; border-radius: 8px; margin-bottom: 1rem; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        .btn { background: #3498db; color: white; padding: 0.5rem 1rem; text-decoration: none; border-radius: 4px; display: inline-block; margin: 0.25rem; }
-        .btn:hover { background: #2980b9; }
-        .btn-success { background: #27ae60; }
-        .btn-success:hover { background: #229954; }
-        .btn-warning { background: #f39c12; }
-        .btn-warning:hover { background: #e67e22; }
-        .btn-danger { background: #e74c3c; }
-        .btn-danger:hover { background: #c0392b; }
-        .btn-sm { padding: 0.25rem 0.5rem; font-size: 0.875rem; }
-        .form-group { margin-bottom: 1rem; }
-        .form-group label { display: block; margin-bottom: 0.25rem; font-weight: bold; }
-        .form-group input, .form-group select { padding: 0.5rem; border: 1px solid #ddd; border-radius: 4px; width: 100%; max-width: 300px; }
-        table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
-        th, td { padding: 0.75rem; text-align: left; border-bottom: 1px solid #ddd; }
-        th { background: #f8f9fa; }
-        .nav { margin-bottom: 2rem; }
-        .nav a { margin-right: 1rem; }
-        .success { color: green; background: #e8f5e8; padding: 1rem; border-radius: 4px; margin-bottom: 1rem; }
-        .error { color: red; background: #ffeaea; padding: 1rem; border-radius: 4px; margin-bottom: 1rem; }
-        .status-active { color: green; font-weight: bold; }
-        .status-sold { color: red; font-weight: bold; }
-        .status-cut { color: orange; font-weight: bold; }
-        .status-scrap { color: blue; font-weight: bold; }
-        .form-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; }
-    </style>
-</head>
-<body>
-    <div class="container">
+<main class="container">
         <h1>🏭 Управление складом</h1>
-        
-        <div class="nav">
-            <a href="dashboard.php" class="btn">🏠 Главная</a>
-            <a href="warehouse.php" class="btn">🏪 Склад</a>
-            <a href="products.php" class="btn">📦 Товары</a>
-            <a href="sell.php" class="btn">💰 Продажи</a>
-            <a href="b24_sales.php" class="btn">🔄 Б24</a>
-        </div>
 
         <?php if (isset($success_msg)): ?>
-            <div class="success"><?php echo $success_msg; ?></div>
+            <div class="alert alert-success"><?php echo $success_msg; ?></div>
         <?php endif; ?>
 
         <?php if (isset($error_msg)): ?>
-            <div class="error"><?php echo $error_msg; ?></div>
+            <div class="alert alert-danger"><?php echo $error_msg; ?></div>
         <?php endif; ?>
 
         <!-- Добавление рулонов -->
@@ -433,7 +391,7 @@ $products = $db->query("SELECT * FROM products ORDER BY name")->fetchAll(PDO::FE
         <div class="card">
             <h2>📋 Складские остатки</h2>
             <?php if (count($rolls) > 0): ?>
-            <table>
+            <table class="table">
                 <thead>
                     <tr>
                         <th>ID</th>
@@ -510,6 +468,6 @@ $products = $db->query("SELECT * FROM products ORDER BY name")->fetchAll(PDO::FE
             <p><strong>Продано:</strong> <?php echo $stats['sold']; ?></p>
             <p><strong>Всего метров:</strong> <?php echo number_format($stats['total_meters'], 1); ?></p>
         </div>
-    </div>
-</body>
-</html>
+</main>
+
+<?php require 'includes/footer.php'; ?>
