@@ -5,6 +5,7 @@ header('Content-Type: application/json; charset=utf-8');
 
 require '../db.php';
 $db = getDB();
+require_once __DIR__ . '/bitrix/deal.php';
 
 // Получаем данные от Битрикс24
 $input = file_get_contents('php://input');
@@ -75,26 +76,17 @@ function handleNewDeal($db, $data) {
     $products = getDealProducts($db, $dealId);
     
     if (!empty($products)) {
-        // Создаем заказ в системе
-        require_once __DIR__ . '/../api/bitrix/deal.php';
-        
         $dealData = [
             'deal_id' => $dealId,
             'deal_name' => $dealName,
             'responsible' => $responsible,
             'products' => $products
         ];
-        
-        // Имитируем POST запрос для deal.php
-        $_SERVER['REQUEST_METHOD'] = 'POST';
-        $_POST = json_decode(json_encode($dealData), true);
-        
-        // Вызываем обработчик сделки
-        ob_start();
-        include __DIR__ . '/../api/bitrix/deal.php';
-        $response = ob_get_clean();
-        
-        echo json_encode(['status' => 'deal_processed', 'deal_id' => $dealId]);
+        $result = queueDealForWarehouse($db, $dealData);
+        echo json_encode(isset($result['error'])
+            ? ['status' => 'error', 'deal_id' => $dealId, 'error' => $result['error']]
+            : ['status' => 'deal_processed', 'deal_id' => $dealId, 'request_id' => $result['request_id'] ?? null]
+        );
     } else {
         echo json_encode(['status' => 'no_products', 'deal_id' => $dealId]);
     }
@@ -109,19 +101,21 @@ function handleDealUpdate($db, $data) {
         exit;
     }
     
-    // Получаем актуальные товары и обновляем заказ
+    // Получаем актуальные товары и пересобираем заявку для кладовщика
+    $dealData = getDealDetails($dealId);
     $products = getDealProducts($db, $dealId);
     
     if (!empty($products)) {
-        // Обновляем существующий заказ
-        $stmt = $db->prepare("
-            UPDATE b24_sale_requests 
-            SET status = 'new', updated_at = NOW()
-            WHERE b24_deal_id = ?
-        ");
-        $stmt->execute([$dealId]);
-        
-        echo json_encode(['status' => 'deal_updated', 'deal_id' => $dealId]);
+        $result = queueDealForWarehouse($db, [
+            'deal_id' => $dealId,
+            'deal_name' => $dealData['TITLE'] ?? ('Deal #' . $dealId),
+            'responsible' => isset($dealData['ASSIGNED_BY_ID']) ? getUserName($db, $dealData['ASSIGNED_BY_ID']) : '',
+            'products' => $products
+        ]);
+        echo json_encode(isset($result['error'])
+            ? ['status' => 'error', 'deal_id' => $dealId, 'error' => $result['error']]
+            : ['status' => 'deal_updated', 'deal_id' => $dealId, 'request_id' => $result['request_id'] ?? null]
+        );
     } else {
         echo json_encode(['status' => 'no_products', 'deal_id' => $dealId]);
     }
@@ -226,6 +220,14 @@ function getDealProducts($db, $dealId) {
     }
     
     return $products;
+}
+
+function getDealDetails($dealId) {
+    $resp = sendToBitrix('crm.deal.get', ['id' => $dealId]);
+    if (!is_array($resp) || isset($resp['error'])) {
+        return [];
+    }
+    return isset($resp['result']) && is_array($resp['result']) ? $resp['result'] : [];
 }
 
 echo json_encode(['status' => 'processed']);
