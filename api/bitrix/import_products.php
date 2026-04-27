@@ -35,9 +35,19 @@ $currentStart = $start;
 $pages = 0;
 
 while ($pages < $maxPages) {
-    $payload = [
-        'start' => $currentStart
-    ];
+    $payload = ['start' => $currentStart];
+    if (isset($cfg['sync_catalog_ids']) && is_array($cfg['sync_catalog_ids'])) {
+        $allowedCatalogIds = [];
+        foreach ($cfg['sync_catalog_ids'] as $catalogId) {
+            $catalogId = intval($catalogId);
+            if ($catalogId > 0) {
+                $allowedCatalogIds[] = $catalogId;
+            }
+        }
+        if (!empty($allowedCatalogIds)) {
+            $payload['filter'] = ['@CATALOG_ID' => $allowedCatalogIds];
+        }
+    }
     $resp = sendToBitrix($method, $payload);
 
     if (!is_array($resp)) {

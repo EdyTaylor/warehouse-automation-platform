@@ -11,6 +11,20 @@ $cfg = require 'bitrix/config.php';
 
 $action = $_GET['action'] ?? 'to_app'; // to_app | to_b24
 
+function getAllowedCatalogIds($cfg) {
+    if (!isset($cfg['sync_catalog_ids']) || !is_array($cfg['sync_catalog_ids'])) {
+        return [];
+    }
+    $ids = [];
+    foreach ($cfg['sync_catalog_ids'] as $id) {
+        $id = intval($id);
+        if ($id > 0) {
+            $ids[] = $id;
+        }
+    }
+    return $ids;
+}
+
 if ($action === 'to_b24') {
     // Синхронизация цен из приложения в Б24
     $stmt = $db->query("
@@ -60,6 +74,10 @@ if ($action === 'to_b24') {
     $start = intval($_GET['start'] ?? 0);
     
     $payload = ['start' => $start];
+    $allowedCatalogIds = getAllowedCatalogIds($cfg);
+    if (!empty($allowedCatalogIds)) {
+        $payload['filter'] = ['@CATALOG_ID' => $allowedCatalogIds];
+    }
     $resp = sendToBitrix($method, $payload);
     
     if (!is_array($resp) || isset($resp['error'])) {

@@ -22,6 +22,11 @@ return [
     'product_available_field' => 'UF_CRM_STOCK_M',
     'product_update_method' => 'crm.product.update',
     'product_list_method' => 'crm.product.list',
+    
+    // Restrict product sync to specific B24 catalogs.
+    // Keep empty array to sync all catalogs.
+    // Example: [23] to sync only "Товары" and exclude "Услуги".
+    'sync_catalog_ids' => [],
 
     // Where movement log is sent in Bitrix (usually timeline comment in deal).
     // If deal_id is missing, movement sync will be skipped.

@@ -7,6 +7,29 @@ require 'db.php';
 $db = getDB();
 require_once __DIR__ . '/api/bitrix/send.php';
 
+function hasColumn($db, $table, $column) {
+    $stmt = $db->prepare("SHOW COLUMNS FROM `$table` LIKE ?");
+    $stmt->execute([$column]);
+    return (bool)$stmt->fetch(PDO::FETCH_ASSOC);
+}
+
+function getCatalogSyncFilter($cfg) {
+    if (!isset($cfg['sync_catalog_ids'])) {
+        return [];
+    }
+    if (!is_array($cfg['sync_catalog_ids'])) {
+        return [];
+    }
+    $ids = [];
+    foreach ($cfg['sync_catalog_ids'] as $id) {
+        $id = intval($id);
+        if ($id > 0) {
+            $ids[] = $id;
+        }
+    }
+    return $ids;
+}
+
 function normalizeNumber($value) {
     $value = str_replace(' ', '', $value);
     $value = str_replace(',', '.', $value);
@@ -35,16 +58,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = isset($_POST['action']) ? $_POST['action'] : 'save';
 
     if ($action === 'sync_from_crm') {
-        $ins = $db->prepare("
-            INSERT INTO products
-            (name, roll_length, price_per_meter, b24_product_id)
-            VALUES (?, 30, 0, ?)
-        ");
-        $upd = $db->prepare("
-            UPDATE products
-            SET name = ?
-            WHERE b24_product_id = ?
-        ");
+        $cfg = require __DIR__ . '/api/bitrix/config.php';
+        $allowedCatalogIds = getCatalogSyncFilter($cfg);
+        $supportsCatalogId = hasColumn($db, 'products', 'catalog_id');
+
+        if ($supportsCatalogId) {
+            $ins = $db->prepare("
+                INSERT INTO products
+                (name, roll_length, price_per_meter, b24_product_id, catalog_id)
+                VALUES (?, 30, 0, ?, ?)
+            ");
+            $upd = $db->prepare("
+                UPDATE products
+                SET name = ?, catalog_id = ?
+                WHERE b24_product_id = ?
+            ");
+        } else {
+            $ins = $db->prepare("
+                INSERT INTO products
+                (name, roll_length, price_per_meter, b24_product_id)
+                VALUES (?, 30, 0, ?)
+            ");
+            $upd = $db->prepare("
+                UPDATE products
+                SET name = ?
+                WHERE b24_product_id = ?
+            ");
+        }
         $sel = $db->prepare("SELECT id FROM products WHERE b24_product_id = ?");
 
         $created = 0;
@@ -53,7 +93,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $guard = 0;
 
         while ($guard < 50) {
-            $resp = sendToBitrix('crm.product.list', ['start' => $start]);
+            $payload = ['start' => $start];
+            if (!empty($allowedCatalogIds)) {
+                // Exclude "services/app" catalogs by syncing only explicitly allowed catalogs.
+                $payload['filter'] = ['@CATALOG_ID' => $allowedCatalogIds];
+            }
+
+            $resp = sendToBitrix('crm.product.list', $payload);
             if (!is_array($resp) || isset($resp['error'])) {
                 $msg = isset($resp['error_description']) ? $resp['error_description'] : 'Ошибка вызова crm.product.list';
                 header("Location: products.php?sync_msg=" . urlencode("Ошибка CRM: " . $msg));
@@ -64,6 +110,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             foreach ($items as $item) {
                 $b24Id = isset($item['ID']) ? intval($item['ID']) : 0;
                 $name = isset($item['NAME']) ? $item['NAME'] : '';
+                $catalogId = isset($item['CATALOG_ID']) ? intval($item['CATALOG_ID']) : null;
                 if ($b24Id <= 0) {
                     continue;
                 }
@@ -71,10 +118,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $sel->execute([$b24Id]);
                 $exists = $sel->fetch(PDO::FETCH_ASSOC);
                 if ($exists) {
-                    $upd->execute([$name, $b24Id]);
+                    if ($supportsCatalogId) {
+                        $upd->execute([$name, $catalogId, $b24Id]);
+                    } else {
+                        $upd->execute([$name, $b24Id]);
+                    }
                     $updated++;
                 } else {
-                    $ins->execute([$name, $b24Id]);
+                    if ($supportsCatalogId) {
+                        $ins->execute([$name, $b24Id, $catalogId]);
+                    } else {
+                        $ins->execute([$name, $b24Id]);
+                    }
                     $created++;
                 }
             }
@@ -86,7 +141,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $guard++;
         }
 
-        header("Location: products.php?sync_msg=" . urlencode("Из CRM: создано {$created}, обновлено {$updated}"));
+        $filterMsg = !empty($allowedCatalogIds) ? " (каталоги: " . implode(',', $allowedCatalogIds) . ")" : "";
+        header("Location: products.php?sync_msg=" . urlencode("Из CRM: создано {$created}, обновлено {$updated}{$filterMsg}"));
         exit;
     }
 
@@ -179,7 +235,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 // СПИСОК
-$products = $db->query("SELECT * FROM products ORDER BY id DESC")->fetchAll(PDO::FETCH_ASSOC);
+$hasCatalogId = hasColumn($db, 'products', 'catalog_id');
+$products = $db->query("SELECT * FROM products ORDER BY " . ($hasCatalogId ? "catalog_id ASC, " : "") . "id DESC")->fetchAll(PDO::FETCH_ASSOC);
 $syncMsg = isset($_GET['sync_msg']) ? $_GET['sync_msg'] : '';
 
 $page_title = 'Товары';
@@ -240,6 +297,9 @@ require 'includes/header.php';
 <th>10-19</th>
 <th>20+</th>
 <th>B24 ID</th>
+<?php if ($hasCatalogId): ?>
+<th>Каталог B24</th>
+<?php endif; ?>
 <th>✏️</th>
 <th>❌</th>
 </tr>
@@ -257,6 +317,9 @@ require 'includes/header.php';
 <td><?php echo $p['price_10_19']; ?></td>
 <td><?php echo $p['price_20_plus']; ?></td>
 <td><?php echo $p['b24_product_id']; ?></td>
+<?php if ($hasCatalogId): ?>
+<td><?php echo isset($p['catalog_id']) ? $p['catalog_id'] : ''; ?></td>
+<?php endif; ?>
 
 <td><a href="?edit_id=<?php echo $p['id']; ?>">✏️</a></td>
 <td><a href="?delete_id=<?php echo $p['id']; ?>">❌</a></td>
