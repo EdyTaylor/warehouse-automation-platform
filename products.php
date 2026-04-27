@@ -8,9 +8,14 @@ $db = getDB();
 require_once __DIR__ . '/api/bitrix/send.php';
 
 function hasColumn($db, $table, $column) {
-    $stmt = $db->prepare("SHOW COLUMNS FROM `$table` LIKE ?");
-    $stmt->execute([$column]);
-    return (bool)$stmt->fetch(PDO::FETCH_ASSOC);
+    try {
+        $stmt = $db->prepare("SHOW COLUMNS FROM `$table` LIKE ?");
+        $stmt->execute([$column]);
+        return (bool)$stmt->fetch(PDO::FETCH_ASSOC);
+    } catch (Exception $e) {
+        // Hosting environments may restrict metadata queries.
+        return false;
+    }
 }
 
 function getCatalogSyncFilter($cfg) {
@@ -352,14 +357,18 @@ $hasCatalogId = hasColumn($db, 'products', 'catalog_id');
 $products = $db->query("SELECT * FROM products ORDER BY " . ($hasCatalogId ? "catalog_id ASC, " : "") . "id DESC")->fetchAll(PDO::FETCH_ASSOC);
 $catalogNames = [];
 if ($hasCatalogId) {
-    $catalogResp = sendToBitrix('crm.catalog.list', []);
-    if (is_array($catalogResp) && !isset($catalogResp['error']) && isset($catalogResp['result']) && is_array($catalogResp['result'])) {
-        foreach ($catalogResp['result'] as $catalog) {
-            $cid = intval($catalog['ID'] ?? 0);
-            if ($cid > 0) {
-                $catalogNames[$cid] = (string)($catalog['NAME'] ?? ('Каталог #' . $cid));
+    try {
+        $catalogResp = sendToBitrix('crm.catalog.list', []);
+        if (is_array($catalogResp) && !isset($catalogResp['error']) && isset($catalogResp['result']) && is_array($catalogResp['result'])) {
+            foreach ($catalogResp['result'] as $catalog) {
+                $cid = intval($catalog['ID'] ?? 0);
+                if ($cid > 0) {
+                    $catalogNames[$cid] = (string)($catalog['NAME'] ?? ('Каталог #' . $cid));
+                }
             }
         }
+    } catch (Exception $e) {
+        $catalogNames = [];
     }
 }
 $syncMsg = isset($_GET['sync_msg']) ? $_GET['sync_msg'] : '';
