@@ -13,6 +13,18 @@ $error = '';
 
 function h($v) { return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
 
+// If migrations are not applied yet, show readable message instead of HTTP 500.
+try {
+    $db->query("SELECT 1 FROM b24_sale_requests LIMIT 1");
+    $db->query("SELECT 1 FROM b24_sale_lines LIMIT 1");
+    $db->query("SELECT 1 FROM b24_sale_line_cuts LIMIT 1");
+} catch (Exception $e) {
+    echo '<h2>Продажи из Б24 (ручная реализация)</h2>';
+    echo '<p style="color:red;">Страница временно недоступна: не применена миграция <code>migrations/003_b24_sales_manual_queue.sql</code>.</p>';
+    echo '<p>Примени SQL миграцию в базе и обнови страницу.</p>';
+    exit;
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['action'] ?? '';
 
