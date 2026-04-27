@@ -1,83 +1,128 @@
 <?php
-// Версия с совместимым синтаксисом PHP
+// Полная функциональность с безопасным синтаксисом
 ini_set('display_errors', 1);
 error_reporting(E_ALL);
+header('Content-Type: text/html; charset=utf-8');
 
-$db_connected = false;
-$rolls_data = array();
-$products_data = array();
+require 'db.php';
+$db = getDB();
 
-try {
-    require 'db.php';
-    $db = getDB();
-    $db_connected = true;
-    
-    // Простой запрос товаров без LIMIT
-    $stmt = $db->query("SELECT id, name FROM products ORDER BY name");
-    if ($stmt) {
-        $products_data = $stmt->fetchAll(PDO::FETCH_ASSOC);
+// Обработка форм
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (isset($_POST['add_roll'])) {
+        $product_id = intval($_POST['product_id']);
+        $quantity = intval($_POST['quantity']);
+        $min = floatval($_POST['min_full']);
+        
+        $stmt = $db->prepare("SELECT * FROM products WHERE id=?");
+        $stmt->execute(array($product_id));
+        $product = $stmt->fetch();
+        
+        if ($product) {
+            for ($i = 0; $i < $quantity; $i++) {
+                $stmt = $db->prepare("
+                    INSERT INTO rolls 
+                    (product_id, original_length, current_length, min_full_length, status)
+                    VALUES (?, ?, ?, ?, 'active')
+                ");
+                $stmt->execute(array(
+                    $product_id,
+                    $product['roll_length'],
+                    $product['roll_length'],
+                    $min
+                ));
+            }
+            $success_msg = "✅ Добавлено рулонов: $quantity";
+        }
     }
     
-    // Простой запрос рулонов
-    $stmt = $db->query("SELECT id, product_id, current_length, status FROM rolls ORDER BY id DESC");
-    if ($stmt) {
-        $rolls_data = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    if (isset($_POST['delete_roll'])) {
+        $roll_id = intval($_POST['delete_roll']);
+        $stmt = $db->prepare("DELETE FROM rolls WHERE id=?");
+        $stmt->execute(array($roll_id));
+        $success_msg = "🗑️ Рулон удален";
     }
-    
-} catch (Exception $e) {
-    $db_error = $e->getMessage();
 }
+
+// Получаем полные данные
+$rolls = $db->query("
+    SELECT r.*, p.name as product_name, p.roll_length
+    FROM rolls r
+    LEFT JOIN products p ON r.product_id = p.id
+    ORDER BY r.id DESC
+")->fetchAll(PDO::FETCH_ASSOC);
+
+$products = $db->query("SELECT * FROM products ORDER BY name")->fetchAll(PDO::FETCH_ASSOC);
 ?>
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Склад - Совместимая версия</title>
+    <title>Управление складом</title>
     <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         body { font-family: Arial, sans-serif; margin: 2rem; background: #f5f5f5; }
-        .container { max-width: 800px; margin: 0 auto; }
+        .container { max-width: 1200px; margin: 0 auto; }
         .card { background: white; padding: 1.5rem; border-radius: 8px; margin-bottom: 1rem; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
         .btn { background: #3498db; color: white; padding: 0.5rem 1rem; text-decoration: none; border-radius: 4px; display: inline-block; margin: 0.25rem; }
         .btn:hover { background: #2980b9; }
         .btn-success { background: #27ae60; }
+        .btn-success:hover { background: #229954; }
+        .btn-warning { background: #f39c12; }
+        .btn-warning:hover { background: #e67e22; }
         .btn-danger { background: #e74c3c; }
+        .btn-danger:hover { background: #c0392b; }
+        .btn-sm { padding: 0.25rem 0.5rem; font-size: 0.875rem; }
         .form-group { margin-bottom: 1rem; }
         .form-group label { display: block; margin-bottom: 0.25rem; font-weight: bold; }
         .form-group input, .form-group select { padding: 0.5rem; border: 1px solid #ddd; border-radius: 4px; width: 100%; max-width: 300px; }
         table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
         th, td { padding: 0.75rem; text-align: left; border-bottom: 1px solid #ddd; }
         th { background: #f8f9fa; }
-        .error { color: red; background: #ffeaea; padding: 1rem; border-radius: 4px; margin-bottom: 1rem; }
+        .nav { margin-bottom: 2rem; }
+        .nav a { margin-right: 1rem; }
         .success { color: green; background: #e8f5e8; padding: 1rem; border-radius: 4px; margin-bottom: 1rem; }
+        .status-active { color: green; font-weight: bold; }
+        .status-sold { color: red; font-weight: bold; }
+        .status-cut { color: orange; font-weight: bold; }
+        .status-scrap { color: blue; font-weight: bold; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>🏭 Склад пленок</h1>
+        <h1>🏭 Управление складом</h1>
         
-        <?php if (isset($db_error)): ?>
-            <div class="error">
-                <strong>Ошибка базы данных:</strong> <?php echo htmlspecialchars($db_error); ?>
-            </div>
+        <div class="nav">
+            <a href="dashboard.php" class="btn">🏠 Главная</a>
+            <a href="warehouse.php" class="btn">🏪 Склад</a>
+            <a href="products.php" class="btn">📦 Товары</a>
+            <a href="sell.php" class="btn">💰 Продажи</a>
+            <a href="b24_sales.php" class="btn">🔄 Б24</a>
+        </div>
+
+        <?php if (isset($success_msg)): ?>
+            <div class="success"><?php echo $success_msg; ?></div>
         <?php endif; ?>
-        
+
+        <!-- Добавление рулонов -->
         <div class="card">
-            <h2>📦 Добавить рулон</h2>
+            <h2>📦 Добавить рулоны</h2>
             <form method="POST">
+                <input type="hidden" name="add_roll" value="1">
                 <div class="form-group">
                     <label>Товар:</label>
                     <select name="product_id" required>
                         <option value="">Выберите товар</option>
-                        <?php 
-                        if ($db_connected && !empty($products_data)) {
-                            foreach ($products_data as $product) {
-                                echo '<option value="' . $product['id'] . '">' . htmlspecialchars($product['name']) . '</option>';
-                            }
-                        } else {
-                            echo '<option value="">Нет товаров в базе</option>';
-                        }
-                        ?>
+                        <?php foreach ($products as $p): ?>
+                            <option value="<?php echo $p['id']; ?>">
+                                <?php echo htmlspecialchars($p['name']); ?> (<?php echo $p['roll_length']; ?>м)
+                            </option>
+                        <?php endforeach; ?>
                     </select>
+                </div>
+                <div class="form-group">
+                    <label>Мин. остаток (м):</label>
+                    <input type="number" name="min_full" step="0.1" value="0.5" required>
                 </div>
                 <div class="form-group">
                     <label>Количество:</label>
@@ -87,54 +132,86 @@ try {
             </form>
         </div>
 
+        <!-- Складские остатки -->
         <div class="card">
-            <h2>📋 Текущие рулоны</h2>
-            <?php 
-            if ($db_connected && !empty($rolls_data)) {
-                echo '<table>';
-                echo '<thead><tr><th>ID</th><th>Товар ID</th><th>Остаток (м)</th><th>Статус</th></tr></thead>';
-                echo '<tbody>';
-                foreach ($rolls_data as $roll) {
-                    echo '<tr>';
-                    echo '<td>' . $roll['id'] . '</td>';
-                    echo '<td>' . $roll['product_id'] . '</td>';
-                    echo '<td><strong>' . $roll['current_length'] . '</strong></td>';
-                    
-                    $status_colors = array(
-                        'active' => 'green',
-                        'sold' => 'red', 
-                        'cut' => 'orange',
-                        'scrap' => 'blue'
-                    );
-                    $color = isset($status_colors[$roll['status']]) ? $status_colors[$roll['status']] : 'gray';
-                    
-                    echo '<td><span style="color: ' . $color . '; font-weight: bold;">' . strtoupper($roll['status']) . '</span></td>';
-                    echo '</tr>';
-                }
-                echo '</tbody></table>';
-            } else {
-                echo '<p>📦 Нет рулонов на складе</p>';
-            }
-            ?>
-        </div>
-
-        <div class="card">
-            <h2>🔊 Статус системы</h2>
-            <p><strong>PHP:</strong> ✅ Работает</p>
-            <p><strong>Страница:</strong> ✅ Загружена</p>
-            <p><strong>База данных:</strong> <?php echo $db_connected ? '✅ Подключена' : '❌ Ошибка подключения'; ?></p>
-            <?php if ($db_connected): ?>
-                <p><strong>Товаров в БД:</strong> <?php echo count($products_data); ?></p>
-                <p><strong>Рулонов в БД:</strong> <?php echo count($rolls_data); ?></p>
+            <h2>📋 Складские остатки</h2>
+            <?php if (count($rolls) > 0): ?>
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Товар</th>
+                        <th>Длина</th>
+                        <th>Остаток</th>
+                        <th>Цена/м</th>
+                        <th>1-4</th>
+                        <th>5-9</th>
+                        <th>10-19</th>
+                        <th>20+</th>
+                        <th>Статус</th>
+                        <th>Действия</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($rolls as $r): ?>
+                    <tr>
+                        <td><?php echo $r['id']; ?></td>
+                        <td><?php echo htmlspecialchars($r['product_name']); ?></td>
+                        <td><?php echo $r['roll_length']; ?> м</td>
+                        <td><strong><?php echo $r['current_length']; ?> м</strong></td>
+                        <td><?php echo number_format($r['price_per_meter'], 0); ?> ₽</td>
+                        <td><?php echo $r['price_1_4']; ?></td>
+                        <td><?php echo $r['price_5_9']; ?></td>
+                        <td><?php echo $r['price_10_19']; ?></td>
+                        <td><?php echo $r['price_20_plus']; ?></td>
+                        <td>
+                            <?php
+                            $statusClass = 'status-active';
+                            $statusText = $r['status'];
+                            switch ($r['status']) {
+                                case 'active': $statusClass = 'status-active'; $statusText = 'Активный'; break;
+                                case 'sold': $statusClass = 'status-sold'; $statusText = 'Продан'; break;
+                                case 'cut': $statusClass = 'status-cut'; $statusText = 'В резке'; break;
+                                case 'scrap': $statusClass = 'status-scrap'; $statusText = 'Обрезок'; break;
+                                case 'written_off': $statusClass = 'status-sold'; $statusText = 'Списан'; break;
+                                case 'waste': $statusClass = 'status-sold'; $statusText = 'Отход'; break;
+                            }
+                            ?>
+                            <span class="<?php echo $statusClass; ?>"><?php echo $statusText; ?></span>
+                        </td>
+                        <td>
+                            <form method="POST" style="display:inline;">
+                                <input type="hidden" name="delete_roll" value="<?php echo $r['id']; ?>">
+                                <button type="submit" class="btn btn-danger btn-sm" 
+                                        onclick="return confirm('Удалить рулон #<?php echo $r['id']; ?>?')">🗑️</button>
+                            </form>
+                        </td>
+                    </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+            <?php else: ?>
+                <p>📦 Нет рулонов на складе</p>
             <?php endif; ?>
         </div>
 
+        <!-- Статистика -->
         <div class="card">
-            <h2>🔗 Навигация</h2>
-            <a href="index.php" class="btn">🏠 Главная</a>
-            <a href="dashboard.php" class="btn">📊 Панель</a>
-            <a href="products.php" class="btn">📦 Товары</a>
-            <a href="sell.php" class="btn">💰 Продажи</a>
+            <h2>📊 Статистика</h2>
+            <?php
+            $stats = $db->query("
+                SELECT 
+                    COUNT(*) as total,
+                    COUNT(CASE WHEN status = 'active' THEN 1 END) as active,
+                    COUNT(CASE WHEN status = 'sold' THEN 1 END) as sold,
+                    SUM(current_length) as total_meters
+                FROM rolls
+            ")->fetch(PDO::FETCH_ASSOC);
+            ?>
+            <p><strong>Всего рулонов:</strong> <?php echo $stats['total']; ?></p>
+            <p><strong>Активных:</strong> <?php echo $stats['active']; ?></p>
+            <p><strong>Продано:</strong> <?php echo $stats['sold']; ?></p>
+            <p><strong>Всего метров:</strong> <?php echo number_format($stats['total_meters'], 1); ?></p>
         </div>
     </div>
 </body>
