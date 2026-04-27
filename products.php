@@ -5,6 +5,7 @@ header('Content-Type: text/html; charset=utf-8');
 
 require 'db.php';
 $db = getDB();
+require_once __DIR__ . '/api/bitrix/send.php';
 
 function normalizeNumber($value) {
     $value = str_replace(' ', '', $value);
@@ -31,6 +32,96 @@ if (isset($_GET['edit_id'])) {
 
 // СОХРАНЕНИЕ
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $action = isset($_POST['action']) ? $_POST['action'] : 'save';
+
+    if ($action === 'sync_from_crm') {
+        $ins = $db->prepare("
+            INSERT INTO products
+            (name, roll_length, price_per_meter, b24_product_id)
+            VALUES (?, 30, 0, ?)
+        ");
+        $upd = $db->prepare("
+            UPDATE products
+            SET name = ?
+            WHERE b24_product_id = ?
+        ");
+        $sel = $db->prepare("SELECT id FROM products WHERE b24_product_id = ?");
+
+        $created = 0;
+        $updated = 0;
+        $start = 0;
+        $guard = 0;
+
+        while ($guard < 50) {
+            $resp = sendToBitrix('crm.product.list', ['start' => $start]);
+            if (!is_array($resp) || isset($resp['error'])) {
+                $msg = isset($resp['error_description']) ? $resp['error_description'] : 'Ошибка вызова crm.product.list';
+                header("Location: products.php?sync_msg=" . urlencode("Ошибка CRM: " . $msg));
+                exit;
+            }
+
+            $items = isset($resp['result']) && is_array($resp['result']) ? $resp['result'] : [];
+            foreach ($items as $item) {
+                $b24Id = isset($item['ID']) ? intval($item['ID']) : 0;
+                $name = isset($item['NAME']) ? $item['NAME'] : '';
+                if ($b24Id <= 0) {
+                    continue;
+                }
+
+                $sel->execute([$b24Id]);
+                $exists = $sel->fetch(PDO::FETCH_ASSOC);
+                if ($exists) {
+                    $upd->execute([$name, $b24Id]);
+                    $updated++;
+                } else {
+                    $ins->execute([$name, $b24Id]);
+                    $created++;
+                }
+            }
+
+            if (!isset($resp['next'])) {
+                break;
+            }
+            $start = intval($resp['next']);
+            $guard++;
+        }
+
+        header("Location: products.php?sync_msg=" . urlencode("Из CRM: создано {$created}, обновлено {$updated}"));
+        exit;
+    }
+
+    if ($action === 'sync_to_crm') {
+        $rows = $db->query("
+            SELECT id, name, b24_product_id, price_per_meter
+            FROM products
+            WHERE b24_product_id IS NOT NULL AND b24_product_id <> 0
+        ")->fetchAll(PDO::FETCH_ASSOC);
+
+        $sent = 0;
+        $errors = 0;
+        foreach ($rows as $row) {
+            $fields = [
+                'NAME' => $row['name']
+            ];
+            if (floatval($row['price_per_meter']) > 0) {
+                $fields['PRICE'] = floatval($row['price_per_meter']);
+            }
+
+            $resp = sendToBitrix('crm.product.update', [
+                'id' => intval($row['b24_product_id']),
+                'fields' => $fields
+            ]);
+
+            if (is_array($resp) && !isset($resp['error'])) {
+                $sent++;
+            } else {
+                $errors++;
+            }
+        }
+
+        header("Location: products.php?sync_msg=" . urlencode("В CRM: отправлено {$sent}, ошибок {$errors}"));
+        exit;
+    }
 
     if (!empty($_POST['id'])) {
 
@@ -89,13 +180,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 // СПИСОК
 $products = $db->query("SELECT * FROM products ORDER BY id DESC")->fetchAll(PDO::FETCH_ASSOC);
+$syncMsg = isset($_GET['sync_msg']) ? $_GET['sync_msg'] : '';
 
 require 'menu.php';
 ?>
 
 <h2>Товары</h2>
 
+<?php if ($syncMsg): ?>
+    <p style="color:green;"><?php echo htmlspecialchars($syncMsg); ?></p>
+<?php endif; ?>
+
+<form method="POST" style="margin-bottom: 12px;">
+    <input type="hidden" name="action" value="sync_from_crm">
+    <button type="submit">Обновить из CRM</button>
+</form>
+
+<form method="POST" style="margin-bottom: 16px;">
+    <input type="hidden" name="action" value="sync_to_crm">
+    <button type="submit">Отправить в CRM</button>
+</form>
+
 <form method="POST">
+    <input type="hidden" name="action" value="save">
     <input type="hidden" name="id" value="<?php echo isset($editProduct['id']) ? $editProduct['id'] : ''; ?>">
 
     <input name="name" placeholder="Название" value="<?php echo isset($editProduct['name']) ? htmlspecialchars($editProduct['name']) : ''; ?>" required><br><br>
