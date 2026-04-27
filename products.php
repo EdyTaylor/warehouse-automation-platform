@@ -401,12 +401,12 @@ try {
             $catalogNames = [];
         }
     }
-} catch (Throwable $e) {
+} catch (Exception $e) {
     $runtimeError = $e->getMessage();
     $hasCatalogId = false;
     try {
         $products = $db->query("SELECT * FROM products ORDER BY id DESC")->fetchAll(PDO::FETCH_ASSOC);
-    } catch (Throwable $e2) {
+    } catch (Exception $e2) {
         $products = [];
     }
 }
