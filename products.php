@@ -353,22 +353,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 // СПИСОК
-$hasCatalogId = hasColumn($db, 'products', 'catalog_id');
-$products = $db->query("SELECT * FROM products ORDER BY " . ($hasCatalogId ? "catalog_id ASC, " : "") . "id DESC")->fetchAll(PDO::FETCH_ASSOC);
+$hasCatalogId = false;
+$products = [];
 $catalogNames = [];
-if ($hasCatalogId) {
-    try {
-        $catalogResp = sendToBitrix('crm.catalog.list', []);
-        if (is_array($catalogResp) && !isset($catalogResp['error']) && isset($catalogResp['result']) && is_array($catalogResp['result'])) {
-            foreach ($catalogResp['result'] as $catalog) {
-                $cid = intval($catalog['ID'] ?? 0);
-                if ($cid > 0) {
-                    $catalogNames[$cid] = (string)($catalog['NAME'] ?? ('Каталог #' . $cid));
+$runtimeError = '';
+try {
+    $hasCatalogId = hasColumn($db, 'products', 'catalog_id');
+    $products = $db->query("SELECT * FROM products ORDER BY " . ($hasCatalogId ? "catalog_id ASC, " : "") . "id DESC")->fetchAll(PDO::FETCH_ASSOC);
+
+    // Avoid hard dependency on external API during page render.
+    // Load catalog names only on-demand: products.php?load_catalog_names=1
+    $loadCatalogNames = isset($_GET['load_catalog_names']) && $_GET['load_catalog_names'] === '1';
+    if ($hasCatalogId && $loadCatalogNames) {
+        try {
+            $catalogResp = sendToBitrix('crm.catalog.list', []);
+            if (is_array($catalogResp) && !isset($catalogResp['error']) && isset($catalogResp['result']) && is_array($catalogResp['result'])) {
+                foreach ($catalogResp['result'] as $catalog) {
+                    $cid = intval($catalog['ID'] ?? 0);
+                    if ($cid > 0) {
+                        $catalogNames[$cid] = (string)($catalog['NAME'] ?? ('Каталог #' . $cid));
+                    }
                 }
             }
+        } catch (Exception $e) {
+            $catalogNames = [];
         }
-    } catch (Exception $e) {
-        $catalogNames = [];
+    }
+} catch (Throwable $e) {
+    $runtimeError = $e->getMessage();
+    $hasCatalogId = false;
+    try {
+        $products = $db->query("SELECT * FROM products ORDER BY id DESC")->fetchAll(PDO::FETCH_ASSOC);
+    } catch (Throwable $e2) {
+        $products = [];
     }
 }
 $syncMsg = isset($_GET['sync_msg']) ? $_GET['sync_msg'] : '';
@@ -382,6 +399,9 @@ require 'includes/header.php';
 
 <?php if ($syncMsg): ?>
     <p style="color:green;"><?php echo htmlspecialchars($syncMsg); ?></p>
+<?php endif; ?>
+<?php if ($runtimeError): ?>
+    <p style="color:#b45309;">Страница открыта в безопасном режиме. Детали: <?= htmlspecialchars($runtimeError) ?></p>
 <?php endif; ?>
 
 <form method="POST" style="margin-bottom: 12px;">
