@@ -44,13 +44,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-// Получаем полные данные
-$rolls = $db->query("
-    SELECT r.*, p.name as product_name, p.roll_length
-    FROM rolls r
-    LEFT JOIN products p ON r.product_id = p.id
-    ORDER BY r.id DESC
-")->fetchAll(PDO::FETCH_ASSOC);
+// Получаем полные данные с проверкой
+try {
+    $rolls = $db->query("
+        SELECT 
+            r.id,
+            r.product_id,
+            r.original_length,
+            r.current_length,
+            r.min_full_length,
+            r.status,
+            r.price_per_meter,
+            r.price_1_4,
+            r.price_5_9,
+            r.price_10_19,
+            r.price_20_plus,
+            p.name as product_name,
+            p.roll_length as product_roll_length
+        FROM rolls r
+        LEFT JOIN products p ON r.product_id = p.id
+        ORDER BY r.id DESC
+    ")->fetchAll(PDO::FETCH_ASSOC);
+} catch (Exception $e) {
+    // Если JOIN не работает, получаем данные отдельно
+    $rolls = $db->query("SELECT * FROM rolls ORDER BY id DESC")->fetchAll(PDO::FETCH_ASSOC);
+    foreach ($rolls as &$roll) {
+        $roll['product_name'] = 'Товар #' . $roll['product_id'];
+        $roll['product_roll_length'] = $roll['original_length'];
+    }
+}
 
 $products = $db->query("SELECT * FROM products ORDER BY name")->fetchAll(PDO::FETCH_ASSOC);
 ?>
@@ -157,7 +179,7 @@ $products = $db->query("SELECT * FROM products ORDER BY name")->fetchAll(PDO::FE
                     <tr>
                         <td><?php echo $r['id']; ?></td>
                         <td><?php echo htmlspecialchars($r['product_name']); ?></td>
-                        <td><?php echo $r['roll_length']; ?> м</td>
+                        <td><?php echo $r['original_length']; ?> м</td>
                         <td><strong><?php echo $r['current_length']; ?> м</strong></td>
                         <td><?php echo number_format($r['price_per_meter'], 0); ?> ₽</td>
                         <td><?php echo $r['price_1_4']; ?></td>
