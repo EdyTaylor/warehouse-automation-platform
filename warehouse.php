@@ -44,9 +44,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-// Получаем полные данные с проверкой
+// Получаем полные данные с улучшенной обработкой
+$rolls = array();
 try {
-    $rolls = $db->query("
+    // Сначала пробуем получить данные с JOIN
+    $stmt = $db->query("
         SELECT 
             r.id,
             r.product_id,
@@ -64,9 +66,33 @@ try {
         FROM rolls r
         LEFT JOIN products p ON r.product_id = p.id
         ORDER BY r.id DESC
-    ")->fetchAll(PDO::FETCH_ASSOC);
+    ");
+    $rolls = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    // Если JOIN не сработал, пробуем получить названия отдельно
+    if (empty($rolls) || (count($rolls) > 0 && empty($rolls[0]['product_name']))) {
+        $rolls = $db->query("SELECT * FROM rolls ORDER BY id DESC")->fetchAll(PDO::FETCH_ASSOC);
+        
+        // Получаем все товары в массив для быстрого доступа
+        $products_data = array();
+        $products_stmt = $db->query("SELECT id, name, roll_length FROM products");
+        while ($product = $products_stmt->fetch(PDO::FETCH_ASSOC)) {
+            $products_data[$product['id']] = $product;
+        }
+        
+        // Присваиваем названия товарам
+        foreach ($rolls as &$roll) {
+            if (isset($products_data[$roll['product_id']])) {
+                $roll['product_name'] = $products_data[$roll['product_id']]['name'];
+                $roll['product_roll_length'] = $products_data[$roll['product_id']]['roll_length'];
+            } else {
+                $roll['product_name'] = 'Товар #' . $roll['product_id'] . ' (не найден)';
+                $roll['product_roll_length'] = $roll['original_length'];
+            }
+        }
+    }
 } catch (Exception $e) {
-    // Если JOIN не работает, получаем данные отдельно
+    // Полностью отдельный подход если все сломалось
     $rolls = $db->query("SELECT * FROM rolls ORDER BY id DESC")->fetchAll(PDO::FETCH_ASSOC);
     foreach ($rolls as &$roll) {
         $roll['product_name'] = 'Товар #' . $roll['product_id'];
