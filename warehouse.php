@@ -137,7 +137,7 @@ $products = $db->query("SELECT * FROM products ORDER BY name")->fetchAll(PDO::FE
                         <option value="">Выберите товар</option>
                         <?php foreach ($products as $p): ?>
                             <option value="<?php echo $p['id']; ?>">
-                                <?php echo htmlspecialchars($p['name']); ?> (<?php echo $p['roll_length']; ?>м)
+                                <?php echo htmlspecialchars($p['name']); ?> (<?php echo !empty($p['roll_length']) ? $p['roll_length'] : '30'; ?>м)
                             </option>
                         <?php endforeach; ?>
                     </select>
@@ -179,13 +179,13 @@ $products = $db->query("SELECT * FROM products ORDER BY name")->fetchAll(PDO::FE
                     <tr>
                         <td><?php echo $r['id']; ?></td>
                         <td><?php echo htmlspecialchars($r['product_name']); ?></td>
-                        <td><?php echo $r['original_length']; ?> м</td>
-                        <td><strong><?php echo $r['current_length']; ?> м</strong></td>
-                        <td><?php echo number_format($r['price_per_meter'], 0); ?> ₽</td>
-                        <td><?php echo $r['price_1_4']; ?></td>
-                        <td><?php echo $r['price_5_9']; ?></td>
-                        <td><?php echo $r['price_10_19']; ?></td>
-                        <td><?php echo $r['price_20_plus']; ?></td>
+                        <td><?php echo !empty($r['original_length']) ? $r['original_length'] . ' м' : '-'; ?></td>
+                        <td><strong><?php echo !empty($r['current_length']) ? $r['current_length'] . ' м' : '-'; ?></strong></td>
+                        <td><?php echo !empty($r['price_per_meter']) && $r['price_per_meter'] > 0 ? number_format($r['price_per_meter'], 0) . ' ₽' : '-'; ?></td>
+                        <td><?php echo !empty($r['price_1_4']) && $r['price_1_4'] > 0 ? $r['price_1_4'] : '-'; ?></td>
+                        <td><?php echo !empty($r['price_5_9']) && $r['price_5_9'] > 0 ? $r['price_5_9'] : '-'; ?></td>
+                        <td><?php echo !empty($r['price_10_19']) && $r['price_10_19'] > 0 ? $r['price_10_19'] : '-'; ?></td>
+                        <td><?php echo !empty($r['price_20_plus']) && $r['price_20_plus'] > 0 ? $r['price_20_plus'] : '-'; ?></td>
                         <td>
                             <?php
                             $statusClass = 'status-active';
