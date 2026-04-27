@@ -16,7 +16,7 @@ if (!$data) {
 }
 
 // 🔥 ДАННЫЕ ИЗ БИТРИКСА
-$product_id = isset($data['product_id']) ? intval($data['product_id']) : 0;
+$b24_product_id = isset($data['product_id']) ? intval($data['product_id']) : 0;
 $quantity   = isset($data['quantity']) ? floatval($data['quantity']) : 0;
 $price      = isset($data['price']) ? floatval($data['price']) : 0;
 $type       = isset($data['type']) ? $data['type'] : 'sale';
@@ -27,10 +27,22 @@ $deal_url = isset($data['deal_url']) ? $data['deal_url'] : null;
 $responsible = isset($data['responsible']) ? $data['responsible'] : null;
 
 // 🔥 ВАЛИДАЦИЯ
-if (!$product_id || !$quantity) {
+if (!$b24_product_id || !$quantity) {
     echo json_encode(['status' => 'error', 'message' => 'Invalid data']);
     exit;
 }
+
+// 🔥 МАППИНГ ИЗ B24 ID -> ЛОКАЛЬНЫЙ products.id
+$stmt = $db->prepare("SELECT id FROM products WHERE b24_product_id = ?");
+$stmt->execute([$b24_product_id]);
+$product = $stmt->fetch(PDO::FETCH_ASSOC);
+
+if (!$product) {
+    echo json_encode(['status' => 'error', 'message' => 'Product not mapped by b24_product_id']);
+    exit;
+}
+
+$product_id = intval($product['id']);
 
 // 🔥 СЧИТАЕМ СУММУ
 $total = $quantity * $price;

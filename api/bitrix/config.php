@@ -3,7 +3,18 @@
 // Fill these values for your Bitrix24 portal.
 // Keep methods configurable because portals may differ by enabled modules.
 return [
-    'webhook' => 'https://YOUR_DOMAIN.bitrix24.kz/rest/1/XXXXXXXX/',
+    // Fallback base URL (used only if exact method URL is absent in method_urls).
+    'webhook' => 'https://llumar.bitrix24.kz/rest/13/ip8r13jt88ilpbs2/',
+
+    // Method-specific incoming webhooks provided by Bitrix24.
+    'method_urls' => [
+        'crm.product.update' => 'https://llumar.bitrix24.kz/rest/13/ip8r13jt88ilpbs2/crm.product.update.json',
+        'crm.timeline.comment.add' => 'https://llumar.bitrix24.kz/rest/13/gmtqmb1w19gtcs5l/crm.timeline.comment.add.json',
+        'crm.deal.get' => 'https://llumar.bitrix24.kz/rest/13/d58tgvvw264z07u5/crm.deal.get.json',
+        'crm.deal.productrows.get' => 'https://llumar.bitrix24.kz/rest/13/eovptmewpkx5dt7u/crm.deal.productrows.get.json',
+        'crm.deal.productrows.set' => 'https://llumar.bitrix24.kz/rest/13/ev7sa3pxlnh2tn8g/crm.deal.productrows.set.json',
+        'crm.deal.update' => 'https://llumar.bitrix24.kz/rest/13/35eizcjklzg4egue/crm.deal.update.json'
+    ],
 
     // Product available stock field in Bitrix product catalog.
     // Example: UF_CRM_STOCK_M

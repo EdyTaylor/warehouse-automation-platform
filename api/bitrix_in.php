@@ -9,26 +9,35 @@ $db = getDB();
 $data = json_decode(file_get_contents('php://input'), true);
 
 // Данные из Bitrix
-$product_id = $data['product_id'];
-$name = $data['name'];
-$quantity = $data['quantity'];
-$purchase_price = $data['purchase_price'];
-$sale_price = $data['sale_price'];
-$deal_id = $data['deal_id'];
-$deal_name = $data['deal_name'];
-$responsible = $data['responsible'];
+$b24_product_id = isset($data['product_id']) ? intval($data['product_id']) : 0;
+$name = isset($data['name']) ? $data['name'] : 'Без названия';
+$quantity = isset($data['quantity']) ? floatval($data['quantity']) : 0;
+$purchase_price = isset($data['purchase_price']) ? floatval($data['purchase_price']) : 0;
+$sale_price = isset($data['sale_price']) ? floatval($data['sale_price']) : 0;
+$deal_id = isset($data['deal_id']) ? intval($data['deal_id']) : null;
+$deal_name = isset($data['deal_name']) ? $data['deal_name'] : '';
+$responsible = isset($data['responsible']) ? $data['responsible'] : '';
 
-// 1. Проверяем есть ли товар
-$stmt = $db->prepare("SELECT id FROM products WHERE id = ?");
-$stmt->execute([$product_id]);
+if ($b24_product_id <= 0 || $quantity <= 0) {
+    echo json_encode(["status" => "error", "message" => "Invalid payload"]);
+    exit;
+}
 
-if (!$stmt->fetch()) {
+// 1. Ищем товар только по b24_product_id
+$stmt = $db->prepare("SELECT id FROM products WHERE b24_product_id = ?");
+$stmt->execute([$b24_product_id]);
+$product = $stmt->fetch(PDO::FETCH_ASSOC);
+
+if (!$product) {
     // Добавляем товар если нет
     $stmt = $db->prepare("
-        INSERT INTO products (id, name, purchase_price, price_1_4)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO products (name, purchase_price, price_1_4, b24_product_id, roll_length, price_per_meter)
+        VALUES (?, ?, ?, ?, 30, 0)
     ");
-    $stmt->execute([$product_id, $name, $purchase_price, $sale_price]);
+    $stmt->execute([$name, $purchase_price, $sale_price, $b24_product_id]);
+    $product_id = intval($db->lastInsertId());
+} else {
+    $product_id = intval($product['id']);
 }
 
 // 2. Списание со склада (продажа)

@@ -5,9 +5,14 @@ function sendToBitrix($method, $data = []) {
     if ($config === null) {
         $config = require __DIR__ . '/config.php';
     }
-    $webhook = $config['webhook'];
+    $url = null;
 
-    $url = $webhook . $method;
+    if (isset($config['method_urls']) && isset($config['method_urls'][$method])) {
+        $url = $config['method_urls'][$method];
+    } else {
+        $webhook = isset($config['webhook']) ? $config['webhook'] : '';
+        $url = rtrim($webhook, '/') . '/' . $method;
+    }
 
     $options = [
         "http" => [
