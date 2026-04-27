@@ -1,53 +1,211 @@
 <?php
-// Полная функциональность с безопасным синтаксисом
+// Полный оригинальный функционал с новым интерфейсом
 ini_set('display_errors', 1);
 error_reporting(E_ALL);
 header('Content-Type: text/html; charset=utf-8');
 
 require 'db.php';
 $db = getDB();
+require_once __DIR__ . '/functions/stock_movements.php';
 
-// Обработка форм
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    if (isset($_POST['add_roll'])) {
-        $product_id = intval($_POST['product_id']);
-        $quantity = intval($_POST['quantity']);
-        $min = floatval($_POST['min_full']);
-        
-        $stmt = $db->prepare("SELECT * FROM products WHERE id=?");
-        $stmt->execute(array($product_id));
-        $product = $stmt->fetch();
-        
-        if ($product) {
-            for ($i = 0; $i < $quantity; $i++) {
-                $stmt = $db->prepare("
-                    INSERT INTO rolls 
-                    (product_id, original_length, current_length, min_full_length, status)
-                    VALUES (?, ?, ?, ?, 'active')
-                ");
-                $stmt->execute(array(
-                    $product_id,
-                    $product['roll_length'],
-                    $product['roll_length'],
-                    $min
-                ));
-            }
-            $success_msg = "✅ Добавлено рулонов: $quantity";
-        }
+// 🔥 ФУНКЦИЯ ЦЕНЫ
+function getPrice($row, $qty) {
+    if ($qty <= 4 && $row['price_1_4'] > 0) return $row['price_1_4'];
+    if ($qty <= 9 && $row['price_5_9'] > 0) return $row['price_5_9'];
+    if ($qty <= 19 && $row['price_10_19'] > 0) return $row['price_10_19'];
+    if ($row['price_20_plus'] > 0) return $row['price_20_plus'];
+    return 0;
+}
+
+// 🔥 ДОБАВЛЕНИЕ РУЛОНОВ
+if ($_SERVER['REQUEST_METHOD'] === 'POST' 
+    && !isset($_POST['sell_rolls']) 
+    && !isset($_POST['sell_meters']) 
+    && (!isset($_POST['action']) || $_POST['action'] !== 'writeoff')
+) {
+    $product_id = intval($_POST['product_id']);
+    $quantity = intval($_POST['quantity']);
+    $min = floatval($_POST['min_full']);
+
+    $stmt = $db->prepare("SELECT * FROM products WHERE id=?");
+    $stmt->execute(array($product_id));
+    $product = $stmt->fetch();
+
+    for ($i = 0; $i < $quantity; $i++) {
+        $stmt = $db->prepare("
+            INSERT INTO rolls 
+            (product_id, original_length, current_length, min_full_length, status)
+            VALUES (?, ?, ?, ?, 'active')
+        ");
+        $stmt->execute(array(
+            $product_id,
+            $product['roll_length'],
+            $product['roll_length'],
+            $min
+        ));
+
+        logAndSyncMovement($db, array(
+            'product_id' => $product_id,
+            'roll_id' => intval($db->lastInsertId()),
+            'movement_type' => 'receipt',
+            'quantity_m' => floatval($product['roll_length']),
+            'quantity_rolls' => 1,
+            'price_per_unit' => isset($product['purchase_price']) ? floatval($product['purchase_price']) : 0,
+            'total' => isset($product['purchase_price']) ? floatval($product['purchase_price']) : 0,
+            'comment' => 'Оприходование в приложении'
+        ));
     }
-    
-    if (isset($_POST['delete_roll'])) {
-        $roll_id = intval($_POST['delete_roll']);
-        $stmt = $db->prepare("DELETE FROM rolls WHERE id=?");
-        $stmt->execute(array($roll_id));
-        $success_msg = "🗑️ Рулон удален";
+    $success_msg = "✅ Добавлено рулонов: $quantity";
+}
+
+// 🔥 СПИСАНИЕ
+if (isset($_POST['action']) && $_POST['action'] === 'writeoff') {
+    $roll_id = intval($_POST['writeoff_roll_id']);
+    $meters = floatval($_POST['writeoff_meters']);
+
+    $stmt = $db->prepare("SELECT * FROM rolls WHERE id=?");
+    $stmt->execute(array($roll_id));
+    $roll = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    if (!$roll) {
+        $error_msg = "Рулон не найден (ID: $roll_id)";
+    } else {
+        if ($meters > $roll['current_length']) {
+            $error_msg = "Нельзя списать больше чем есть";
+        } else {
+            $new_length = $roll['current_length'] - $meters;
+            if ($new_length <= 0) {
+                $new_status = 'written_off';
+                $new_length = 0;
+            } else {
+                $new_status = 'cut';
+            }
+
+            $stmt = $db->prepare("
+                UPDATE rolls 
+                SET current_length=?, status=? 
+                WHERE id=?
+            ");
+            $stmt->execute(array($new_length, $new_status, $roll_id));
+
+            $stmt = $db->prepare("
+                INSERT INTO sales 
+                (product_id, type, quantity, price_per_unit, total, deal_id, deal_url)
+                VALUES (?, 'writeoff', ?, 0, 0, NULL, NULL)
+            ");
+            $stmt->execute(array($roll['product_id'], $meters));
+
+            logAndSyncMovement($db, array(
+                'product_id' => intval($roll['product_id']),
+                'roll_id' => $roll_id,
+                'movement_type' => 'writeoff',
+                'quantity_m' => $meters,
+                'quantity_rolls' => 0,
+                'price_per_unit' => 0,
+                'total' => 0,
+                'comment' => 'Ручное списание в warehouse.php'
+            ));
+
+            $success_msg = "✅ Списано: $meters м";
+        }
     }
 }
 
-// Получаем полные данные с улучшенной обработкой
+// 🔥 ПРОДАЖА РУЛОНОВ
+if (isset($_POST['sell_rolls'])) {
+    $product_id = intval($_POST['sell_product_id']);
+    $qty = intval($_POST['sell_qty']);
+
+    $stmt = $db->prepare("SELECT * FROM products WHERE id = ?");
+    $stmt->execute(array($product_id));
+    $product = $stmt->fetch();
+
+    $stmt = $db->prepare("
+        SELECT * FROM rolls 
+        WHERE product_id = ? 
+        AND status = 'active'
+        AND current_length = original_length
+        ORDER BY id ASC
+    ");
+    $stmt->execute(array($product_id));
+    $rollsList = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    if (count($rollsList) < $qty) {
+        $error_msg = "Недостаточно целых рулонов";
+    } else {
+        $price = getPrice($product, $qty);
+        $total = $price * $qty;
+
+        for ($i = 0; $i < $qty; $i++) {
+            $stmt = $db->prepare("
+                UPDATE rolls 
+                SET status='sold', current_length=0 
+                WHERE id=?
+            ");
+            $stmt->execute(array($rollsList[$i]['id']));
+        }
+
+        $stmt = $db->prepare("
+            INSERT INTO sales (product_id, type, quantity, price_per_unit, total)
+            VALUES (?, 'roll', ?, ?, ?)
+        ");
+        $stmt->execute(array($product_id, $qty, $price, $total));
+
+        logAndSyncMovement($db, array(
+            'product_id' => $product_id,
+            'movement_type' => 'sale_roll',
+            'quantity_m' => 0,
+            'quantity_rolls' => $qty,
+            'price_per_unit' => $price,
+            'total' => $total,
+            'comment' => 'Продажа рулонов'
+        ));
+
+        $success_msg = "✅ Продано рулонов: $qty | $total";
+    }
+}
+
+// 🔥 ПРОДАЖА МЕТРОВ
+if (isset($_POST['sell_meters'])) {
+    require_once __DIR__ . '/functions/rolls.php';
+
+    $product_id = intval($_POST['meter_product_id']);
+    $meters = floatval($_POST['meters']);
+
+    $stmt = $db->prepare("SELECT * FROM products WHERE id = ?");
+    $stmt->execute(array($product_id));
+    $product = $stmt->fetch();
+
+    try {
+        $cuts = allocateMeters($db, $product_id, $meters);
+        $price = $product['price_per_meter'];
+        $total = $price * $meters;
+
+        $stmt = $db->prepare("
+            INSERT INTO sales (product_id, type, quantity, price_per_unit, total)
+            VALUES (?, 'meter', ?, ?, ?)
+        ");
+        $stmt->execute(array($product_id, $meters, $price, $total));
+
+        logAndSyncMovement($db, array(
+            'product_id' => $product_id,
+            'movement_type' => 'sale_meter',
+            'quantity_m' => $meters,
+            'quantity_rolls' => 0,
+            'price_per_unit' => $price,
+            'total' => $total,
+            'comment' => 'Продажа в метрах'
+        ));
+
+        $success_msg = "✅ Продано $meters м | $total";
+    } catch (Exception $e) {
+        $error_msg = $e->getMessage();
+    }
+}
+
+// Получаем данные с улучшенной обработкой
 $rolls = array();
 try {
-    // Сначала пробуем получить данные с JOIN
     $stmt = $db->query("
         SELECT 
             r.id,
@@ -69,18 +227,15 @@ try {
     ");
     $rolls = $stmt->fetchAll(PDO::FETCH_ASSOC);
     
-    // Если JOIN не сработал, пробуем получить названия отдельно
     if (empty($rolls) || (count($rolls) > 0 && empty($rolls[0]['product_name']))) {
         $rolls = $db->query("SELECT * FROM rolls ORDER BY id DESC")->fetchAll(PDO::FETCH_ASSOC);
         
-        // Получаем все товары в массив для быстрого доступа
         $products_data = array();
         $products_stmt = $db->query("SELECT id, name, roll_length FROM products");
         while ($product = $products_stmt->fetch(PDO::FETCH_ASSOC)) {
             $products_data[$product['id']] = $product;
         }
         
-        // Присваиваем названия товарам
         foreach ($rolls as &$roll) {
             if (isset($products_data[$roll['product_id']])) {
                 $roll['product_name'] = $products_data[$roll['product_id']]['name'];
@@ -92,7 +247,6 @@ try {
         }
     }
 } catch (Exception $e) {
-    // Полностью отдельный подход если все сломалось
     $rolls = $db->query("SELECT * FROM rolls ORDER BY id DESC")->fetchAll(PDO::FETCH_ASSOC);
     foreach ($rolls as &$roll) {
         $roll['product_name'] = 'Товар #' . $roll['product_id'];
@@ -130,10 +284,12 @@ $products = $db->query("SELECT * FROM products ORDER BY name")->fetchAll(PDO::FE
         .nav { margin-bottom: 2rem; }
         .nav a { margin-right: 1rem; }
         .success { color: green; background: #e8f5e8; padding: 1rem; border-radius: 4px; margin-bottom: 1rem; }
+        .error { color: red; background: #ffeaea; padding: 1rem; border-radius: 4px; margin-bottom: 1rem; }
         .status-active { color: green; font-weight: bold; }
         .status-sold { color: red; font-weight: bold; }
         .status-cut { color: orange; font-weight: bold; }
         .status-scrap { color: blue; font-weight: bold; }
+        .form-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; }
     </style>
 </head>
 <body>
@@ -152,31 +308,124 @@ $products = $db->query("SELECT * FROM products ORDER BY name")->fetchAll(PDO::FE
             <div class="success"><?php echo $success_msg; ?></div>
         <?php endif; ?>
 
+        <?php if (isset($error_msg)): ?>
+            <div class="error"><?php echo $error_msg; ?></div>
+        <?php endif; ?>
+
         <!-- Добавление рулонов -->
         <div class="card">
             <h2>📦 Добавить рулоны</h2>
             <form method="POST">
-                <input type="hidden" name="add_roll" value="1">
-                <div class="form-group">
-                    <label>Товар:</label>
-                    <select name="product_id" required>
-                        <option value="">Выберите товар</option>
-                        <?php foreach ($products as $p): ?>
-                            <option value="<?php echo $p['id']; ?>">
-                                <?php echo htmlspecialchars($p['name']); ?> (<?php echo !empty($p['roll_length']) ? $p['roll_length'] : '30'; ?>м)
-                            </option>
-                        <?php endforeach; ?>
-                    </select>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Товар:</label>
+                        <select name="product_id" required>
+                            <option value="">Выберите товар</option>
+                            <?php foreach ($products as $p): ?>
+                                <option value="<?php echo $p['id']; ?>">
+                                    <?php echo htmlspecialchars($p['name']); ?> (<?php echo !empty($p['roll_length']) ? $p['roll_length'] : '30'; ?>м)
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Мин. остаток (м):</label>
+                        <input type="number" name="min_full" step="0.1" value="0.5" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Количество:</label>
+                        <input type="number" name="quantity" min="1" value="1" required>
+                    </div>
+                    <div class="form-group">
+                        <label>&nbsp;</label>
+                        <button type="submit" class="btn btn-success">➕ Добавить</button>
+                    </div>
                 </div>
-                <div class="form-group">
-                    <label>Мин. остаток (м):</label>
-                    <input type="number" name="min_full" step="0.1" value="0.5" required>
+            </form>
+        </div>
+
+        <!-- Продажа рулонов -->
+        <div class="card">
+            <h2>💰 Продажа рулонов</h2>
+            <form method="POST">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Товар:</label>
+                        <select name="sell_product_id" required>
+                            <option value="">Выберите товар</option>
+                            <?php foreach ($products as $p): ?>
+                                <option value="<?php echo $p['id']; ?>">
+                                    <?php echo htmlspecialchars($p['name']); ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Количество рулонов:</label>
+                        <input type="number" name="sell_qty" min="1" value="1" required>
+                    </div>
+                    <div class="form-group">
+                        <label>&nbsp;</label>
+                        <button type="submit" name="sell_rolls" class="btn btn-primary">💵 Продать</button>
+                    </div>
                 </div>
-                <div class="form-group">
-                    <label>Количество:</label>
-                    <input type="number" name="quantity" min="1" value="1" required>
+            </form>
+        </div>
+
+        <!-- Продажа в метрах -->
+        <div class="card">
+            <h2>📏 Продажа в метрах</h2>
+            <form method="POST">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Товар:</label>
+                        <select name="meter_product_id" required>
+                            <option value="">Выберите товар</option>
+                            <?php foreach ($products as $p): ?>
+                                <option value="<?php echo $p['id']; ?>">
+                                    <?php echo htmlspecialchars($p['name']); ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Метров:</label>
+                        <input type="number" name="meters" step="0.1" min="0.1" required>
+                    </div>
+                    <div class="form-group">
+                        <label>&nbsp;</label>
+                        <button type="submit" name="sell_meters" class="btn btn-primary">💵 Продать</button>
+                    </div>
                 </div>
-                <button type="submit" class="btn btn-success">➕ Добавить</button>
+            </form>
+        </div>
+
+        <!-- Списание -->
+        <div class="card">
+            <h2>🗑️ Списание</h2>
+            <form method="POST">
+                <input type="hidden" name="action" value="writeoff">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Рулон:</label>
+                        <select name="writeoff_roll_id" required>
+                            <option value="">Выберите рулон</option>
+                            <?php foreach ($rolls as $r): ?>
+                                <option value="<?php echo $r['id']; ?>">
+                                    #<?php echo $r['id']; ?> | <?php echo htmlspecialchars($r['product_name']); ?> (остаток: <?php echo $r['current_length']; ?>м)
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Метров к списанию:</label>
+                        <input type="number" name="writeoff_meters" step="0.1" min="0.1" required>
+                    </div>
+                    <div class="form-group">
+                        <label>&nbsp;</label>
+                        <button type="submit" class="btn btn-warning">🗑️ Списать</button>
+                    </div>
+                </div>
             </form>
         </div>
 
