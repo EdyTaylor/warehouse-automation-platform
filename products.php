@@ -1,11 +1,6 @@
 <?php
-ini_set('display_errors', 1);
-error_reporting(E_ALL);
-header('Content-Type: text/html; charset=utf-8');
-
-require 'db.php';
-$db = getDB();
-require_once __DIR__ . '/api/bitrix/send.php';
+header('Location: products_new.php');
+exit;
 
 function normalizeNumber($value) {
     $value = str_replace(' ', '', $value);
