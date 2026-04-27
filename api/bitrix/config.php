@@ -14,8 +14,7 @@ return [
         'crm.deal.productrows.get' => 'https://llumar.bitrix24.kz/rest/13/eovptmewpkx5dt7u/crm.deal.productrows.get.json',
         'crm.deal.productrows.set' => 'https://llumar.bitrix24.kz/rest/13/ev7sa3pxlnh2tn8g/crm.deal.productrows.set.json',
         'crm.deal.update' => 'https://llumar.bitrix24.kz/rest/13/35eizcjklzg4egue/crm.deal.update.json',
-        // Add one more when ready:
-        // 'crm.product.list' => 'https://.../crm.product.list.json'
+        'crm.product.list' => 'https://llumar.bitrix24.kz/rest/13/xpkt5d6cug7jxoz1/crm.product.list.json'
     ],
 
     // Product available stock field in Bitrix product catalog.
