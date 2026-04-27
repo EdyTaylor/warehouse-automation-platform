@@ -56,9 +56,9 @@ if (isset($_GET['edit_id'])) {
 // СОХРАНЕНИЕ
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = isset($_POST['action']) ? $_POST['action'] : 'save';
+    $cfg = require __DIR__ . '/api/bitrix/config.php';
 
     if ($action === 'sync_from_crm') {
-        $cfg = require __DIR__ . '/api/bitrix/config.php';
         $allowedCatalogIds = getCatalogSyncFilter($cfg);
         $supportsCatalogId = hasColumn($db, 'products', 'catalog_id');
 
@@ -86,9 +86,45 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             ");
         }
         $sel = $db->prepare("SELECT id FROM products WHERE b24_product_id = ?");
+        $selByExactName = $db->prepare("
+            SELECT id, b24_product_id
+            FROM products
+            WHERE name = ?
+            ORDER BY id ASC
+            LIMIT 1
+        ");
+        $bindB24ToLocal = $db->prepare("
+            UPDATE products
+            SET b24_product_id = ?
+            WHERE id = ?
+        ");
+        $getBoundByName = $db->prepare("
+            SELECT b24_product_id
+            FROM products
+            WHERE name = ?
+              AND b24_product_id IS NOT NULL
+              AND b24_product_id > 0
+            ORDER BY id ASC
+            LIMIT 1
+        ");
+        $recheckBindStmt = $db->prepare("
+            SELECT p.id, p.name
+            FROM products p
+            JOIN (
+                SELECT name
+                FROM products
+                WHERE b24_product_id IS NOT NULL AND b24_product_id > 0
+                GROUP BY name
+                HAVING COUNT(*) = 1
+            ) b ON b.name = p.name
+            WHERE (p.b24_product_id IS NULL OR p.b24_product_id = 0)
+        ");
 
         $created = 0;
         $updated = 0;
+        $boundByName = 0;
+        $boundByRecheck = 0;
+        $nameConflicts = 0;
         $start = 0;
         $guard = 0;
 
@@ -125,12 +161,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     }
                     $updated++;
                 } else {
-                    if ($supportsCatalogId) {
-                        $ins->execute([$name, $b24Id, $catalogId]);
+                    // If local product with the same exact name exists, bind B24 ID to it.
+                    $selByExactName->execute([$name]);
+                    $byName = $selByExactName->fetch(PDO::FETCH_ASSOC);
+
+                    if ($byName && intval($byName['id']) > 0) {
+                        $existingB24 = intval($byName['b24_product_id']);
+                        if ($existingB24 > 0 && $existingB24 !== $b24Id) {
+                            // Name conflict: same local name already bound to another B24 item.
+                            $nameConflicts++;
+                        } else {
+                            $bindB24ToLocal->execute([$b24Id, intval($byName['id'])]);
+                            if ($supportsCatalogId) {
+                                $upd->execute([$name, $catalogId, $b24Id]);
+                            } else {
+                                $upd->execute([$name, $b24Id]);
+                            }
+                            $boundByName++;
+                        }
                     } else {
-                        $ins->execute([$name, $b24Id]);
+                        if ($supportsCatalogId) {
+                            $ins->execute([$name, $b24Id, $catalogId]);
+                        } else {
+                            $ins->execute([$name, $b24Id]);
+                        }
+                        $created++;
                     }
-                    $created++;
                 }
             }
 
@@ -141,14 +197,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $guard++;
         }
 
+        // Recheck pass: bind any remaining local products with exact-name unique match.
+        $recheckBindStmt->execute();
+        $rowsToBind = $recheckBindStmt->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($rowsToBind as $rowToBind) {
+            $getBoundByName->execute([$rowToBind['name']]);
+            $matched = $getBoundByName->fetch(PDO::FETCH_ASSOC);
+            if ($matched && intval($matched['b24_product_id']) > 0) {
+                $bindB24ToLocal->execute([intval($matched['b24_product_id']), intval($rowToBind['id'])]);
+                $boundByRecheck++;
+            }
+        }
+
         $filterMsg = !empty($allowedCatalogIds) ? " (каталоги: " . implode(',', $allowedCatalogIds) . ")" : "";
-        header("Location: products.php?sync_msg=" . urlencode("Из CRM: создано {$created}, обновлено {$updated}{$filterMsg}"));
+        $msg = "Из CRM: создано {$created}, обновлено {$updated}, привязано по имени {$boundByName}";
+        if ($boundByRecheck > 0) {
+            $msg .= ", перепроверка привязала {$boundByRecheck}";
+        }
+        if ($nameConflicts > 0) {
+            $msg .= ", конфликтов имен {$nameConflicts}";
+        }
+        header("Location: products.php?sync_msg=" . urlencode($msg . $filterMsg));
         exit;
     }
 
     if ($action === 'sync_to_crm') {
         $rows = $db->query("
-            SELECT id, name, b24_product_id, price_per_meter
+            SELECT id, name, b24_product_id, price_per_meter, " . (hasColumn($db, 'products', 'catalog_id') ? "catalog_id" : "NULL as catalog_id") . "
             FROM products
             WHERE b24_product_id IS NOT NULL AND b24_product_id <> 0
         ")->fetchAll(PDO::FETCH_ASSOC);
@@ -161,6 +236,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             ];
             if (floatval($row['price_per_meter']) > 0) {
                 $fields['PRICE'] = floatval($row['price_per_meter']);
+            }
+            if (isset($row['catalog_id']) && intval($row['catalog_id']) > 0) {
+                $fields['CATALOG_ID'] = intval($row['catalog_id']);
             }
 
             $resp = sendToBitrix('crm.product.update', [
@@ -176,6 +254,41 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         header("Location: products.php?sync_msg=" . urlencode("В CRM: отправлено {$sent}, ошибок {$errors}"));
+        exit;
+    }
+
+    if ($action === 'move_group') {
+        $productId = intval(isset($_POST['product_id']) ? $_POST['product_id'] : 0);
+        $targetCatalogId = intval(isset($_POST['target_catalog_id']) ? $_POST['target_catalog_id'] : 0);
+        if ($productId <= 0 || $targetCatalogId <= 0) {
+            header("Location: products.php?sync_msg=" . urlencode("Некорректные данные для перемещения"));
+            exit;
+        }
+
+        $hasCatalogId = hasColumn($db, 'products', 'catalog_id');
+        if ($hasCatalogId) {
+            $stmt = $db->prepare("UPDATE products SET catalog_id = ? WHERE id = ?");
+            $stmt->execute([$targetCatalogId, $productId]);
+        }
+
+        $stmt = $db->prepare("SELECT b24_product_id FROM products WHERE id = ?");
+        $stmt->execute([$productId]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        if ($row && intval($row['b24_product_id']) > 0) {
+            $resp = sendToBitrix('crm.product.update', [
+                'id' => intval($row['b24_product_id']),
+                'fields' => [
+                    'CATALOG_ID' => $targetCatalogId
+                ]
+            ]);
+
+            if (is_array($resp) && isset($resp['error'])) {
+                header("Location: products.php?sync_msg=" . urlencode("Локально перемещено, ошибка Б24: " . $resp['error']));
+                exit;
+            }
+        }
+
+        header("Location: products.php?sync_msg=" . urlencode("Товар перемещен в группу #{$targetCatalogId}"));
         exit;
     }
 
@@ -237,6 +350,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 // СПИСОК
 $hasCatalogId = hasColumn($db, 'products', 'catalog_id');
 $products = $db->query("SELECT * FROM products ORDER BY " . ($hasCatalogId ? "catalog_id ASC, " : "") . "id DESC")->fetchAll(PDO::FETCH_ASSOC);
+$catalogNames = [];
+if ($hasCatalogId) {
+    $catalogResp = sendToBitrix('crm.catalog.list', []);
+    if (is_array($catalogResp) && !isset($catalogResp['error']) && isset($catalogResp['result']) && is_array($catalogResp['result'])) {
+        foreach ($catalogResp['result'] as $catalog) {
+            $cid = intval($catalog['ID'] ?? 0);
+            if ($cid > 0) {
+                $catalogNames[$cid] = (string)($catalog['NAME'] ?? ('Каталог #' . $cid));
+            }
+        }
+    }
+}
 $syncMsg = isset($_GET['sync_msg']) ? $_GET['sync_msg'] : '';
 
 $page_title = 'Товары';
@@ -284,6 +409,79 @@ require 'includes/header.php';
 
 <h3>Список</h3>
 
+<?php
+$groups = [];
+if ($hasCatalogId) {
+    foreach ($products as $p) {
+        $cid = isset($p['catalog_id']) ? intval($p['catalog_id']) : 0;
+        $groups[$cid][] = $p;
+    }
+}
+?>
+
+<?php if ($hasCatalogId): ?>
+    <?php foreach ($groups as $catalogId => $groupProducts): ?>
+        <?php
+        $catalogLabel = $catalogId > 0
+            ? (isset($catalogNames[$catalogId]) ? $catalogNames[$catalogId] . " (#{$catalogId})" : "Каталог #{$catalogId}")
+            : 'Без каталога';
+        ?>
+        <details style="margin-bottom: 12px;" open>
+            <summary><b><?= htmlspecialchars($catalogLabel) ?></b> — товаров: <?= count($groupProducts) ?></summary>
+            <table border="1" style="margin-top:8px;">
+                <tr>
+                    <th>ID</th>
+                    <th>Название</th>
+                    <th>Метраж</th>
+                    <th>Цена/м</th>
+                    <th>Себестоимость</th>
+                    <th>С доставкой</th>
+                    <th>1-4</th>
+                    <th>5-9</th>
+                    <th>10-19</th>
+                    <th>20+</th>
+                    <th>B24 ID</th>
+                    <th>Каталог B24</th>
+                    <th>Переместить</th>
+                    <th>✏️</th>
+                    <th>❌</th>
+                </tr>
+                <?php foreach ($groupProducts as $p): ?>
+                <tr>
+                    <td><?php echo $p['id']; ?></td>
+                    <td><?php echo htmlspecialchars($p['name']); ?></td>
+                    <td><?php echo $p['roll_length']; ?></td>
+                    <td><?php echo $p['price_per_meter']; ?></td>
+                    <td><?php echo $p['purchase_price']; ?></td>
+                    <td><?php echo $p['delivery_price']; ?></td>
+                    <td><?php echo $p['price_1_4']; ?></td>
+                    <td><?php echo $p['price_5_9']; ?></td>
+                    <td><?php echo $p['price_10_19']; ?></td>
+                    <td><?php echo $p['price_20_plus']; ?></td>
+                    <td><?php echo $p['b24_product_id']; ?></td>
+                    <td><?php echo isset($p['catalog_id']) ? $p['catalog_id'] : ''; ?></td>
+                    <td>
+                        <form method="POST" style="display:flex; gap:4px;">
+                            <input type="hidden" name="action" value="move_group">
+                            <input type="hidden" name="product_id" value="<?php echo $p['id']; ?>">
+                            <select name="target_catalog_id" required>
+                                <?php foreach ($catalogNames as $cid => $cname): ?>
+                                    <option value="<?= intval($cid) ?>" <?= intval($p['catalog_id']) === intval($cid) ? 'selected' : '' ?>>
+                                        <?= htmlspecialchars($cname) ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
+                            <button type="submit">↔</button>
+                        </form>
+                    </td>
+                    <td><a href="?edit_id=<?php echo $p['id']; ?>">✏️</a></td>
+                    <td><a href="?delete_id=<?php echo $p['id']; ?>">❌</a></td>
+                </tr>
+                <?php endforeach; ?>
+            </table>
+        </details>
+    <?php endforeach; ?>
+<?php else: ?>
 <table border="1">
 <tr>
 <th>ID</th>
@@ -326,6 +524,7 @@ require 'includes/header.php';
 </tr>
 <?php } ?>
 </table>
+<?php endif; ?>
 </main>
 
 <?php require 'includes/footer.php'; ?>

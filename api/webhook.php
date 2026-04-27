@@ -7,6 +7,19 @@ require '../db.php';
 $db = getDB();
 require_once __DIR__ . '/bitrix/deal.php';
 
+function ensureWebhookLockTable($db) {
+    $db->exec("
+        CREATE TABLE IF NOT EXISTS webhook_event_lock (
+            id int NOT NULL AUTO_INCREMENT,
+            event_hash varchar(64) NOT NULL,
+            event_name varchar(120) DEFAULT NULL,
+            created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            UNIQUE KEY uq_webhook_event_hash (event_hash)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ");
+}
+
 // Получаем данные от Битрикс24
 $input = file_get_contents('php://input');
 $data = json_decode($input, true);
@@ -18,6 +31,15 @@ if (!$data) {
 
 $event = $data['event'] ?? '';
 $auth = $data['auth'] ?? [];
+$eventHash = hash('sha256', $event . '|' . json_encode($data['data'] ?? [], JSON_UNESCAPED_UNICODE));
+
+ensureWebhookLockTable($db);
+$lockStmt = $db->prepare("INSERT IGNORE INTO webhook_event_lock (event_hash, event_name) VALUES (?, ?)");
+$lockStmt->execute([$eventHash, $event]);
+if ($lockStmt->rowCount() === 0) {
+    echo json_encode(['status' => 'duplicate_event_ignored', 'event' => $event]);
+    exit;
+}
 
 // Логируем все входящие вебхуки для отладки
 $stmt = $db->prepare("
@@ -139,14 +161,19 @@ function handleNewProduct($db, $data) {
     }
     
     // Добавляем товар в локальную БД
-    $stmt = $db->prepare("
-        INSERT INTO products (name, roll_length, price_per_meter, b24_product_id)
-        VALUES (?, 30, ?, ?)
-        ON DUPLICATE KEY UPDATE 
-            name = VALUES(name),
-            price_per_meter = VALUES(price_per_meter)
-    ");
-    $stmt->execute([$productName, $productPrice, $productId]);
+    $stmt = $db->prepare("SELECT id FROM products WHERE b24_product_id = ? LIMIT 1");
+    $stmt->execute([$productId]);
+    $exists = $stmt->fetch(PDO::FETCH_ASSOC);
+    if ($exists) {
+        $upd = $db->prepare("UPDATE products SET name = ?, price_per_meter = ? WHERE id = ?");
+        $upd->execute([$productName, $productPrice, intval($exists['id'])]);
+    } else {
+        $ins = $db->prepare("
+            INSERT INTO products (name, roll_length, price_per_meter, b24_product_id)
+            VALUES (?, 30, ?, ?)
+        ");
+        $ins->execute([$productName, $productPrice, $productId]);
+    }
     
     echo json_encode(['status' => 'product_added', 'product_id' => $productId]);
 }
@@ -229,6 +256,3 @@ function getDealDetails($dealId) {
     }
     return isset($resp['result']) && is_array($resp['result']) ? $resp['result'] : [];
 }
-
-echo json_encode(['status' => 'processed']);
-?>

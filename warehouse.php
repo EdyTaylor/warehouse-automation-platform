@@ -203,10 +203,32 @@ if (isset($_POST['sell_meters'])) {
     }
 }
 
+// Фильтры списка рулонов
+$filterProductId = intval(isset($_GET['product_id']) ? $_GET['product_id'] : 0);
+$filterStatus = isset($_GET['status']) ? trim($_GET['status']) : '';
+$filterSearch = isset($_GET['q']) ? trim($_GET['q']) : '';
+
 // Получаем данные с улучшенной обработкой
 $rolls = array();
 try {
-    $stmt = $db->query("
+    $where = array();
+    $params = array();
+    if ($filterProductId > 0) {
+        $where[] = "r.product_id = ?";
+        $params[] = $filterProductId;
+    }
+    if ($filterStatus !== '') {
+        $where[] = "r.status = ?";
+        $params[] = $filterStatus;
+    }
+    if ($filterSearch !== '') {
+        $where[] = "(CAST(r.id AS CHAR) LIKE ? OR p.name LIKE ?)";
+        $like = '%' . $filterSearch . '%';
+        $params[] = $like;
+        $params[] = $like;
+    }
+
+    $sql = "
         SELECT 
             r.id,
             r.product_id,
@@ -223,8 +245,13 @@ try {
             p.roll_length as product_roll_length
         FROM rolls r
         LEFT JOIN products p ON r.product_id = p.id
-        ORDER BY r.id DESC
-    ");
+    ";
+    if (!empty($where)) {
+        $sql .= " WHERE " . implode(" AND ", $where);
+    }
+    $sql .= " ORDER BY r.id DESC";
+    $stmt = $db->prepare($sql);
+    $stmt->execute($params);
     $rolls = $stmt->fetchAll(PDO::FETCH_ASSOC);
     
     if (empty($rolls) || (count($rolls) > 0 && empty($rolls[0]['product_name']))) {
@@ -269,6 +296,43 @@ require 'includes/header.php';
         <?php if (isset($error_msg)): ?>
             <div class="alert alert-danger"><?php echo $error_msg; ?></div>
         <?php endif; ?>
+
+        <div class="card">
+            <h2>Фильтры списка</h2>
+            <form method="GET">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Товар</label>
+                        <select name="product_id">
+                            <option value="0">Все товары</option>
+                            <?php foreach ($products as $p): ?>
+                                <option value="<?= intval($p['id']) ?>" <?= $filterProductId === intval($p['id']) ? 'selected' : '' ?>>
+                                    <?= htmlspecialchars($p['name']) ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Статус</label>
+                        <select name="status">
+                            <option value="">Все</option>
+                            <?php foreach (array('active','cut','scrap','sold','written_off','waste') as $st): ?>
+                                <option value="<?= $st ?>" <?= $filterStatus === $st ? 'selected' : '' ?>><?= $st ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Поиск (ID/название)</label>
+                        <input type="text" name="q" value="<?= htmlspecialchars($filterSearch) ?>">
+                    </div>
+                    <div class="form-group">
+                        <label>&nbsp;</label>
+                        <button type="submit" class="btn btn-light">Применить</button>
+                        <a href="warehouse.php" class="btn btn-light">Сброс</a>
+                    </div>
+                </div>
+            </form>
+        </div>
 
         <!-- Добавление рулонов -->
         <div class="card">

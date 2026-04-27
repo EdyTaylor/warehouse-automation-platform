@@ -290,13 +290,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 $requestId = intval(isset($_GET['request_id']) ? $_GET['request_id'] : 0);
-$requests = $db->query("
+$productFilterId = intval(isset($_GET['product_id']) ? $_GET['product_id'] : 0);
+$requestStatusFilter = isset($_GET['status']) ? trim($_GET['status']) : '';
+$requestSearch = isset($_GET['q']) ? trim($_GET['q']) : '';
+$requestWhere = [];
+$requestParams = [];
+if (in_array($requestStatusFilter, ['new', 'in_progress', 'completed', 'cancelled'], true)) {
+    $requestWhere[] = "status = ?";
+    $requestParams[] = $requestStatusFilter;
+}
+if ($requestSearch !== '') {
+    $requestWhere[] = "(deal_name LIKE ? OR responsible LIKE ? OR CAST(b24_deal_id AS CHAR) LIKE ?)";
+    $like = '%' . $requestSearch . '%';
+    $requestParams[] = $like;
+    $requestParams[] = $like;
+    $requestParams[] = $like;
+}
+$requestSql = "
     SELECT *
     FROM b24_sale_requests
-    ORDER BY FIELD(status,'new','in_progress','completed','cancelled'), updated_at DESC
-")->fetchAll(PDO::FETCH_ASSOC);
+";
+if (!empty($requestWhere)) {
+    $requestSql .= " WHERE " . implode(" AND ", $requestWhere);
+}
+$requestSql .= " ORDER BY FIELD(status,'new','in_progress','completed','cancelled'), updated_at DESC";
+$requestsStmt = $db->prepare($requestSql);
+$requestsStmt->execute($requestParams);
+$requests = $requestsStmt->fetchAll(PDO::FETCH_ASSOC);
 
 $lines = [];
+$lineProductOptions = [];
 if ($requestId > 0) {
     $stmt = $db->prepare("
         SELECT l.*,
@@ -307,14 +330,45 @@ if ($requestId > 0) {
     ");
     $stmt->execute([$requestId]);
     $lines = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    foreach ($lines as $line) {
+        $pid = intval($line['product_id']);
+        if ($pid > 0 && !isset($lineProductOptions[$pid])) {
+            $lineProductOptions[$pid] = $line['product_name'];
+        }
+    }
 }
 ?>
 
 <main class="container">
 <h2>Продажи из Б24 (ручная реализация)</h2>
 
-<?php if ($message): ?><p style="color:green;"><?= h($message) ?></p><?php endif; ?>
-<?php if ($error): ?><p style="color:red;"><?= h($error) ?></p><?php endif; ?>
+<?php if ($message): ?><div class="alert alert-success"><?= h($message) ?></div><?php endif; ?>
+<?php if ($error): ?><div class="alert alert-danger"><?= h($error) ?></div><?php endif; ?>
+
+<form method="GET" style="margin: 10px 0;">
+    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end;">
+        <div>
+            <label for="status"><b>Статус заявки</b></label><br>
+            <select id="status" name="status">
+                <option value="">Все</option>
+                <option value="new" <?= $requestStatusFilter === 'new' ? 'selected' : '' ?>>new</option>
+                <option value="in_progress" <?= $requestStatusFilter === 'in_progress' ? 'selected' : '' ?>>in_progress</option>
+                <option value="completed" <?= $requestStatusFilter === 'completed' ? 'selected' : '' ?>>completed</option>
+                <option value="cancelled" <?= $requestStatusFilter === 'cancelled' ? 'selected' : '' ?>>cancelled</option>
+            </select>
+        </div>
+        <div>
+            <label for="q"><b>Поиск</b></label><br>
+            <input id="q" type="text" name="q" value="<?= h($requestSearch) ?>" placeholder="Сделка/ответственный/ID">
+        </div>
+        <div>
+            <button type="submit">Фильтровать</button>
+            <?php if ($requestStatusFilter !== '' || $requestSearch !== ''): ?>
+                <a href="b24_sales.php">Сброс</a>
+            <?php endif; ?>
+        </div>
+    </div>
+</form>
 
 <table border="1" cellpadding="6" cellspacing="0">
     <tr>
@@ -339,7 +393,24 @@ if ($requestId > 0) {
 
 <?php if ($requestId > 0): ?>
     <h3>Строки заявки #<?= $requestId ?></h3>
+    <form method="GET" style="margin: 10px 0;">
+        <input type="hidden" name="request_id" value="<?= $requestId ?>">
+        <label for="product_id"><b>Фильтр по товару:</b></label>
+        <select name="product_id" id="product_id">
+            <option value="0">Все товары из заявки</option>
+            <?php foreach ($lineProductOptions as $pid => $pname): ?>
+                <option value="<?= (int)$pid ?>" <?= $productFilterId === (int)$pid ? 'selected' : '' ?>>
+                    <?= h($pname) ?>
+                </option>
+            <?php endforeach; ?>
+        </select>
+        <button type="submit">Применить</button>
+        <?php if ($productFilterId > 0): ?>
+            <a href="?request_id=<?= $requestId ?>">Сбросить</a>
+        <?php endif; ?>
+    </form>
     <?php foreach ($lines as $line): ?>
+        <?php if ($productFilterId > 0 && intval($line['product_id']) !== $productFilterId) { continue; } ?>
         <?php
         $rollStmt = $db->prepare("
             SELECT *
@@ -366,7 +437,14 @@ if ($requestId > 0) {
         $cuts = $cutsStmt->fetchAll(PDO::FETCH_ASSOC);
         ?>
 
-        <div style="border:1px solid #ccc; padding:10px; margin:10px 0;">
+        <details style="border:1px solid #ccc; padding:10px; margin:10px 0;" <?= $line['status'] !== 'completed' ? 'open' : '' ?>>
+            <summary style="cursor:pointer;">
+                <b><?= h($line['product_name']) ?></b>
+                | Нужно: <?= (float)$line['quantity_m'] ?> м
+                | Зарезервировано: <?= round((float)$line['allocated_m'], 2) ?> м
+                | Статус: <?= h($line['status']) ?>
+            </summary>
+            <div style="margin-top:8px;">
             <b><?= h($line['product_name']) ?></b><br>
             Нужно: <?= (float)$line['quantity_m'] ?> м |
             Зарезервировано: <?= round((float)$line['allocated_m'], 2) ?> м |
@@ -387,6 +465,33 @@ if ($requestId > 0) {
                 <input type="number" name="meters" step="0.1" min="0.1" placeholder="Сколько метров" required>
                 <button type="submit">Добавить кусок</button>
             </form>
+            <div style="margin-top:6px;">
+                Быстро добавить:
+                <form method="POST" style="display:inline;">
+                    <input type="hidden" name="action" value="add_cut">
+                    <input type="hidden" name="line_id" value="<?= (int)$line['id'] ?>">
+                    <input type="hidden" name="meters" value="5">
+                    <select name="roll_id" required>
+                        <option value="">Рулон</option>
+                        <?php foreach ($lineRolls as $roll): ?>
+                            <option value="<?= (int)$roll['id'] ?>">#<?= (int)$roll['id'] ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                    <button type="submit">+5м</button>
+                </form>
+                <form method="POST" style="display:inline;">
+                    <input type="hidden" name="action" value="add_cut">
+                    <input type="hidden" name="line_id" value="<?= (int)$line['id'] ?>">
+                    <input type="hidden" name="meters" value="10">
+                    <select name="roll_id" required>
+                        <option value="">Рулон</option>
+                        <?php foreach ($lineRolls as $roll): ?>
+                            <option value="<?= (int)$roll['id'] ?>">#<?= (int)$roll['id'] ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                    <button type="submit">+10м</button>
+                </form>
+            </div>
 
             <form method="POST" style="margin-top:8px;">
                 <input type="hidden" name="action" value="confirm_line">
@@ -421,7 +526,8 @@ if ($requestId > 0) {
                     <?php endforeach; ?>
                 </table>
             <?php endif; ?>
-        </div>
+            </div>
+        </details>
     <?php endforeach; ?>
 <?php endif; ?>
 </main>
