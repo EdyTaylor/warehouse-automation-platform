@@ -43,16 +43,18 @@ function ensureStockOperationTables($db) {
 }
 
 function ensureProductForReceipt($db, $productId, $productName, $rollLength, $pricePerRoll) {
+    $pricePerMeter = ($pricePerRoll > 0 && $rollLength > 0) ? ($pricePerRoll / $rollLength) : 0;
+
     if ($productId > 0) {
         $stmt = $db->prepare("SELECT * FROM products WHERE id = ? LIMIT 1");
         $stmt->execute(array($productId));
         $p = $stmt->fetch(PDO::FETCH_ASSOC);
         if ($p) {
             if ($pricePerRoll > 0 || $rollLength > 0) {
-                $db->prepare("UPDATE products SET purchase_price = ?, roll_length = ? WHERE id = ?")
-                    ->execute(array($pricePerRoll, $rollLength, $productId));
+                $db->prepare("UPDATE products SET purchase_price = ?, roll_length = ?, price_per_meter = ? WHERE id = ?")
+                    ->execute(array($pricePerRoll, $rollLength, $pricePerMeter, $productId));
             }
-            return ensureProductInBitrix($db, $p, $pricePerRoll);
+            return ensureProductInBitrix($db, $p, $pricePerMeter);
         }
     }
 
@@ -65,23 +67,23 @@ function ensureProductForReceipt($db, $productId, $productName, $rollLength, $pr
     $find->execute(array($name));
     $existing = $find->fetch(PDO::FETCH_ASSOC);
     if ($existing) {
-        $db->prepare("UPDATE products SET purchase_price = ?, roll_length = ? WHERE id = ?")
-            ->execute(array($pricePerRoll, $rollLength, intval($existing['id'])));
-        return ensureProductInBitrix($db, $existing, $pricePerRoll);
+        $db->prepare("UPDATE products SET purchase_price = ?, roll_length = ?, price_per_meter = ? WHERE id = ?")
+            ->execute(array($pricePerRoll, $rollLength, $pricePerMeter, intval($existing['id'])));
+        return ensureProductInBitrix($db, $existing, $pricePerMeter);
     }
 
     $ins = $db->prepare("
         INSERT INTO products (name, roll_length, purchase_price, price_per_meter)
-        VALUES (?, ?, ?, 0)
+        VALUES (?, ?, ?, ?)
     ");
-    $ins->execute(array($name, $rollLength, $pricePerRoll));
+    $ins->execute(array($name, $rollLength, $pricePerRoll, $pricePerMeter));
     $newId = intval($db->lastInsertId());
 
     $created = array('id' => $newId, 'name' => $name, 'b24_product_id' => 0);
-    return ensureProductInBitrix($db, $created, $pricePerRoll);
+    return ensureProductInBitrix($db, $created, $pricePerMeter);
 }
 
-function ensureProductInBitrix($db, $product, $pricePerRoll) {
+function ensureProductInBitrix($db, $product, $pricePerMeter) {
     $productId = intval(isset($product['id']) ? $product['id'] : 0);
     $productName = isset($product['name']) ? (string)$product['name'] : '';
     $b24ProductId = intval(isset($product['b24_product_id']) ? $product['b24_product_id'] : 0);
@@ -95,16 +97,16 @@ function ensureProductInBitrix($db, $product, $pricePerRoll) {
             'id' => $b24ProductId,
             'fields' => array('NAME' => $productName)
         );
-        if ($pricePerRoll > 0) {
-            $payload['fields']['PRICE'] = $pricePerRoll;
+        if ($pricePerMeter > 0) {
+            $payload['fields']['PRICE'] = $pricePerMeter;
         }
         sendToBitrix('crm.product.update', $payload);
         return $product;
     }
 
     $createPayload = array('fields' => array('NAME' => $productName));
-    if ($pricePerRoll > 0) {
-        $createPayload['fields']['PRICE'] = $pricePerRoll;
+    if ($pricePerMeter > 0) {
+        $createPayload['fields']['PRICE'] = $pricePerMeter;
     }
     $resp = sendToBitrix('crm.product.add', $createPayload);
     if (is_array($resp) && !isset($resp['error']) && isset($resp['result'])) {

@@ -10,6 +10,7 @@ return [
     'method_urls' => [
         'crm.product.add' => 'https://llumar.bitrix24.kz/rest/13/ip8r13jt88ilpbs2/crm.product.add.json',
         'crm.product.update' => 'https://llumar.bitrix24.kz/rest/13/ip8r13jt88ilpbs2/crm.product.update.json',
+        'crm.product.get' => 'https://llumar.bitrix24.kz/rest/13/ip8r13jt88ilpbs2/crm.product.get.json',
         'crm.timeline.comment.add' => 'https://llumar.bitrix24.kz/rest/13/gmtqmb1w19gtcs5l/crm.timeline.comment.add.json',
         'crm.deal.get' => 'https://llumar.bitrix24.kz/rest/13/d58tgvvw264z07u5/crm.deal.get.json',
         'crm.deal.productrows.get' => 'https://llumar.bitrix24.kz/rest/13/eovptmewpkx5dt7u/crm.deal.productrows.get.json',

@@ -71,10 +71,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     throw new Exception('Товар не найден.');
                 }
 
-                // Keep product purchase price in KGS актуальной для последующих операций.
+                $pricePerMeter = 0;
+                if ($purchasePriceKzt > 0 && $rollLength > 0) {
+                    $pricePerMeter = $purchasePriceKzt / $rollLength;
+                }
+
+                // Keep product prices актуальными для последующих операций.
                 if ($purchasePriceKzt > 0) {
-                    $updPrice = $db->prepare("UPDATE products SET purchase_price = ?, roll_length = ? WHERE id = ?");
-                    $updPrice->execute([$purchasePriceKzt, $rollLength, $productId]);
+                    $updPrice = $db->prepare("UPDATE products SET purchase_price = ?, roll_length = ?, price_per_meter = ? WHERE id = ?");
+                    $updPrice->execute([$purchasePriceKzt, $rollLength, $pricePerMeter, $productId]);
                 }
 
                 for ($i = 0; $i < $quantity; $i++) {
@@ -111,7 +116,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if ($syncProduct) {
                     $priceForB24 = floatval($syncProduct['price_per_meter']) > 0
                         ? floatval($syncProduct['price_per_meter'])
-                        : floatval($purchasePriceKzt);
+                        : floatval($pricePerMeter);
 
                     if (intval($syncProduct['b24_product_id']) > 0) {
                         $updatePayload = [

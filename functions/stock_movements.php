@@ -35,7 +35,7 @@ function ensureProductSyncedWithBitrix($db, $productId) {
         return 0;
     }
 
-    $stmt = $db->prepare("SELECT id, name, b24_product_id, purchase_price FROM products WHERE id = ? LIMIT 1");
+    $stmt = $db->prepare("SELECT id, name, b24_product_id, purchase_price, price_per_meter, roll_length FROM products WHERE id = ? LIMIT 1");
     $stmt->execute([$productId]);
     $product = $stmt->fetch(PDO::FETCH_ASSOC);
     if (!$product) {
@@ -53,7 +53,15 @@ function ensureProductSyncedWithBitrix($db, $productId) {
     }
 
     $fields = ['NAME' => $name];
-    $price = floatval(isset($product['purchase_price']) ? $product['purchase_price'] : 0);
+    $pricePerMeter = floatval(isset($product['price_per_meter']) ? $product['price_per_meter'] : 0);
+    if ($pricePerMeter <= 0) {
+        $purchasePerRoll = floatval(isset($product['purchase_price']) ? $product['purchase_price'] : 0);
+        $rollLength = floatval(isset($product['roll_length']) ? $product['roll_length'] : 0);
+        if ($purchasePerRoll > 0 && $rollLength > 0) {
+            $pricePerMeter = $purchasePerRoll / $rollLength;
+        }
+    }
+    $price = $pricePerMeter;
     if ($price > 0) {
         $fields['PRICE'] = $price;
     }

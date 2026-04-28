@@ -77,6 +77,27 @@ function hydrateMissingRollProductNamesFromBitrix($db, &$rolls) {
         }
     }
 
+    // Additional local fallback by either local id or b24_product_id.
+    if (count($resolved) < count($missingIds)) {
+        foreach (array_keys($missingIds) as $pid) {
+            if (isset($resolved[$pid])) {
+                continue;
+            }
+            $stmt = $db->prepare("
+                SELECT name
+                FROM products
+                WHERE id = ? OR b24_product_id = ?
+                ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END
+                LIMIT 1
+            ");
+            $stmt->execute(array($pid, $pid, $pid));
+            $row = $stmt->fetch(PDO::FETCH_ASSOC);
+            if ($row && isset($row['name']) && trim((string)$row['name']) !== '') {
+                $resolved[$pid] = trim((string)$row['name']);
+            }
+        }
+    }
+
     if (empty($resolved)) {
         return;
     }
@@ -348,11 +369,7 @@ try {
             r.status,
             r.reserved,
             r.deal_id,
-            r.price_per_meter,
-            r.price_1_4,
-            r.price_5_9,
-            r.price_10_19,
-            r.price_20_plus,
+            COALESCE(p_local.price_per_meter, p_b24.price_per_meter, 0) as price_per_meter,
             COALESCE(
                 NULLIF(TRIM(p_local.name), ''),
                 NULLIF(TRIM(p_b24.name), ''),
@@ -552,10 +569,6 @@ require 'includes/header.php';
                         <th>Длина</th>
                         <th>Остаток</th>
                         <th>Цена/м</th>
-                        <th>1-4</th>
-                        <th>5-9</th>
-                        <th>10-19</th>
-                        <th>20+</th>
                         <th>Статус</th>
                         <th>Пометка</th>
                         <th>Действия</th>
@@ -569,10 +582,6 @@ require 'includes/header.php';
                         <td><?php echo !empty($r['original_length']) ? $r['original_length'] . ' м' : '-'; ?></td>
                         <td><strong><?php echo !empty($r['current_length']) ? $r['current_length'] . ' м' : '-'; ?></strong></td>
                         <td><?php echo !empty($r['price_per_meter']) && $r['price_per_meter'] > 0 ? number_format($r['price_per_meter'], 0) . ' ₽' : '-'; ?></td>
-                        <td><?php echo !empty($r['price_1_4']) && $r['price_1_4'] > 0 ? $r['price_1_4'] : '-'; ?></td>
-                        <td><?php echo !empty($r['price_5_9']) && $r['price_5_9'] > 0 ? $r['price_5_9'] : '-'; ?></td>
-                        <td><?php echo !empty($r['price_10_19']) && $r['price_10_19'] > 0 ? $r['price_10_19'] : '-'; ?></td>
-                        <td><?php echo !empty($r['price_20_plus']) && $r['price_20_plus'] > 0 ? $r['price_20_plus'] : '-'; ?></td>
                         <td>
                             <?php
                             $statusClass = 'status-active';
