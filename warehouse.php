@@ -274,12 +274,14 @@ try {
             r.current_length,
             r.min_full_length,
             r.status,
+            r.reserved,
+            r.deal_id,
             r.price_per_meter,
             r.price_1_4,
             r.price_5_9,
             r.price_10_19,
             r.price_20_plus,
-            p.name as product_name,
+            COALESCE(NULLIF(TRIM(p.name), ''), CONCAT('Архивный товар (ID ', r.product_id, ')')) as product_name,
             p.roll_length as product_roll_length
         FROM rolls r
         LEFT JOIN products p ON r.product_id = p.id
@@ -291,26 +293,6 @@ try {
     $stmt = $db->prepare($sql);
     $stmt->execute($params);
     $rolls = $stmt->fetchAll(PDO::FETCH_ASSOC);
-    
-    if (empty($rolls) || (count($rolls) > 0 && empty($rolls[0]['product_name']))) {
-        $rolls = $db->query("SELECT * FROM rolls ORDER BY id DESC")->fetchAll(PDO::FETCH_ASSOC);
-        
-        $products_data = array();
-        $products_stmt = $db->query("SELECT id, name, roll_length FROM products");
-        while ($product = $products_stmt->fetch(PDO::FETCH_ASSOC)) {
-            $products_data[$product['id']] = $product;
-        }
-        
-        foreach ($rolls as &$roll) {
-            if (isset($products_data[$roll['product_id']])) {
-                $roll['product_name'] = $products_data[$roll['product_id']]['name'];
-                $roll['product_roll_length'] = $products_data[$roll['product_id']]['roll_length'];
-            } else {
-                $roll['product_name'] = 'Архивный товар (ID ' . $roll['product_id'] . ')';
-                $roll['product_roll_length'] = $roll['original_length'];
-            }
-        }
-    }
 } catch (Exception $e) {
     $rolls = $db->query("SELECT * FROM rolls ORDER BY id DESC")->fetchAll(PDO::FETCH_ASSOC);
     foreach ($rolls as &$roll) {
@@ -320,6 +302,18 @@ try {
 }
 
 $products = $db->query("SELECT * FROM products ORDER BY name")->fetchAll(PDO::FETCH_ASSOC);
+$b24Queue = null;
+try {
+    $b24Queue = $db->query("
+        SELECT
+            COUNT(*) as total,
+            SUM(CASE WHEN status IN ('new','in_progress') THEN 1 ELSE 0 END) as reserve_count,
+            SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as paid_count
+        FROM b24_sale_requests
+    ")->fetch(PDO::FETCH_ASSOC);
+} catch (Exception $e) {
+    $b24Queue = null;
+}
  
 $page_title = 'Склад';
 require 'includes/header.php';
@@ -334,6 +328,23 @@ require 'includes/header.php';
         <?php if (isset($error_msg)): ?>
             <div class="alert alert-danger"><?php echo $error_msg; ?></div>
         <?php endif; ?>
+
+        <div class="card">
+            <h2>🔄 Синхронизация с Б24</h2>
+            <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:8px;">
+                <a href="api/bitrix/sync_stock.php?push=1" class="btn btn-warning" target="_blank">📤 Синхронизировать остатки</a>
+                <a href="api/sync_prices.php?action=to_b24" class="btn btn-warning" target="_blank">💰 Синхронизировать цены</a>
+                <a href="api/bitrix/import_products.php" class="btn btn-success" target="_blank">📥 Импортировать товары из Б24</a>
+                <a href="b24_sales.php" class="btn btn-light">📋 Очередь резерва Б24</a>
+            </div>
+            <?php if ($b24Queue): ?>
+                <p class="text-muted" style="margin:0;">
+                    Сделок в очереди: <?= intval($b24Queue['total']) ?> |
+                    <strong>Резерв:</strong> <?= intval($b24Queue['reserve_count']) ?> |
+                    <strong>Оплачено:</strong> <?= intval($b24Queue['paid_count']) ?>
+                </p>
+            <?php endif; ?>
+        </div>
 
         <div class="card">
             <h2>Фильтры списка</h2>
@@ -430,61 +441,8 @@ require 'includes/header.php';
             </form>
         </div>
 
-        <!-- Продажа рулонов -->
-        <div class="card">
-            <h2>💰 Продажа рулонов</h2>
-            <form method="POST">
-                <div class="form-row">
-                    <div class="form-group">
-                        <label>Товар:</label>
-                        <select name="sell_product_id" required>
-                            <option value="">Выберите товар</option>
-                            <?php foreach ($products as $p): ?>
-                                <option value="<?php echo $p['id']; ?>">
-                                    <?php echo htmlspecialchars($p['name']); ?>
-                                </option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label>Количество рулонов:</label>
-                        <input type="number" name="sell_qty" min="1" value="1" required>
-                    </div>
-                    <div class="form-group">
-                        <label>&nbsp;</label>
-                        <button type="submit" name="sell_rolls" class="btn btn-primary">💵 Продать</button>
-                    </div>
-                </div>
-            </form>
-        </div>
-
-        <!-- Продажа в метрах -->
-        <div class="card">
-            <h2>📏 Продажа в метрах</h2>
-            <form method="POST">
-                <div class="form-row">
-                    <div class="form-group">
-                        <label>Товар:</label>
-                        <select name="meter_product_id" required>
-                            <option value="">Выберите товар</option>
-                            <?php foreach ($products as $p): ?>
-                                <option value="<?php echo $p['id']; ?>">
-                                    <?php echo htmlspecialchars($p['name']); ?>
-                                </option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label>Метров:</label>
-                        <input type="number" name="meters" step="0.1" min="0.1" required>
-                    </div>
-                    <div class="form-group">
-                        <label>&nbsp;</label>
-                        <button type="submit" name="sell_meters" class="btn btn-primary">💵 Продать</button>
-                    </div>
-                </div>
-            </form>
-        </div>
+        <!-- Блоки "Продажа рулонов/в метрах" скрыты из UI.
+             Логика на POST сохранена вверху файла для совместимости. -->
 
         <!-- Списание -->
         <div class="card">
@@ -550,6 +508,7 @@ require 'includes/header.php';
                         <th>10-19</th>
                         <th>20+</th>
                         <th>Статус</th>
+                        <th>Пометка</th>
                         <th>Действия</th>
                     </tr>
                 </thead>
@@ -579,6 +538,15 @@ require 'includes/header.php';
                             }
                             ?>
                             <span class="<?php echo $statusClass; ?>"><?php echo $statusText; ?></span>
+                        </td>
+                        <td>
+                            <?php if (isset($r['reserved']) && intval($r['reserved']) === 1): ?>
+                                <span class="status-cut">РЕЗЕРВ</span>
+                            <?php elseif ($r['status'] === 'sold'): ?>
+                                <span class="status-active">ОПЛАЧЕНО</span>
+                            <?php else: ?>
+                                -
+                            <?php endif; ?>
                         </td>
                         <td>
                             <form method="POST" style="display:inline;">

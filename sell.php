@@ -7,245 +7,131 @@ require 'db.php';
 $db = getDB();
 $page_title = 'Продажи';
 require 'includes/header.php';
+$from = isset($_GET['from']) ? trim($_GET['from']) : '';
+$to = isset($_GET['to']) ? trim($_GET['to']) : '';
+$deal = isset($_GET['deal_id']) ? intval($_GET['deal_id']) : 0;
 
+$where = array();
+$params = array();
+$where[] = "s.deal_id IS NOT NULL";
+$where[] = "s.type IN ('meter','roll')";
 
-// 🔥 УДАЛЕНИЕ
-if (isset($_GET['delete_id'])) {
-    $stmt = $db->prepare("DELETE FROM rolls WHERE id = ?");
-    $stmt->execute([intval($_GET['delete_id'])]);
-    header("Location: warehouse.php");
-    exit;
+if ($from !== '') {
+    $where[] = "DATE(s.created_at) >= ?";
+    $params[] = $from;
+}
+if ($to !== '') {
+    $where[] = "DATE(s.created_at) <= ?";
+    $params[] = $to;
+}
+if ($deal > 0) {
+    $where[] = "s.deal_id = ?";
+    $params[] = $deal;
 }
 
-
-// 🔥 ТОВАРЫ
-$products = $db->query("SELECT * FROM products")->fetchAll(PDO::FETCH_ASSOC);
-
-
-// 🔥 ФУНКЦИЯ ЦЕНЫ
-function getPrice($row, $qty) {
-    if ($qty <= 4 && $row['price_1_4'] > 0) return $row['price_1_4'];
-    if ($qty <= 9 && $row['price_5_9'] > 0) return $row['price_5_9'];
-    if ($qty <= 19 && $row['price_10_19'] > 0) return $row['price_10_19'];
-    if ($row['price_20_plus'] > 0) return $row['price_20_plus'];
-    return 0;
+$sql = "
+    SELECT
+        s.*,
+        COALESCE(NULLIF(TRIM(p.name), ''), CONCAT('Товар #', s.product_id)) as product_name
+    FROM sales s
+    LEFT JOIN products p ON p.id = s.product_id
+";
+if (!empty($where)) {
+    $sql .= " WHERE " . implode(" AND ", $where);
 }
+$sql .= " ORDER BY s.created_at DESC, s.id DESC LIMIT 500";
+$stmt = $db->prepare($sql);
+$stmt->execute($params);
+$rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-
-// 🔥 ДОБАВЛЕНИЕ РУЛОНОВ
-if ($_SERVER['REQUEST_METHOD'] === 'POST' 
-    && !isset($_POST['sell_rolls']) 
-    && !isset($_POST['sell_meters']) 
-    && (!isset($_POST['action']) || $_POST['action'] !== 'writeoff')
-) {
-
-    $product_id = intval($_POST['product_id']);
-    $quantity = intval($_POST['quantity']);
-    $min = floatval($_POST['min_full']);
-
-    $stmt = $db->prepare("SELECT * FROM products WHERE id=?");
-    $stmt->execute([$product_id]);
-    $product = $stmt->fetch();
-
-    for ($i = 0; $i < $quantity; $i++) {
-        $stmt = $db->prepare("
-            INSERT INTO rolls 
-            (product_id, original_length, current_length, min_full_length, status)
-            VALUES (?, ?, ?, ?, 'active')
-        ");
-        $stmt->execute([
-            $product_id,
-            $product['roll_length'],
-            $product['roll_length'],
-            $min
-        ]);
-    }
-
-    echo "<p style='color:green;'>Добавлено: $quantity</p>";
-}
-
-
-// 🔥 СПИСАНИЕ
-if (isset($_POST['action']) && $_POST['action'] === 'writeoff') {
-
-    $roll_id = intval($_POST['writeoff_roll_id']);
-    $meters = floatval($_POST['writeoff_meters']);
-
-    $stmt = $db->prepare("SELECT * FROM rolls WHERE id=?");
-    $stmt->execute([$roll_id]);
-    $roll = $stmt->fetch(PDO::FETCH_ASSOC);
-
-    if (!$roll) {
-        echo "<p style='color:red;'>Рулон не найден (ID: $roll_id)</p>";
-    } else {
-
-        if ($meters > $roll['current_length']) {
-            echo "<p style='color:red;'>Нельзя списать больше чем есть</p>";
-        } else {
-
-            $new_length = $roll['current_length'] - $meters;
-
-            if ($new_length <= 0) {
-                $new_status = 'written_off';
-                $new_length = 0;
-            } else {
-                $new_status = 'cut';
-            }
-
-            $stmt = $db->prepare("
-                UPDATE rolls 
-                SET current_length=?, status=? 
-                WHERE id=?
-            ");
-            $stmt->execute([$new_length, $new_status, $roll_id]);
-
-            $stmt = $db->prepare("
-                INSERT INTO sales 
-                (product_id, type, quantity, price_per_unit, total, deal_id, deal_url)
-                VALUES (?, 'writeoff', ?, 0, 0, NULL, NULL)
-            ");
-            $stmt->execute([$roll['product_id'], $meters]);
-
-            echo "<p style='color:orange;'>Списано: $meters м</p>";
-        }
-    }
-}
-
-
-// 🔥 ПРОДАЖА РУЛОНОВ
-if (isset($_POST['sell_rolls'])) {
-
-    $product_id = intval($_POST['sell_product_id']);
-    $qty = intval($_POST['sell_qty']);
-
-    $stmt = $db->prepare("SELECT * FROM products WHERE id = ?");
-    $stmt->execute([$product_id]);
-    $product = $stmt->fetch();
-
-    $stmt = $db->prepare("
-        SELECT * FROM rolls 
-        WHERE product_id = ? 
-        AND status = 'active'
-        AND current_length = original_length
-        ORDER BY id ASC
-    ");
-    $stmt->execute([$product_id]);
-    $rollsList = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-    if (count($rollsList) < $qty) {
-        echo "<p style='color:red;'>Недостаточно целых рулонов</p>";
-    } else {
-
-        $price = getPrice($product, $qty);
-        $total = $price * $qty;
-
-        for ($i = 0; $i < $qty; $i++) {
-            $db->prepare("
-                UPDATE rolls 
-                SET status='sold', current_length=0 
-                WHERE id=?
-            ")->execute([$rollsList[$i]['id']]);
-        }
-
-        $db->prepare("
-            INSERT INTO sales (product_id, type, quantity, price_per_unit, total)
-            VALUES (?, 'roll', ?, ?, ?)
-        ")->execute([$product_id, $qty, $price, $total]);
-
-        echo "<p style='color:green;'>Продано рулонов: $qty | $total</p>";
-    }
-}
-
-
-// 🔥 ПРОДАЖА МЕТРОВ
-if (isset($_POST['sell_meters'])) {
-
-    $product_id = intval($_POST['meter_product_id']);
-    $meters = floatval($_POST['meters']);
-
-    $stmt = $db->prepare("SELECT * FROM products WHERE id = ?");
-    $stmt->execute([$product_id]);
-    $product = $stmt->fetch();
-
-    $stmt = $db->prepare("
-        SELECT * FROM rolls 
-        WHERE product_id = ? 
-        AND status != 'sold'
-        AND current_length > 0
-        ORDER BY 
-            CASE WHEN status='cut' THEN 0 ELSE 1 END,
-            current_length ASC
-    ");
-    $stmt->execute([$product_id]);
-    $rolls = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-    $remaining = $meters;
-
-    foreach ($rolls as $roll) {
-
-        if ($remaining <= 0) break;
-
-        $take = min($roll['current_length'], $remaining);
-        $new_length = $roll['current_length'] - $take;
-
-        $status = ($new_length <= 0) ? 'sold' : 'cut';
-
-        $db->prepare("
-            UPDATE rolls SET current_length=?, status=?
-            WHERE id=?
-        ")->execute([$new_length, $status, $roll['id']]);
-
-        $remaining -= $take;
-    }
-
-    if ($remaining > 0) {
-        echo "<p style='color:red;'>Не хватает метров</p>";
-    } else {
-
-        $price = $product['price_per_meter'];
-        $total = $price * $meters;
-
-        $db->prepare("
-            INSERT INTO sales (product_id, type, quantity, price_per_unit, total)
-            VALUES (?, 'meter', ?, ?, ?)
-        ")->execute([$product_id, $meters, $price, $total]);
-
-        echo "<p style='color:green;'>Продано $meters м | $total</p>";
-    }
-}
-
-
-// 🔥 СКЛАД (ФИКС С roll_id)
-$rolls = $db->query("
-    SELECT 
-        rolls.id as roll_id,
-        rolls.*,
-        products.name
-    FROM rolls
-    LEFT JOIN products ON rolls.product_id = products.id
-    ORDER BY rolls.id DESC
-")->fetchAll(PDO::FETCH_ASSOC);
+$totalsSql = "
+    SELECT
+        COUNT(*) as cnt,
+        COALESCE(SUM(s.total), 0) as total_sum
+    FROM sales s
+    WHERE s.deal_id IS NOT NULL
+      AND s.type IN ('meter','roll')
+";
+$totalsStmt = $db->query($totalsSql);
+$totals = $totalsStmt->fetch(PDO::FETCH_ASSOC);
 ?>
 
 <main class="container">
-<h2>Списание</h2>
+    <h2>💰 Продажи из Б24</h2>
+    <p class="text-muted">
+        Здесь только продажи, пришедшие по сделкам Б24. Ручной резерв и подтверждение — во вкладке <a href="b24_sales.php">Б24</a>.
+    </p>
 
-<form method="POST">
-    <input type="hidden" name="action" value="writeoff">
+    <div class="card">
+        <h3>Фильтры</h3>
+        <form method="GET">
+            <div class="form-row">
+                <div class="form-group">
+                    <label>С даты</label>
+                    <input type="date" name="from" value="<?php echo htmlspecialchars($from); ?>">
+                </div>
+                <div class="form-group">
+                    <label>По дату</label>
+                    <input type="date" name="to" value="<?php echo htmlspecialchars($to); ?>">
+                </div>
+                <div class="form-group">
+                    <label>ID сделки Б24</label>
+                    <input type="number" name="deal_id" min="1" value="<?php echo $deal > 0 ? intval($deal) : ''; ?>">
+                </div>
+                <div class="form-group">
+                    <label>&nbsp;</label>
+                    <button type="submit" class="btn btn-primary">Применить</button>
+                    <a href="sell.php" class="btn btn-light">Сброс</a>
+                </div>
+            </div>
+        </form>
+    </div>
 
-    <select name="writeoff_roll_id" required>
-        <option value="">Выбери рулон</option>
-        <?php foreach ($rolls as $r): ?>
-            <option value="<?= $r['roll_id'] ?>">
-                #<?= $r['roll_id'] ?> | <?= $r['name'] ?> (<?= $r['current_length'] ?>м)
-            </option>
-        <?php endforeach; ?>
-    </select>
+    <div class="card">
+        <h3>Итоги</h3>
+        <p><strong>Всего продаж из Б24:</strong> <?php echo isset($totals['cnt']) ? intval($totals['cnt']) : 0; ?></p>
+        <p><strong>Сумма:</strong> <?php echo isset($totals['total_sum']) ? number_format(floatval($totals['total_sum']), 2, '.', ' ') : '0.00'; ?></p>
+    </div>
 
-    <input name="writeoff_meters" type="number" step="0.1" required>
-
-    <button type="submit">Списать</button>
-</form>
+    <div class="card">
+        <h3>Операции</h3>
+        <?php if (empty($rows)): ?>
+            <p>Продаж из Б24 пока нет.</p>
+        <?php else: ?>
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Дата</th>
+                        <th>Сделка</th>
+                        <th>Товар</th>
+                        <th>Тип</th>
+                        <th>Количество</th>
+                        <th>Цена</th>
+                        <th>Сумма</th>
+                    </tr>
+                </thead>
+                <tbody>
+                <?php foreach ($rows as $row): ?>
+                    <tr>
+                        <td><?php echo !empty($row['created_at']) ? htmlspecialchars($row['created_at']) : '-'; ?></td>
+                        <td>
+                            <?php if (!empty($row['deal_id'])): ?>
+                                #<?php echo intval($row['deal_id']); ?>
+                            <?php else: ?>
+                                -
+                            <?php endif; ?>
+                        </td>
+                        <td><?php echo htmlspecialchars($row['product_name']); ?></td>
+                        <td><?php echo htmlspecialchars($row['type']); ?></td>
+                        <td><?php echo floatval($row['quantity']); ?></td>
+                        <td><?php echo number_format(floatval($row['price_per_unit']), 2, '.', ' '); ?></td>
+                        <td><?php echo number_format(floatval($row['total']), 2, '.', ' '); ?></td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table>
+        <?php endif; ?>
+    </div>
 </main>
 
 <?php require 'includes/footer.php'; ?>
