@@ -2,6 +2,7 @@
 ini_set('display_errors', 1);
 error_reporting(E_ALL);
 header('Content-Type: application/json; charset=utf-8');
+@set_time_limit(30);
 
 require __DIR__ . '/../../db.php';
 require __DIR__ . '/send.php';
@@ -13,6 +14,7 @@ $cfg = require __DIR__ . '/config.php';
 $field = isset($_GET['field']) ? $_GET['field'] : $cfg['product_available_field'];
 $method = isset($_GET['method']) ? $_GET['method'] : $cfg['product_update_method'];
 $push = isset($_GET['push']) ? intval($_GET['push']) : 1;
+$maxSeconds = isset($_GET['max_seconds']) ? max(5, intval($_GET['max_seconds'])) : 20;
 
 $rows = $db->query("
     SELECT
@@ -32,10 +34,18 @@ $result = [
     'push' => $push ? true : false,
     'field' => $field,
     'method' => $method,
-    'items' => []
+    'items' => [],
+    'partial' => false,
+    'processed' => 0
 ];
 
+$startedAt = microtime(true);
 foreach ($rows as $r) {
+    if ((microtime(true) - $startedAt) >= $maxSeconds) {
+        $result['partial'] = true;
+        break;
+    }
+
     $free = round(floatval($r['free_meters']), 2);
 
     $item = [
@@ -57,10 +67,14 @@ foreach ($rows as $r) {
         ];
 
         $resp = sendToBitrix($method, $payload);
-        $item['bitrix'] = $resp;
+        $item['bitrix_status'] = (is_array($resp) && !isset($resp['error'])) ? 'ok' : 'error';
+        if (is_array($resp) && isset($resp['error'])) {
+            $item['bitrix_error'] = isset($resp['error_description']) ? $resp['error_description'] : $resp['error'];
+        }
     }
 
     $result['items'][] = $item;
+    $result['processed']++;
 }
 
 echo json_encode($result, JSON_UNESCAPED_UNICODE);

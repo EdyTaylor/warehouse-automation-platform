@@ -39,15 +39,24 @@ function hydrateMissingRollProductNamesFromBitrix($db, &$rolls) {
 
     $resolved = array();
     foreach (array_keys($missingIds) as $b24Id) {
-        $resp = sendToBitrix('crm.product.list', array(
-            'filter' => array('ID' => $b24Id),
-            'start' => 0
-        ));
-        if (!is_array($resp) || isset($resp['error']) || !isset($resp['result']) || !is_array($resp['result']) || empty($resp['result'][0])) {
+        $item = null;
+        $resp = sendToBitrix('crm.product.get', array('id' => $b24Id));
+        if (is_array($resp) && !isset($resp['error']) && isset($resp['result']) && is_array($resp['result'])) {
+            $item = $resp['result'];
+        }
+        if ($item === null) {
+            $resp = sendToBitrix('crm.product.list', array(
+                'filter' => array('ID' => $b24Id),
+                'start' => 0
+            ));
+            if (is_array($resp) && !isset($resp['error']) && isset($resp['result']) && is_array($resp['result']) && !empty($resp['result'][0])) {
+                $item = $resp['result'][0];
+            }
+        }
+        if (!is_array($item)) {
             continue;
         }
 
-        $item = $resp['result'][0];
         $name = isset($item['NAME']) ? trim((string)$item['NAME']) : '';
         if ($name === '') {
             continue;
