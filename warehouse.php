@@ -245,7 +245,7 @@ try {
         $params[] = $filterStatus;
     }
     if ($filterSearch !== '') {
-        $where[] = "(CAST(r.id AS CHAR) LIKE ? OR p.name LIKE ?)";
+        $where[] = "(CAST(r.id AS CHAR) LIKE ? OR COALESCE(p_local.name, p_b24.name, '') LIKE ?)";
         $like = '%' . $filterSearch . '%';
         $params[] = $like;
         $params[] = $like;
@@ -263,7 +263,7 @@ try {
         $params[] = $lowStockThreshold;
     }
     if ($withoutNameOnly) {
-        $where[] = "(p.name IS NULL OR p.name = '')";
+        $where[] = "COALESCE(NULLIF(TRIM(p_local.name), ''), NULLIF(TRIM(p_b24.name), '')) IS NULL";
     }
 
     $sql = "
@@ -281,10 +281,15 @@ try {
             r.price_5_9,
             r.price_10_19,
             r.price_20_plus,
-            COALESCE(NULLIF(TRIM(p.name), ''), CONCAT('Архивный товар (ID ', r.product_id, ')')) as product_name,
-            p.roll_length as product_roll_length
+            COALESCE(
+                NULLIF(TRIM(p_local.name), ''),
+                NULLIF(TRIM(p_b24.name), ''),
+                CONCAT('Архивный товар (ID ', r.product_id, ')')
+            ) as product_name,
+            COALESCE(p_local.roll_length, p_b24.roll_length, r.original_length) as product_roll_length
         FROM rolls r
-        LEFT JOIN products p ON r.product_id = p.id
+        LEFT JOIN products p_local ON r.product_id = p_local.id
+        LEFT JOIN products p_b24 ON r.product_id = p_b24.b24_product_id
     ";
     if (!empty($where)) {
         $sql .= " WHERE " . implode(" AND ", $where);
