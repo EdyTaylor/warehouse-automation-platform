@@ -409,37 +409,8 @@ require 'includes/header.php';
             </form>
         </div>
 
-        <!-- Добавление рулонов -->
-        <div class="card">
-            <h2>📦 Добавить рулоны</h2>
-            <form method="POST">
-                <div class="form-row">
-                    <div class="form-group">
-                        <label>Товар:</label>
-                        <select name="product_id" required>
-                            <option value="">Выберите товар</option>
-                            <?php foreach ($products as $p): ?>
-                                <option value="<?php echo $p['id']; ?>">
-                                    <?php echo htmlspecialchars($p['name']); ?> (<?php echo !empty($p['roll_length']) ? $p['roll_length'] : '30'; ?>м)
-                                </option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label>Мин. остаток (м):</label>
-                        <input type="number" name="min_full" step="0.1" value="0.5" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Количество:</label>
-                        <input type="number" name="quantity" min="1" value="1" required>
-                    </div>
-                    <div class="form-group">
-                        <label>&nbsp;</label>
-                        <button type="submit" class="btn btn-success">➕ Добавить</button>
-                    </div>
-                </div>
-            </form>
-        </div>
+        <!-- Блок "Добавить рулоны" скрыт из UI.
+             Логика POST сохранена для совместимости, фактическое добавление выполняется с dashboard.php. -->
 
         <!-- Блоки "Продажа рулонов/в метрах" скрыты из UI.
              Логика на POST сохранена вверху файла для совместимости. -->

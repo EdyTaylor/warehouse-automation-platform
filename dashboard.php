@@ -203,70 +203,9 @@ require 'includes/header.php';
         </div>
 
         <div class="card">
-            <h3>Оприходовать товар</h3>
-            <form method="POST" class="mb-3">
-                <input type="hidden" name="action" value="save_usd_rate">
-                <div class="form-row">
-                    <div class="form-group">
-                        <label class="form-label">Фиксированный курс USD</label>
-                        <input class="form-control" type="number" step="0.0001" min="0.0001" name="usd_rate" value="<?= htmlspecialchars((string)$usdRateValue) ?>" required>
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">&nbsp;</label>
-                        <button type="submit" class="btn btn-light">Сохранить курс</button>
-                    </div>
-                </div>
-            </form>
-
-            <form method="POST" id="receipt-form">
-                <input type="hidden" name="action" value="receipt_quick">
-                <div class="form-row">
-                    <div class="form-group">
-                        <label class="form-label">Товар (существующий)</label>
-                        <select class="form-control" name="product_id" id="receipt_product_id">
-                            <option value="0">-- Новый товар --</option>
-                            <?php foreach ($productsForReceipt as $pr): ?>
-                                <option
-                                    value="<?= intval($pr['id']) ?>"
-                                    data-roll-length="<?= htmlspecialchars((string)$pr['roll_length']) ?>"
-                                    data-purchase="<?= htmlspecialchars((string)$pr['purchase_price']) ?>"
-                                ><?= htmlspecialchars($pr['name']) ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">Наименование (если новый)</label>
-                        <input class="form-control" type="text" name="new_product_name" id="new_product_name" placeholder="Например: Пленка X 1520">
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">Количество рулонов</label>
-                        <input class="form-control" type="number" name="quantity" id="receipt_quantity" value="1" min="1" required>
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">Длина рулона (м)</label>
-                        <input class="form-control" type="number" name="roll_length" id="receipt_roll_length" value="30" step="0.1" min="0.1" required>
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">Мин. остаток (м)</label>
-                        <input class="form-control" type="number" name="min_full" value="0.5" step="0.1" min="0" required>
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">Цена в USD (за рулон)</label>
-                        <input class="form-control" type="number" name="price_usd" id="receipt_price_usd" value="0" step="0.01" min="0">
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">Курс USD</label>
-                        <input class="form-control" type="number" name="usd_rate" id="receipt_usd_rate" value="<?= htmlspecialchars((string)$usdRateValue) ?>" step="0.0001" min="0.0001" required>
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">Цена закупки KGS (за рулон)</label>
-                        <input class="form-control" type="number" name="purchase_price_kzt" id="receipt_price_kzt" value="0" step="0.01" min="0">
-                    </div>
-                </div>
-                <p class="text-muted">Итого метраж к оприходованию: <b id="receipt_total_meters">30</b> м</p>
-                <p class="text-muted">Конвертация: USD -> KGS по фиксированному курсу.</p>
-                <button type="submit" class="btn btn-success">Оприходовать</button>
-            </form>
+            <h3>🧾 Складские операции</h3>
+            <p>Оприходование, списание и реализация перенесены в отдельную вкладку для удобной работы в одном месте.</p>
+            <a href="stock_operations.php" class="btn btn-success">Открыть складские операции</a>
         </div>
 
         <!-- Основные действия -->
@@ -275,8 +214,14 @@ require 'includes/header.php';
             <div class="actions-grid">
                 <div class="action-card">
                     <h4>🏪 Управление складом</h4>
-                    <p>Добавление рулонов, списание, остатки</p>
+                    <p>Остатки, статусы рулонов и синхронизация</p>
                     <a href="warehouse.php" class="btn btn-success">Открыть</a>
+                </div>
+
+                <div class="action-card">
+                    <h4>🧾 Складские операции</h4>
+                    <p>Приход, списание и реализация в едином интерфейсе</p>
+                    <a href="stock_operations.php" class="btn">Открыть</a>
                 </div>
                 
                 <div class="action-card">
@@ -332,54 +277,5 @@ require 'includes/header.php';
             <p><strong>Последнее обновление:</strong> <?= date('d.m.Y H:i') ?></p>
         </div>
 </main>
-
-<script>
-(() => {
-    const productSelect = document.getElementById('receipt_product_id');
-    const rollLengthInput = document.getElementById('receipt_roll_length');
-    const qtyInput = document.getElementById('receipt_quantity');
-    const usdInput = document.getElementById('receipt_price_usd');
-    const usdRateInput = document.getElementById('receipt_usd_rate');
-    const kztInput = document.getElementById('receipt_price_kzt');
-    const totalMeters = document.getElementById('receipt_total_meters');
-
-    const syncFromProduct = () => {
-        const opt = productSelect.options[productSelect.selectedIndex];
-        if (!opt || productSelect.value === '0') {
-            return;
-        }
-        if (opt.dataset.rollLength) {
-            rollLengthInput.value = opt.dataset.rollLength;
-        }
-        if (opt.dataset.purchase && Number(opt.dataset.purchase) > 0) {
-            kztInput.value = Number(opt.dataset.purchase).toFixed(2);
-            if (Number(usdRateInput.value) > 0) {
-                usdInput.value = (Number(kztInput.value) / Number(usdRateInput.value)).toFixed(2);
-            }
-        }
-        updateTotals();
-    };
-
-    const syncKztFromUsd = () => {
-        const usd = Number(usdInput.value || 0);
-        const rate = Number(usdRateInput.value || 0);
-        if (usd > 0 && rate > 0) {
-            kztInput.value = (usd * rate).toFixed(2);
-        }
-    };
-
-    const updateTotals = () => {
-        const meters = Number(rollLengthInput.value || 0) * Number(qtyInput.value || 0);
-        totalMeters.textContent = Number.isFinite(meters) ? meters.toFixed(1) : '0';
-    };
-
-    productSelect.addEventListener('change', syncFromProduct);
-    usdInput.addEventListener('input', syncKztFromUsd);
-    usdRateInput.addEventListener('input', syncKztFromUsd);
-    rollLengthInput.addEventListener('input', updateTotals);
-    qtyInput.addEventListener('input', updateTotals);
-    updateTotals();
-})();
-</script>
 
 <?php require 'includes/footer.php'; ?>

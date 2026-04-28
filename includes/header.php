@@ -21,6 +21,7 @@ $current_page = basename($_SERVER['PHP_SELF']);
             <nav class="nav">
                 <a href="dashboard.php" class="nav-link <?= $current_page == 'dashboard.php' ? 'active' : '' ?>">🏠 Главная</a>
                 <a href="warehouse.php" class="nav-link <?= $current_page == 'warehouse.php' ? 'active' : '' ?>">🏪 Склад</a>
+                <a href="stock_operations.php" class="nav-link <?= $current_page == 'stock_operations.php' ? 'active' : '' ?>">🧾 Операции</a>
                 <a href="products.php" class="nav-link <?= $current_page == 'products.php' ? 'active' : '' ?>">📦 Товары</a>
                 <a href="sell.php" class="nav-link <?= $current_page == 'sell.php' ? 'active' : '' ?>">💰 Продажи</a>
                 <a href="b24_sales.php" class="nav-link <?= $current_page == 'b24_sales.php' ? 'active' : '' ?>">🔄 Б24</a>

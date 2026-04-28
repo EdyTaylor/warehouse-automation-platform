@@ -6,6 +6,7 @@ header('Content-Type: application/json; charset=utf-8');
 require '../db.php';
 $db = getDB();
 require_once __DIR__ . '/bitrix/deal.php';
+require_once __DIR__ . '/bitrix/send.php';
 require_once __DIR__ . '/../functions/stock_movements.php';
 
 function ensureWebhookLockTable($db) {
@@ -17,6 +18,26 @@ function ensureWebhookLockTable($db) {
             created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (id),
             UNIQUE KEY uq_webhook_event_hash (event_hash)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ");
+}
+
+function ensureDynamicItemInboxTable($db) {
+    $db->exec("
+        CREATE TABLE IF NOT EXISTS b24_dynamic_item_inbox (
+            id int NOT NULL AUTO_INCREMENT,
+            event_name varchar(80) NOT NULL,
+            entity_type_id int DEFAULT NULL,
+            item_id int DEFAULT NULL,
+            item_payload longtext,
+            product_rows_payload longtext,
+            source_payload longtext,
+            process_status varchar(20) NOT NULL DEFAULT 'new',
+            created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            KEY idx_b24_dynamic_item_lookup (entity_type_id, item_id),
+            KEY idx_b24_dynamic_item_status (process_status)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     ");
 }
@@ -68,6 +89,18 @@ switch ($event) {
     case 'ONCRMPRODUCTUPDATE':
         // Обновление товара
         handleProductUpdate($db, $data);
+        break;
+
+    case 'ONCRMDYNAMICITEMADD':
+        handleDynamicItemEvent($db, $data, 'add');
+        break;
+
+    case 'ONCRMDYNAMICITEMUPDATE':
+        handleDynamicItemEvent($db, $data, 'update');
+        break;
+
+    case 'ONCRMDYNAMICITEMDELETE':
+        handleDynamicItemEvent($db, $data, 'delete');
         break;
         
     default:
@@ -207,6 +240,89 @@ function handleProductUpdate($db, $data) {
     $stmt->execute([$productName, $productPrice, $productId]);
     
     echo json_encode(['status' => 'product_updated', 'product_id' => $productId]);
+}
+
+function handleDynamicItemEvent($db, $data, $action) {
+    ensureDynamicItemInboxTable($db);
+
+    $ids = extractDynamicItemIds($data);
+    $entityTypeId = intval($ids['entity_type_id']);
+    $itemId = intval($ids['item_id']);
+    if ($entityTypeId <= 0 || $itemId <= 0) {
+        echo json_encode([
+            'status' => 'dynamic_item_skipped',
+            'reason' => 'missing_entity_or_item_id',
+            'action' => $action
+        ]);
+        return;
+    }
+
+    $itemPayload = null;
+    $rowsPayload = null;
+
+    if ($action !== 'delete') {
+        $itemResp = sendToBitrix('crm.item.get', [
+            'entityTypeId' => $entityTypeId,
+            'id' => $itemId
+        ]);
+        $itemPayload = is_array($itemResp) ? json_encode($itemResp, JSON_UNESCAPED_UNICODE) : null;
+
+        $rowsResp = sendToBitrix('crm.item.productrow.get', [
+            'entityTypeId' => $entityTypeId,
+            'id' => $itemId
+        ]);
+        $rowsPayload = is_array($rowsResp) ? json_encode($rowsResp, JSON_UNESCAPED_UNICODE) : null;
+    }
+
+    $ins = $db->prepare("
+        INSERT INTO b24_dynamic_item_inbox
+        (event_name, entity_type_id, item_id, item_payload, product_rows_payload, source_payload, process_status)
+        VALUES (?, ?, ?, ?, ?, ?, 'new')
+    ");
+    $ins->execute([
+        'ONCRMDYNAMICITEM' . strtoupper($action),
+        $entityTypeId,
+        $itemId,
+        $itemPayload,
+        $rowsPayload,
+        json_encode($data, JSON_UNESCAPED_UNICODE)
+    ]);
+
+    echo json_encode([
+        'status' => 'dynamic_item_queued',
+        'action' => $action,
+        'entity_type_id' => $entityTypeId,
+        'item_id' => $itemId,
+        'inbox_id' => intval($db->lastInsertId())
+    ]);
+}
+
+function extractDynamicItemIds($data) {
+    $entityTypeId = 0;
+    $itemId = 0;
+    $payload = isset($data['data']) && is_array($data['data']) ? $data['data'] : [];
+    $fields = isset($payload['FIELDS']) && is_array($payload['FIELDS']) ? $payload['FIELDS'] : $payload;
+
+    if (isset($fields['ENTITY_TYPE_ID'])) {
+        $entityTypeId = intval($fields['ENTITY_TYPE_ID']);
+    } elseif (isset($payload['ENTITY_TYPE_ID'])) {
+        $entityTypeId = intval($payload['ENTITY_TYPE_ID']);
+    }
+
+    if (isset($fields['ID'])) {
+        $itemId = intval($fields['ID']);
+    } elseif (isset($fields['ITEM_ID'])) {
+        $itemId = intval($fields['ITEM_ID']);
+    } elseif (isset($payload['ID'])) {
+        $itemId = intval($payload['ID']);
+    } elseif (isset($payload['ITEM_ID'])) {
+        $itemId = intval($payload['ITEM_ID']);
+    }
+
+    return [
+        'entity_type_id' => $entityTypeId,
+        'item_id' => $itemId
+    ];
 }
 
 function getUserName($db, $userId) {
