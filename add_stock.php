@@ -212,7 +212,7 @@ $stock = $stmt->fetch(PDO::FETCH_ASSOC);
             <div class="product-info">
                 <h2><?= htmlspecialchars($product['name']) ?></h2>
                 <p>Длина рулона: <?= $product['roll_length'] ?> м</p>
-                <p>Текущая цена: <?= number_format($product['price_per_meter'], 0) ?> ₽/м</p>
+                <p>Текущая цена: <?= number_format($product['price_per_meter'], 0) ?> KGS/м</p>
             </div>
 
             <div class="stock-info">

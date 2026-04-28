@@ -158,7 +158,7 @@ $cutRolls = array_filter($rolls, fn($r) => $r['status'] === 'cut' && $r['current
             <div class="stat-label">Метров продано</div>
         </div>
         <div class="stat-card">
-            <div class="stat-number"><?= number_format($stats['total_revenue'], 0) ?> ₽</div>
+            <div class="stat-number"><?= number_format($stats['total_revenue'], 0) ?> KGS</div>
             <div class="stat-label">Выручка сегодня</div>
         </div>
     </div>
@@ -216,7 +216,7 @@ $cutRolls = array_filter($rolls, fn($r) => $r['status'] === 'cut' && $r['current
                     <option value="">Выберите товар</option>
                     <?php foreach ($products as $p): ?>
                         <option value="<?= $p['id'] ?>" data-price="<?= $p['price_per_meter'] ?>">
-                            <?= htmlspecialchars($p['name']) ?> (<?= $p['price_per_meter'] ?> ₽/м)
+                            <?= htmlspecialchars($p['name']) ?> (<?= $p['price_per_meter'] ?> KGS/м)
                         </option>
                     <?php endforeach; ?>
                 </select>
@@ -270,8 +270,8 @@ $cutRolls = array_filter($rolls, fn($r) => $r['status'] === 'cut' && $r['current
                                     <td><?= $r['roll_id'] ?></td>
                                     <td><?= htmlspecialchars($r['name']) ?></td>
                                     <td><?= $r['current_length'] ?> м</td>
-                                    <td><?= number_format($r['price_per_meter'], 0) ?> ₽</td>
-                                    <td><?= number_format($r['price_per_meter'] * $r['current_length'], 0) ?> ₽</td>
+                                    <td><?= number_format($r['price_per_meter'], 0) ?> KGS</td>
+                                    <td><?= number_format($r['price_per_meter'] * $r['current_length'], 0) ?> KGS</td>
                                     <td>
                                         <button class="btn btn-sm btn-success" onclick="quickSellRoll(<?= $r['product_id'] ?>, 1, <?= $r['price_per_meter'] * $r['current_length'] ?>)">
                                             🛒 Быстрая продажа
@@ -309,7 +309,7 @@ $cutRolls = array_filter($rolls, fn($r) => $r['status'] === 'cut' && $r['current
                                         <div class="progress-bar" style="width: <?= ($r['current_length'] / $r['original_length']) * 100 ?>%"></div>
                                     </div>
                                 </td>
-                                <td><?= number_format($r['price_per_meter'], 0) ?> ₽</td>
+                                <td><?= number_format($r['price_per_meter'], 0) ?> KGS</td>
                                 <td><span class="badge badge-warning">В резке</span></td>
                             </tr>
                         <?php endforeach; ?>
@@ -365,8 +365,8 @@ $cutRolls = array_filter($rolls, fn($r) => $r['status'] === 'cut' && $r['current
                                     <span class="badge <?= $typeClass ?>"><?= $typeText ?></span>
                                 </td>
                                 <td><?= $sale['quantity'] ?></td>
-                                <td><?= number_format($sale['price_per_unit'], 0) ?> ₽</td>
-                                <td><strong><?= number_format($sale['total'], 0) ?> ₽</strong></td>
+                                <td><?= number_format($sale['price_per_unit'], 0) ?> KGS</td>
+                                <td><strong><?= number_format($sale['total'], 0) ?> KGS</strong></td>
                             </tr>
                         <?php endforeach; ?>
                     </tbody>
@@ -440,7 +440,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
 // Быстрая продажа рулона
 function quickSellRoll(productId, qty, price) {
-    if (confirm(`Продать 1 рулон за ${price} ₽?`)) {
+    if (confirm(`Продать 1 рулон за ${price} KGS?`)) {
         const form = document.createElement('form');
         form.method = 'POST';
         form.innerHTML = `

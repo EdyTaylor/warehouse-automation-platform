@@ -70,17 +70,69 @@
                 link.style.pointerEvents = 'none';
 
                 try {
-                    var resp = await fetch(href, { method: 'GET', credentials: 'same-origin' });
-                    var text = await resp.text();
-                    var pretty = text;
-                    try {
-                        pretty = JSON.stringify(JSON.parse(text), null, 2);
-                    } catch (_e) {}
+                    var responses = [];
+                    var currentUrl = href;
+                    var safety = 0;
 
-                    showSyncModal(
-                        'Синхронизировано: ' + (caption || 'операция'),
-                        'HTTP ' + resp.status + '\n\n' + pretty
-                    );
+                    while (currentUrl && safety < 50) {
+                        safety++;
+                        var resp = await fetch(currentUrl, { method: 'GET', credentials: 'same-origin' });
+                        var text = await resp.text();
+                        var parsed = null;
+                        try { parsed = JSON.parse(text); } catch (_e) {}
+
+                        responses.push({
+                            status: resp.status,
+                            text: text,
+                            json: parsed
+                        });
+
+                        if (!parsed || !parsed.partial || parsed.next_offset === null || typeof parsed.next_offset === 'undefined') {
+                            break;
+                        }
+
+                        var u = new URL(currentUrl, window.location.origin);
+                        u.searchParams.set('offset', String(parsed.next_offset));
+                        currentUrl = u.pathname + '?' + u.searchParams.toString();
+                    }
+
+                    var output = [];
+                    output.push('Запросов выполнено: ' + responses.length);
+                    var last = responses[responses.length - 1];
+                    output.push('HTTP: ' + last.status);
+
+                    var totalProcessed = 0;
+                    var totalCount = null;
+                    var errors = 0;
+                    for (var i = 0; i < responses.length; i++) {
+                        var j = responses[i].json;
+                        if (j && typeof j.processed !== 'undefined') {
+                            totalProcessed += Number(j.processed || 0);
+                        }
+                        if (j && typeof j.total_count !== 'undefined') {
+                            totalCount = Number(j.total_count);
+                        }
+                        if (j && Array.isArray(j.items)) {
+                            for (var k = 0; k < j.items.length; k++) {
+                                if (j.items[k].bitrix_status === 'error') errors++;
+                            }
+                        }
+                    }
+
+                    if (totalCount !== null) {
+                        output.push('Обработано товаров: ' + totalProcessed + ' / ' + totalCount);
+                    } else {
+                        output.push('Обработано товаров: ' + totalProcessed);
+                    }
+                    output.push('Ошибок отправки: ' + errors);
+
+                    if (last.json) {
+                        output.push('\nПоследний ответ:\n' + JSON.stringify(last.json, null, 2));
+                    } else {
+                        output.push('\nОтвет:\n' + last.text);
+                    }
+
+                    showSyncModal('Синхронизировано: ' + (caption || 'операция'), output.join('\n'));
                 } catch (e) {
                     showSyncModal(
                         'Ошибка синхронизации',

@@ -510,34 +510,8 @@ require 'includes/header.php';
         <!-- Блоки "Продажа рулонов/в метрах" скрыты из UI.
              Логика на POST сохранена вверху файла для совместимости. -->
 
-        <!-- Списание -->
-        <div class="card">
-            <h2>🗑️ Списание</h2>
-            <form method="POST">
-                <input type="hidden" name="action" value="writeoff">
-                <div class="form-row">
-                    <div class="form-group">
-                        <label>Рулон:</label>
-                        <select name="writeoff_roll_id" required>
-                            <option value="">Выберите рулон</option>
-                            <?php foreach ($rolls as $r): ?>
-                                <option value="<?php echo $r['id']; ?>">
-                                    #<?php echo $r['id']; ?> | <?php echo htmlspecialchars($r['product_name']); ?> (остаток: <?php echo $r['current_length']; ?>м)
-                                </option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label>Метров к списанию:</label>
-                        <input type="number" name="writeoff_meters" step="0.1" min="0.1" required>
-                    </div>
-                    <div class="form-group">
-                        <label>&nbsp;</label>
-                        <button type="submit" class="btn btn-warning">🗑️ Списать</button>
-                    </div>
-                </div>
-            </form>
-        </div>
+        <!-- Блок "Списание" скрыт из UI.
+             Логика writeoff в backend сохранена для совместимости интеграций/хуков. -->
 
         <!-- Складские остатки -->
         <div class="card">
@@ -581,7 +555,7 @@ require 'includes/header.php';
                         <td><?php echo htmlspecialchars($r['product_name']); ?></td>
                         <td><?php echo !empty($r['original_length']) ? $r['original_length'] . ' м' : '-'; ?></td>
                         <td><strong><?php echo !empty($r['current_length']) ? $r['current_length'] . ' м' : '-'; ?></strong></td>
-                        <td><?php echo !empty($r['price_per_meter']) && $r['price_per_meter'] > 0 ? number_format($r['price_per_meter'], 0) . ' ₽' : '-'; ?></td>
+                        <td><?php echo !empty($r['price_per_meter']) && $r['price_per_meter'] > 0 ? number_format($r['price_per_meter'], 0) . ' KGS' : '-'; ?></td>
                         <td>
                             <?php
                             $statusClass = 'status-active';

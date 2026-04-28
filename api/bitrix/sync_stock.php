@@ -14,7 +14,15 @@ $cfg = require __DIR__ . '/config.php';
 $field = isset($_GET['field']) ? $_GET['field'] : $cfg['product_available_field'];
 $method = isset($_GET['method']) ? $_GET['method'] : $cfg['product_update_method'];
 $push = isset($_GET['push']) ? intval($_GET['push']) : 1;
-$maxSeconds = isset($_GET['max_seconds']) ? max(5, intval($_GET['max_seconds'])) : 20;
+$offset = isset($_GET['offset']) ? max(0, intval($_GET['offset'])) : 0;
+$limit = isset($_GET['limit']) ? max(1, min(200, intval($_GET['limit']))) : 50;
+
+$totalRow = $db->query("
+    SELECT COUNT(*) as cnt
+    FROM products p
+    WHERE p.b24_product_id IS NOT NULL AND p.b24_product_id <> 0
+")->fetch(PDO::FETCH_ASSOC);
+$totalCount = $totalRow ? intval($totalRow['cnt']) : 0;
 
 $rows = $db->query("
     SELECT
@@ -26,26 +34,26 @@ $rows = $db->query("
     LEFT JOIN rolls r ON r.product_id = p.id
     WHERE p.b24_product_id IS NOT NULL AND p.b24_product_id <> 0
     GROUP BY p.id, p.name, p.b24_product_id
+    ORDER BY p.id ASC
+    LIMIT {$limit} OFFSET {$offset}
 ")->fetchAll(PDO::FETCH_ASSOC);
 
 $result = [
     'status' => 'ok',
     'count' => count($rows),
+    'total_count' => $totalCount,
+    'offset' => $offset,
+    'limit' => $limit,
     'push' => $push ? true : false,
     'field' => $field,
     'method' => $method,
     'items' => [],
     'partial' => false,
+    'next_offset' => null,
     'processed' => 0
 ];
 
-$startedAt = microtime(true);
 foreach ($rows as $r) {
-    if ((microtime(true) - $startedAt) >= $maxSeconds) {
-        $result['partial'] = true;
-        break;
-    }
-
     $free = round(floatval($r['free_meters']), 2);
 
     $item = [
@@ -75,6 +83,12 @@ foreach ($rows as $r) {
 
     $result['items'][] = $item;
     $result['processed']++;
+}
+
+$nextOffset = $offset + $result['processed'];
+if ($nextOffset < $totalCount) {
+    $result['partial'] = true;
+    $result['next_offset'] = $nextOffset;
 }
 
 echo json_encode($result, JSON_UNESCAPED_UNICODE);
