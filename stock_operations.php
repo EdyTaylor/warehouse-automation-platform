@@ -52,7 +52,7 @@ function ensureProductForReceipt($db, $productId, $productName, $rollLength, $pr
                 $db->prepare("UPDATE products SET purchase_price = ?, roll_length = ? WHERE id = ?")
                     ->execute(array($pricePerRoll, $rollLength, $productId));
             }
-            return $p;
+            return ensureProductInBitrix($db, $p, $pricePerRoll);
         }
     }
 
@@ -67,7 +67,7 @@ function ensureProductForReceipt($db, $productId, $productName, $rollLength, $pr
     if ($existing) {
         $db->prepare("UPDATE products SET purchase_price = ?, roll_length = ? WHERE id = ?")
             ->execute(array($pricePerRoll, $rollLength, intval($existing['id'])));
-        return $existing;
+        return ensureProductInBitrix($db, $existing, $pricePerRoll);
     }
 
     $ins = $db->prepare("
@@ -77,28 +77,46 @@ function ensureProductForReceipt($db, $productId, $productName, $rollLength, $pr
     $ins->execute(array($name, $rollLength, $pricePerRoll));
     $newId = intval($db->lastInsertId());
 
-    $created = array(
-        'id' => $newId,
-        'name' => $name,
-        'b24_product_id' => 0
-    );
+    $created = array('id' => $newId, 'name' => $name, 'b24_product_id' => 0);
+    return ensureProductInBitrix($db, $created, $pricePerRoll);
+}
 
-    // Keep behavior same as dashboard: if product doesn't exist in B24, try creating it.
-    $payload = array('fields' => array('NAME' => $name));
-    if ($pricePerRoll > 0) {
-        $payload['fields']['PRICE'] = $pricePerRoll;
+function ensureProductInBitrix($db, $product, $pricePerRoll) {
+    $productId = intval(isset($product['id']) ? $product['id'] : 0);
+    $productName = isset($product['name']) ? (string)$product['name'] : '';
+    $b24ProductId = intval(isset($product['b24_product_id']) ? $product['b24_product_id'] : 0);
+
+    if ($productId <= 0 || $productName === '') {
+        return $product;
     }
-    $resp = sendToBitrix('crm.product.add', $payload);
+
+    if ($b24ProductId > 0) {
+        $payload = array(
+            'id' => $b24ProductId,
+            'fields' => array('NAME' => $productName)
+        );
+        if ($pricePerRoll > 0) {
+            $payload['fields']['PRICE'] = $pricePerRoll;
+        }
+        sendToBitrix('crm.product.update', $payload);
+        return $product;
+    }
+
+    $createPayload = array('fields' => array('NAME' => $productName));
+    if ($pricePerRoll > 0) {
+        $createPayload['fields']['PRICE'] = $pricePerRoll;
+    }
+    $resp = sendToBitrix('crm.product.add', $createPayload);
     if (is_array($resp) && !isset($resp['error']) && isset($resp['result'])) {
-        $b24Id = intval($resp['result']);
-        if ($b24Id > 0) {
+        $newB24Id = intval($resp['result']);
+        if ($newB24Id > 0) {
             $db->prepare("UPDATE products SET b24_product_id = ? WHERE id = ?")
-                ->execute(array($b24Id, $newId));
-            $created['b24_product_id'] = $b24Id;
+                ->execute(array($newB24Id, $productId));
+            $product['b24_product_id'] = $newB24Id;
         }
     }
 
-    return $created;
+    return $product;
 }
 
 function consumeWriteoffMeters($db, $productId, $meters) {
@@ -341,6 +359,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
 }
 
 $products = $db->query("SELECT id, name, roll_length, purchase_price FROM products ORDER BY name ASC")->fetchAll(PDO::FETCH_ASSOC);
+$stockProducts = $db->query("
+    SELECT
+        p.id,
+        p.name,
+        ROUND(SUM(r.current_length), 2) as free_meters
+    FROM rolls r
+    JOIN products p ON p.id = r.product_id
+    WHERE r.status NOT IN ('sold', 'written_off', 'waste')
+      AND r.current_length > 0
+      AND r.reserved = 0
+    GROUP BY p.id, p.name
+    HAVING SUM(r.current_length) > 0
+    ORDER BY p.name ASC
+")->fetchAll(PDO::FETCH_ASSOC);
 $recentDocs = $db->query("
     SELECT id, operation_type, doc_number, supplier, total_amount, status, created_at
     FROM stock_operation_docs
@@ -453,8 +485,10 @@ require 'includes/header.php';
                         <td>
                             <select name="writeoff_product_id[]">
                                 <option value="0">-- Выберите товар --</option>
-                                <?php foreach ($products as $p): ?>
-                                    <option value="<?= intval($p['id']) ?>"><?= htmlspecialchars($p['name']) ?></option>
+                                <?php foreach ($stockProducts as $p): ?>
+                                    <option value="<?= intval($p['id']) ?>">
+                                        <?= htmlspecialchars($p['name']) ?> (доступно: <?= number_format(floatval($p['free_meters']), 2, '.', ' ') ?> м)
+                                    </option>
                                 <?php endforeach; ?>
                             </select>
                         </td>
