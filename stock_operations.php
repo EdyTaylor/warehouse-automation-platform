@@ -522,6 +522,7 @@ require 'includes/header.php';
                         <th>Сумма</th>
                         <th>Статус</th>
                         <th>Дата</th>
+                        <th>Документ</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -534,6 +535,9 @@ require 'includes/header.php';
                             <td><?= number_format(floatval($d['total_amount']), 2, '.', ' ') ?></td>
                             <td><?= htmlspecialchars((string)$d['status']) ?></td>
                             <td><?= htmlspecialchars((string)$d['created_at']) ?></td>
+                            <td>
+                                <a href="stock_operation_print.php?id=<?= intval($d['id']) ?>" class="btn btn-light btn-sm" target="_blank">Открыть</a>
+                            </td>
                         </tr>
                     <?php endforeach; ?>
                 </tbody>
