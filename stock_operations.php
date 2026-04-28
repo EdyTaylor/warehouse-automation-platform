@@ -183,6 +183,33 @@ $successMsg = '';
 $errorMsg = '';
 ensureStockOperationTables($db);
 
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'delete_doc') {
+    $docId = intval(isset($_POST['doc_id']) ? $_POST['doc_id'] : 0);
+    if ($docId <= 0) {
+        $errorMsg = 'Некорректный документ для удаления.';
+    } else {
+        try {
+            $db->beginTransaction();
+            $docStmt = $db->prepare("SELECT id, operation_type FROM stock_operation_docs WHERE id = ? LIMIT 1");
+            $docStmt->execute(array($docId));
+            $doc = $docStmt->fetch(PDO::FETCH_ASSOC);
+            if (!$doc) {
+                throw new Exception('Документ не найден.');
+            }
+
+            $db->prepare("DELETE FROM stock_operation_lines WHERE doc_id = ?")->execute(array($docId));
+            $db->prepare("DELETE FROM stock_operation_docs WHERE id = ?")->execute(array($docId));
+            $db->commit();
+            $successMsg = 'Документ #' . $docId . ' удален.';
+        } catch (Exception $e) {
+            if ($db->inTransaction()) {
+                $db->rollBack();
+            }
+            $errorMsg = $e->getMessage();
+        }
+    }
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'create_receipt') {
     $docNumber = trim(isset($_POST['doc_number']) ? $_POST['doc_number'] : '');
     $supplier = trim(isset($_POST['supplier']) ? $_POST['supplier'] : '');
@@ -523,6 +550,7 @@ require 'includes/header.php';
                         <th>Статус</th>
                         <th>Дата</th>
                         <th>Документ</th>
+                        <th>Удалить</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -537,6 +565,13 @@ require 'includes/header.php';
                             <td><?= htmlspecialchars((string)$d['created_at']) ?></td>
                             <td>
                                 <a href="stock_operation_print.php?id=<?= intval($d['id']) ?>" class="btn btn-light btn-sm" target="_blank">Открыть</a>
+                            </td>
+                            <td>
+                                <form method="POST" style="display:inline;" onsubmit="return confirm('Удалить документ #<?= intval($d['id']) ?>?');">
+                                    <input type="hidden" name="action" value="delete_doc">
+                                    <input type="hidden" name="doc_id" value="<?= intval($d['id']) ?>">
+                                    <button type="submit" class="btn btn-danger btn-sm">Удалить</button>
+                                </form>
                             </td>
                         </tr>
                     <?php endforeach; ?>
