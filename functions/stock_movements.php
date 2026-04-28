@@ -29,13 +29,66 @@ function getFreeMetersByProduct($db, $productId) {
     return $row ? round(floatval($row['free_meters']), 2) : 0;
 }
 
+function ensureProductSyncedWithBitrix($db, $productId) {
+    $productId = intval($productId);
+    if ($productId <= 0) {
+        return 0;
+    }
+
+    $stmt = $db->prepare("SELECT id, name, b24_product_id, purchase_price FROM products WHERE id = ? LIMIT 1");
+    $stmt->execute([$productId]);
+    $product = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$product) {
+        return 0;
+    }
+
+    $existingB24Id = intval(isset($product['b24_product_id']) ? $product['b24_product_id'] : 0);
+    if ($existingB24Id > 0) {
+        return $existingB24Id;
+    }
+
+    $name = trim(isset($product['name']) ? (string)$product['name'] : '');
+    if ($name === '') {
+        return 0;
+    }
+
+    $fields = ['NAME' => $name];
+    $price = floatval(isset($product['purchase_price']) ? $product['purchase_price'] : 0);
+    if ($price > 0) {
+        $fields['PRICE'] = $price;
+    }
+
+    $resp = sendToBitrix('crm.product.add', ['fields' => $fields]);
+    if (!is_array($resp) || isset($resp['error']) || !isset($resp['result'])) {
+        return 0;
+    }
+
+    $newB24Id = intval($resp['result']);
+    if ($newB24Id <= 0) {
+        return 0;
+    }
+
+    $db->prepare("UPDATE products SET b24_product_id = ? WHERE id = ?")
+        ->execute([$newB24Id, $productId]);
+
+    return $newB24Id;
+}
+
 function syncProductAvailableToBitrix($db, $productId) {
     $config = getBitrixStockConfig();
     $stmt = $db->prepare("SELECT b24_product_id FROM products WHERE id = ?");
     $stmt->execute([$productId]);
     $product = $stmt->fetch(PDO::FETCH_ASSOC);
 
-    if (!$product || empty($product['b24_product_id'])) {
+    if (!$product) {
+        return ['status' => 'skip', 'message' => 'No b24_product_id'];
+    }
+
+    $b24ProductId = intval(isset($product['b24_product_id']) ? $product['b24_product_id'] : 0);
+    if ($b24ProductId <= 0) {
+        $b24ProductId = ensureProductSyncedWithBitrix($db, $productId);
+    }
+    if ($b24ProductId <= 0) {
         return ['status' => 'skip', 'message' => 'No b24_product_id'];
     }
 
@@ -44,7 +97,7 @@ function syncProductAvailableToBitrix($db, $productId) {
     $field = $config['product_available_field'];
 
     $payload = [
-        'id' => intval($product['b24_product_id']),
+        'id' => $b24ProductId,
         'fields' => [
             $field => $freeMeters
         ]

@@ -7,6 +7,7 @@ header('Content-Type: text/html; charset=utf-8');
 require 'db.php';
 $db = getDB();
 require_once __DIR__ . '/functions/stock_movements.php';
+require_once __DIR__ . '/api/bitrix/send.php';
 
 // 🔥 ФУНКЦИЯ ЦЕНЫ
 function getPrice($row, $qty) {
@@ -15,6 +16,68 @@ function getPrice($row, $qty) {
     if ($qty <= 19 && $row['price_10_19'] > 0) return $row['price_10_19'];
     if ($row['price_20_plus'] > 0) return $row['price_20_plus'];
     return 0;
+}
+
+function hydrateMissingRollProductNamesFromBitrix($db, &$rolls) {
+    if (!is_array($rolls) || empty($rolls)) {
+        return;
+    }
+
+    $missingIds = array();
+    foreach ($rolls as $roll) {
+        $name = isset($roll['product_name']) ? trim((string)$roll['product_name']) : '';
+        if ($name === '' || strpos($name, 'Архивный товар (ID ') === 0) {
+            $pid = isset($roll['product_id']) ? intval($roll['product_id']) : 0;
+            if ($pid > 0) {
+                $missingIds[$pid] = true;
+            }
+        }
+    }
+    if (empty($missingIds)) {
+        return;
+    }
+
+    $resolved = array();
+    foreach (array_keys($missingIds) as $b24Id) {
+        $resp = sendToBitrix('crm.product.list', array(
+            'filter' => array('ID' => $b24Id),
+            'start' => 0
+        ));
+        if (!is_array($resp) || isset($resp['error']) || !isset($resp['result']) || !is_array($resp['result']) || empty($resp['result'][0])) {
+            continue;
+        }
+
+        $item = $resp['result'][0];
+        $name = isset($item['NAME']) ? trim((string)$item['NAME']) : '';
+        if ($name === '') {
+            continue;
+        }
+        $resolved[$b24Id] = $name;
+
+        // Upsert minimal local product row to avoid repeated live calls.
+        $sel = $db->prepare("SELECT id FROM products WHERE b24_product_id = ? LIMIT 1");
+        $sel->execute(array($b24Id));
+        $existing = $sel->fetch(PDO::FETCH_ASSOC);
+        if ($existing) {
+            $db->prepare("UPDATE products SET name = ? WHERE id = ?")->execute(array($name, intval($existing['id'])));
+        } else {
+            $db->prepare("
+                INSERT INTO products (name, roll_length, price_per_meter, b24_product_id)
+                VALUES (?, 30, 0, ?)
+            ")->execute(array($name, $b24Id));
+        }
+    }
+
+    if (empty($resolved)) {
+        return;
+    }
+
+    foreach ($rolls as &$roll) {
+        $pid = isset($roll['product_id']) ? intval($roll['product_id']) : 0;
+        if ($pid > 0 && isset($resolved[$pid])) {
+            $roll['product_name'] = $resolved[$pid];
+        }
+    }
 }
 
 // 🔥 ДОБАВЛЕНИЕ РУЛОНОВ
@@ -298,6 +361,7 @@ try {
     $stmt = $db->prepare($sql);
     $stmt->execute($params);
     $rolls = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    hydrateMissingRollProductNamesFromBitrix($db, $rolls);
 } catch (Exception $e) {
     $rolls = $db->query("SELECT * FROM rolls ORDER BY id DESC")->fetchAll(PDO::FETCH_ASSOC);
     foreach ($rolls as &$roll) {
