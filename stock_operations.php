@@ -297,7 +297,16 @@ function fetchB24DocumentElementsMap($b24DocId) {
     if (!is_array($resp) || isset($resp['error']) || !isset($resp['result']) || !is_array($resp['result'])) {
         return $map;
     }
-    foreach ($resp['result'] as $row) {
+    $rows = $resp['result'];
+    if (isset($rows['items']) && is_array($rows['items'])) {
+        $rows = $rows['items'];
+    } elseif (isset($rows['documentElements']) && is_array($rows['documentElements'])) {
+        $rows = $rows['documentElements'];
+    } elseif (isset($rows['elements']) && is_array($rows['elements'])) {
+        $rows = $rows['elements'];
+    }
+
+    foreach ($rows as $row) {
         if (!is_array($row)) {
             continue;
         }
@@ -322,6 +331,31 @@ function fetchB24DocumentElementsMap($b24DocId) {
         $map[$elementId] += $amount;
     }
     return $map;
+}
+
+function conductExistingB24Document($b24DocId) {
+    $conductResp = sendToBitrix('catalog.document.conduct', array('id' => intval($b24DocId)));
+    if (!is_array($conductResp) || isset($conductResp['error'])) {
+        if (isB24DocumentConducted($b24DocId)) {
+            return array(
+                'ok' => true,
+                'b24_document_id' => intval($b24DocId),
+                'conduct_response' => $conductResp,
+                'status_checked' => 'Y'
+            );
+        }
+        return array(
+            'ok' => false,
+            'stage' => 'document.conduct',
+            'b24_document_id' => intval($b24DocId),
+            'response' => $conductResp
+        );
+    }
+    return array(
+        'ok' => true,
+        'b24_document_id' => intval($b24DocId),
+        'conduct_response' => $conductResp
+    );
 }
 
 function addLinesAndConductExistingB24Document($db, $b24DocId, $docType, $lineRows) {
@@ -478,9 +512,15 @@ function tryFinalizePartialDocument($db, $operationType, $syncResult, $lineRows)
     if ($b24DocId <= 0 || empty($lineRows)) {
         return $syncResult;
     }
-    $finalizeResult = addLinesAndConductExistingB24Document($db, $b24DocId, (string)$operationType, $lineRows);
+    $stage = isset($syncResult['stage']) ? (string)$syncResult['stage'] : '';
+    if ($stage === 'document.conduct') {
+        $finalizeResult = conductExistingB24Document($b24DocId);
+    } else {
+        $finalizeResult = addLinesAndConductExistingB24Document($db, $b24DocId, (string)$operationType, $lineRows);
+    }
     if (is_array($finalizeResult)) {
         $finalizeResult['auto_finalize_attempted'] = true;
+        $finalizeResult['auto_finalize_mode'] = ($stage === 'document.conduct') ? 'conduct_only' : 'add_lines_and_conduct';
     }
     return $finalizeResult;
 }
