@@ -740,6 +740,7 @@ require 'includes/header.php';
                 <button class="btn btn-light btn-sm" type="submit" name="action" value="retry_sync_errors">Повторить ошибки отправки</button>
             </form>
             <span class="text-muted">Найдено: <?php echo $totalRows; ?></span>
+            <button type="button" class="btn btn-light btn-sm" id="products-compact-toggle">Компактный вид: вкл</button>
         </div>
     </div>
 
@@ -814,12 +815,12 @@ require 'includes/header.php';
                     <th>Метраж</th>
                     <th>Себест.</th>
                     <th>Доставка</th>
-                    <th>Цена за метр (KGS)</th>
+                    <th class="sticky-col sticky-col-price">Цена за метр (KGS)</th>
                     <th>1-4</th>
                     <th>5-9</th>
                     <th>10-19</th>
                     <th>20+</th>
-                    <th>Действия</th>
+                    <th class="sticky-col sticky-col-actions">Действия</th>
                 </tr>
             </thead>
             <tbody>
@@ -855,7 +856,7 @@ require 'includes/header.php';
                             <span class="cell-view"><?php echo htmlspecialchars((string)$p['delivery_price']); ?></span>
                             <input class="form-control cell-edit" data-field="delivery_price" type="text" value="<?php echo htmlspecialchars((string)$p['delivery_price']); ?>">
                         </td>
-                        <td>
+                        <td class="sticky-col sticky-col-price">
                             <span class="cell-view"><?php echo htmlspecialchars((string)$p['price_per_meter']); ?></span>
                             <input class="form-control cell-edit" data-field="price_per_meter" type="text" value="<?php echo htmlspecialchars((string)$p['price_per_meter']); ?>">
                         </td>
@@ -875,7 +876,7 @@ require 'includes/header.php';
                             <span class="cell-view"><?php echo htmlspecialchars((string)$p['price_20_plus']); ?></span>
                             <input class="form-control cell-edit" data-field="price_20_plus" type="text" value="<?php echo htmlspecialchars((string)$p['price_20_plus']); ?>">
                         </td>
-                        <td>
+                        <td class="sticky-col sticky-col-actions">
                             <div class="products-row-actions">
                                 <button type="button" class="btn btn-light btn-sm inline-edit-btn">Ред.</button>
                                 <button type="button" class="btn btn-success btn-sm inline-save-btn">Сохранить</button>
@@ -1039,6 +1040,32 @@ require 'includes/header.php';
             for (var i = 0; i < selectors.length; i++) {
                 selectors[i].checked = selectAll.checked;
             }
+        });
+    }
+
+    var compactBtn = document.getElementById('products-compact-toggle');
+    if (compactBtn) {
+        var applyCompact = function (enabled) {
+            if (enabled) {
+                document.body.classList.add('products-compact');
+                compactBtn.textContent = 'Компактный вид: вкл';
+            } else {
+                document.body.classList.remove('products-compact');
+                compactBtn.textContent = 'Компактный вид: выкл';
+            }
+        };
+        var compactEnabled = true;
+        try {
+            var stored = localStorage.getItem('products_compact_mode');
+            if (stored === '0') {
+                compactEnabled = false;
+            }
+        } catch (_e) {}
+        applyCompact(compactEnabled);
+        compactBtn.addEventListener('click', function () {
+            compactEnabled = !compactEnabled;
+            applyCompact(compactEnabled);
+            try { localStorage.setItem('products_compact_mode', compactEnabled ? '1' : '0'); } catch (_e) {}
         });
     }
 })();

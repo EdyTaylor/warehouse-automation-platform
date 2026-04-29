@@ -110,6 +110,9 @@ try {
 
     <div class="card">
         <h3>Настройки интеграции</h3>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
+            <button type="button" class="btn btn-light btn-sm js-theme-toggle">🌓 Переключить тему</button>
+        </div>
         <form method="POST">
             <input type="hidden" name="action" value="save_integration_settings">
             <div class="form-grid">

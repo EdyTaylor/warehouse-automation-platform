@@ -16,6 +16,20 @@
     <script>
         // Активная навигация
         document.addEventListener('DOMContentLoaded', function() {
+            window.setUiTheme = function (theme) {
+                var next = theme === 'dark' ? 'dark' : 'light';
+                document.documentElement.setAttribute('data-theme', next);
+                try { localStorage.setItem('ui_theme', next); } catch (_e) {}
+            };
+
+            var themeButtons = document.querySelectorAll('.js-theme-toggle');
+            for (var tb = 0; tb < themeButtons.length; tb++) {
+                themeButtons[tb].addEventListener('click', function () {
+                    var current = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+                    window.setUiTheme(current === 'dark' ? 'light' : 'dark');
+                });
+            }
+
             function ensureSyncModal() {
                 var existing = document.getElementById('sync-modal-overlay');
                 if (existing) return existing;

@@ -20,6 +20,23 @@
     --transition: all 0.3s ease;
 }
 
+html[data-theme="dark"] {
+    --primary-color: #1f2937;
+    --secondary-color: #3b82f6;
+    --success-color: #16a34a;
+    --warning-color: #f59e0b;
+    --danger-color: #ef4444;
+    --light-color: #111827;
+    --dark-color: #0f172a;
+    --background-color: #0b1220;
+    --card-background: #111827;
+    --text-color: #e5e7eb;
+    --text-muted: #9ca3af;
+    --border-color: #334155;
+    --shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+    --shadow-hover: 0 4px 20px rgba(0, 0, 0, 0.45);
+}
+
 /* Базовые стили */
 * {
     box-sizing: border-box;
@@ -668,15 +685,16 @@ body {
 }
 
 .products-table {
-    font-size: 0.875rem;
+    font-size: 0.82rem;
     min-width: 1400px;
     table-layout: fixed;
 }
 
 .products-table th,
 .products-table td {
-    padding: 0.45rem 0.5rem;
-    vertical-align: top;
+    padding: 0.28rem 0.35rem;
+    vertical-align: middle;
+    line-height: 1.15;
 }
 
 .products-table thead th {
@@ -687,20 +705,20 @@ body {
 
 .products-table .cell-edit {
     display: none;
-    min-width: 90px;
-    padding: 0.35rem 0.45rem;
-    font-size: 0.8125rem;
+    min-width: 76px;
+    padding: 0.2rem 0.3rem;
+    font-size: 0.76rem;
 }
 
 .products-table .product-name-cell {
-    width: 260px;
-    min-width: 260px;
-    max-width: 260px;
+    width: 190px;
+    min-width: 190px;
+    max-width: 190px;
 }
 
 .products-table .product-name-text {
     display: inline-block;
-    max-width: 240px;
+    max-width: 178px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -708,7 +726,7 @@ body {
 
 .products-table .sticky-col {
     position: sticky;
-    background: #fff;
+    background: var(--card-background);
     z-index: 3;
 }
 
@@ -735,13 +753,64 @@ body {
 
 .products-row-actions {
     display: flex;
-    gap: 0.35rem;
-    flex-wrap: wrap;
-    min-width: 330px;
+    gap: 0.2rem;
+    flex-wrap: nowrap;
+    min-width: 285px;
 }
 
 .products-row-actions .btn {
     min-width: 0;
+    padding: 0.16rem 0.3rem;
+    font-size: 0.72rem;
+    line-height: 1.05;
+    white-space: nowrap;
+}
+
+.products-table .sticky-col-price {
+    position: sticky;
+    right: 285px;
+    background: var(--card-background);
+    z-index: 4;
+}
+
+.products-table .sticky-col-actions {
+    position: sticky;
+    right: 0;
+    background: var(--card-background);
+    z-index: 4;
+}
+
+.products-table thead .sticky-col-price,
+.products-table thead .sticky-col-actions {
+    background: var(--light-color);
+    z-index: 9;
+}
+
+body.products-compact .products-table {
+    font-size: 0.78rem;
+}
+
+body.products-compact .products-table th,
+body.products-compact .products-table td {
+    padding: 0.2rem 0.28rem;
+}
+
+body.products-compact .products-table .product-name-cell {
+    width: 170px;
+    min-width: 170px;
+    max-width: 170px;
+}
+
+body.products-compact .products-table .product-name-text {
+    max-width: 158px;
+}
+
+body.products-compact .products-row-actions {
+    min-width: 255px;
+}
+
+body.products-compact .products-table .sticky-col-price {
+    right: 255px;
 }
 
 .inline-row-error {

@@ -8,6 +8,19 @@ $current_page = basename($_SERVER['PHP_SELF']);
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title><?= isset($page_title) ? htmlspecialchars($page_title) : 'Склад пленок' ?></title>
+    <script>
+        (function () {
+            try {
+                var theme = localStorage.getItem('ui_theme');
+                if (theme !== 'dark' && theme !== 'light') {
+                    theme = 'light';
+                }
+                document.documentElement.setAttribute('data-theme', theme);
+            } catch (_e) {
+                document.documentElement.setAttribute('data-theme', 'light');
+            }
+        })();
+    </script>
     <link rel="stylesheet" href="assets/style.css">
     <link rel="icon" type="image/x-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏭</text></svg>">
 </head>
@@ -28,6 +41,7 @@ $current_page = basename($_SERVER['PHP_SELF']);
                 <a href="warehouse_orders.php" class="nav-link <?= $current_page == 'warehouse_orders.php' ? 'active' : '' ?>">🧰 Место кладовщика</a>
                 <a href="report_day.php" class="nav-link <?= in_array($current_page, ['report_day.php','report_month.php','report_all.php']) ? 'active' : '' ?>">📊 Отчеты</a>
                 <a href="sync_monitor.php" class="nav-link <?= $current_page == 'sync_monitor.php' ? 'active' : '' ?>">⚙️ Интеграция</a>
+                <button type="button" class="btn btn-light btn-sm js-theme-toggle">🌓 Тема</button>
             </nav>
         </div>
     </header>
