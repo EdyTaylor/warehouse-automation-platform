@@ -431,6 +431,7 @@ require 'includes/header.php';
                 <a href="api/sync_prices.php?action=to_b24" class="btn btn-warning" target="_blank">💰 Синхронизировать цены</a>
                 <a href="api/bitrix/import_products.php" class="btn btn-success" target="_blank">📥 Импортировать товары из Б24</a>
                 <a href="b24_sales.php" class="btn btn-light">📋 Очередь резерва Б24</a>
+                <a href="warehouse_orders.php" class="btn btn-light">🧰 Рабочее место кладовщика</a>
             </div>
             <?php if ($b24Queue): ?>
                 <p class="text-muted" style="margin:0;">
