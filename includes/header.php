@@ -26,7 +26,7 @@ $current_page = basename($_SERVER['PHP_SELF']);
                 <a href="sell.php" class="nav-link <?= $current_page == 'sell.php' ? 'active' : '' ?>">💰 Продажи</a>
                 <a href="b24_sales.php" class="nav-link <?= $current_page == 'b24_sales.php' ? 'active' : '' ?>">🔄 Б24</a>
                 <a href="report_day.php" class="nav-link <?= in_array($current_page, ['report_day.php','report_month.php','report_all.php']) ? 'active' : '' ?>">📊 Отчеты</a>
-                <a href="sync_monitor.php" class="nav-link <?= $current_page == 'sync_monitor.php' ? 'active' : '' ?>">🩺 Синк</a>
+                <a href="sync_monitor.php" class="nav-link <?= $current_page == 'sync_monitor.php' ? 'active' : '' ?>">⚙️ Интеграция</a>
             </nav>
         </div>
     </header>

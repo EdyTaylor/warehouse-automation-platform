@@ -3,27 +3,13 @@
 // Fill these values for your Bitrix24 portal.
 // Keep methods configurable because portals may differ by enabled modules.
 return [
-    // Fallback base URL (used only if exact method URL is absent in method_urls).
-    'webhook' => 'https://llumar.bitrix24.kz/rest/13/ip8r13jt88ilpbs2/',
+    // Universal CRM webhook (crm scope).
+    'webhook' => 'https://llumar.bitrix24.kz/rest/13/s845opt8ba3jchft/',
+    // Universal Catalog+CRM webhook (catalog + crm scopes).
+    'catalog_webhook' => 'https://llumar.bitrix24.kz/rest/13/8l0ds7zlh54wl1ou/',
 
-    // Method-specific incoming webhooks provided by Bitrix24.
-    'method_urls' => [
-        'crm.product.add' => 'https://llumar.bitrix24.kz/rest/13/ip8r13jt88ilpbs2/crm.product.add.json',
-        'crm.product.update' => 'https://llumar.bitrix24.kz/rest/13/ip8r13jt88ilpbs2/crm.product.update.json',
-        'crm.product.get' => 'https://llumar.bitrix24.kz/rest/13/ip8r13jt88ilpbs2/crm.product.get.json',
-        'crm.timeline.comment.add' => 'https://llumar.bitrix24.kz/rest/13/gmtqmb1w19gtcs5l/crm.timeline.comment.add.json',
-        'crm.deal.get' => 'https://llumar.bitrix24.kz/rest/13/d58tgvvw264z07u5/crm.deal.get.json',
-        'crm.deal.productrows.get' => 'https://llumar.bitrix24.kz/rest/13/eovptmewpkx5dt7u/crm.deal.productrows.get.json',
-        'crm.deal.productrows.set' => 'https://llumar.bitrix24.kz/rest/13/ev7sa3pxlnh2tn8g/crm.deal.productrows.set.json',
-        'crm.deal.update' => 'https://llumar.bitrix24.kz/rest/13/35eizcjklzg4egue/crm.deal.update.json',
-        'crm.product.list' => 'https://llumar.bitrix24.kz/rest/13/xpkt5d6cug7jxoz1/crm.product.list.json',
-        'crm.item.add' => 'https://llumar.bitrix24.kz/rest/13/qwfc9v76jjktoe59/crm.item.add.json',
-        'crm.item.update' => 'https://llumar.bitrix24.kz/rest/13/soqga5z4vhqafszx/crm.item.update.json',
-        'crm.item.get' => 'https://llumar.bitrix24.kz/rest/13/kwogv9iv8js3bkdv/crm.item.get.json',
-        'crm.item.list' => 'https://llumar.bitrix24.kz/rest/13/7ngkxdueiqcm9x4r/crm.item.list.json',
-        'crm.item.productrow.set' => 'https://llumar.bitrix24.kz/rest/13/w6sa7rewxjqzgo4s/crm.item.productrow.set.json',
-        'crm.item.productrow.get' => 'https://llumar.bitrix24.kz/rest/13/r10l0l5sgrtdhxy2/crm.item.productrow.get.json'
-    ],
+    // Optional method-specific overrides. Keep empty when using universal webhooks above.
+    'method_urls' => [],
 
     // Product available stock field in Bitrix product catalog.
     // Example: UF_CRM_STOCK_M

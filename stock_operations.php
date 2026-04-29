@@ -2,11 +2,24 @@
 ini_set('display_errors', 1);
 error_reporting(E_ALL);
 header('Content-Type: text/html; charset=utf-8');
+if (session_status() !== PHP_SESSION_ACTIVE) {
+    session_start();
+}
 
 require 'db.php';
 require_once __DIR__ . '/functions/stock_movements.php';
 require_once __DIR__ . '/api/bitrix/send.php';
+require_once __DIR__ . '/functions/app_settings.php';
 $db = getDB();
+
+function ensureColumnExists($db, $tableName, $columnName, $columnSql) {
+    $stmt = $db->prepare("SHOW COLUMNS FROM `{$tableName}` LIKE ?");
+    $stmt->execute(array($columnName));
+    $exists = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$exists) {
+        $db->exec("ALTER TABLE `{$tableName}` ADD COLUMN {$columnSql}");
+    }
+}
 
 function ensureStockOperationTables($db) {
     $db->exec("
@@ -40,6 +53,153 @@ function ensureStockOperationTables($db) {
             KEY idx_stock_operation_doc (doc_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     ");
+
+    ensureColumnExists($db, 'stock_operation_docs', 'b24_document_id', '`b24_document_id` int DEFAULT NULL');
+    ensureColumnExists($db, 'stock_operation_docs', 'b24_sync_status', '`b24_sync_status` varchar(20) NOT NULL DEFAULT \'pending\'');
+    ensureColumnExists($db, 'stock_operation_docs', 'b24_sync_response', '`b24_sync_response` longtext');
+}
+
+function syncOperationDocumentToBitrix($db, $docId, $docType, $docNumber, $commentary, $lineRows) {
+    $storeFrom = intval(getAppSetting($db, 'default_store_from_id', '1'));
+    $storeTo = intval(getAppSetting($db, 'default_store_to_id', '1'));
+    $responsibleId = intval(getAppSetting($db, 'default_responsible_id', '1'));
+    $currency = (string)getAppSetting($db, 'default_currency', 'KGS');
+
+    $docMap = array(
+        'receipt' => 'A',
+        'writeoff' => 'S'
+    );
+    if (!isset($docMap[$docType])) {
+        return array('ok' => false, 'error' => 'unsupported_doc_type');
+    }
+    $b24DocType = $docMap[$docType];
+
+    $docResp = sendToBitrix('catalog.document.add', array(
+        'fields' => array(
+            'docType' => $b24DocType,
+            'currency' => $currency,
+            'responsibleId' => $responsibleId,
+            'docNumber' => (string)$docNumber,
+            'title' => ($docType === 'receipt' ? 'Приход' : 'Списание') . ' #' . intval($docId),
+            'commentary' => (string)$commentary
+        )
+    ));
+    if (!is_array($docResp) || isset($docResp['error'])) {
+        return array('ok' => false, 'stage' => 'document.add', 'response' => $docResp);
+    }
+
+    $b24DocId = 0;
+    if (isset($docResp['result']['document']['id'])) {
+        $b24DocId = intval($docResp['result']['document']['id']);
+    } elseif (isset($docResp['result']['id'])) {
+        $b24DocId = intval($docResp['result']['id']);
+    } elseif (isset($docResp['result'])) {
+        $b24DocId = intval($docResp['result']);
+    }
+    if ($b24DocId <= 0) {
+        return array('ok' => false, 'stage' => 'document.add', 'response' => $docResp);
+    }
+
+    $lineResponses = array();
+    foreach ($lineRows as $line) {
+        $localProductId = intval(isset($line['product_id']) ? $line['product_id'] : 0);
+        if ($localProductId <= 0) {
+            continue;
+        }
+
+        $pStmt = $db->prepare("SELECT b24_product_id, price_per_meter FROM products WHERE id = ? LIMIT 1");
+        $pStmt->execute(array($localProductId));
+        $prod = $pStmt->fetch(PDO::FETCH_ASSOC);
+        $b24ProductId = intval(isset($prod['b24_product_id']) ? $prod['b24_product_id'] : 0);
+        if ($b24ProductId <= 0) {
+            $lineResponses[] = array(
+                'product_id' => $localProductId,
+                'status' => 'skip_no_b24_product_id'
+            );
+            continue;
+        }
+
+        $amount = floatval(isset($line['quantity_m']) ? $line['quantity_m'] : 0);
+        if ($amount <= 0) {
+            $amount = floatval(isset($line['qty_rolls']) ? $line['qty_rolls'] : 0);
+        }
+        if ($amount <= 0) {
+            continue;
+        }
+
+        $elementFields = array(
+            'docId' => $b24DocId,
+            'elementId' => $b24ProductId,
+            'amount' => $amount
+        );
+        if ($docType === 'receipt') {
+            $elementFields['storeTo'] = $storeTo;
+        } else {
+            $elementFields['storeFrom'] = $storeFrom;
+        }
+
+        $pricePerMeter = floatval(isset($prod['price_per_meter']) ? $prod['price_per_meter'] : 0);
+        if ($pricePerMeter > 0) {
+            $elementFields['price'] = $pricePerMeter;
+            $elementFields['currency'] = $currency;
+        }
+
+        $lineResp = sendToBitrix('catalog.document.element.add', array('fields' => $elementFields));
+        $lineResponses[] = array(
+            'product_id' => $localProductId,
+            'b24_product_id' => $b24ProductId,
+            'amount' => $amount,
+            'response' => $lineResp
+        );
+        if (!is_array($lineResp) || isset($lineResp['error'])) {
+            return array(
+                'ok' => false,
+                'stage' => 'document.element.add',
+                'b24_document_id' => $b24DocId,
+                'line_responses' => $lineResponses,
+                'response' => $lineResp
+            );
+        }
+    }
+
+    $conductResp = sendToBitrix('catalog.document.conduct', array('id' => $b24DocId));
+    if (!is_array($conductResp) || isset($conductResp['error'])) {
+        return array(
+            'ok' => false,
+            'stage' => 'document.conduct',
+            'b24_document_id' => $b24DocId,
+            'line_responses' => $lineResponses,
+            'response' => $conductResp
+        );
+    }
+
+    return array(
+        'ok' => true,
+        'b24_document_id' => $b24DocId,
+        'line_responses' => $lineResponses,
+        'conduct_response' => $conductResp
+    );
+}
+
+function ensureFormToken($name) {
+    if (!isset($_SESSION['form_tokens']) || !is_array($_SESSION['form_tokens'])) {
+        $_SESSION['form_tokens'] = array();
+    }
+    $token = bin2hex(random_bytes(16));
+    $_SESSION['form_tokens'][$name] = $token;
+    return $token;
+}
+
+function validateFormToken($name, $token) {
+    if (!isset($_SESSION['form_tokens']) || !is_array($_SESSION['form_tokens'])) {
+        return false;
+    }
+    if (!isset($_SESSION['form_tokens'][$name])) {
+        return false;
+    }
+    $valid = hash_equals((string)$_SESSION['form_tokens'][$name], (string)$token);
+    unset($_SESSION['form_tokens'][$name]);
+    return $valid;
 }
 
 function ensureProductForReceipt($db, $productId, $productName, $rollLength, $pricePerRoll) {
@@ -183,7 +343,78 @@ $successMsg = '';
 $errorMsg = '';
 ensureStockOperationTables($db);
 
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'retry_b24_sync') {
+    if (!validateFormToken('retry_b24_sync', isset($_POST['form_token']) ? $_POST['form_token'] : '')) {
+        $errorMsg = 'Сессия формы устарела. Обновите страницу и повторите.';
+    } else {
+    $docId = intval(isset($_POST['doc_id']) ? $_POST['doc_id'] : 0);
+    if ($docId <= 0) {
+        $errorMsg = 'Некорректный документ для повторного синка.';
+    } else {
+        try {
+            $docStmt = $db->prepare("
+                SELECT id, operation_type, doc_number, comment_text, b24_sync_status, b24_document_id
+                FROM stock_operation_docs
+                WHERE id = ?
+                LIMIT 1
+            ");
+            $docStmt->execute(array($docId));
+            $doc = $docStmt->fetch(PDO::FETCH_ASSOC);
+            if (!$doc) {
+                throw new Exception('Документ не найден.');
+            }
+            if (!in_array($doc['operation_type'], array('receipt', 'writeoff'), true)) {
+                throw new Exception('Повторный синк доступен только для прихода и списания.');
+            }
+            if (intval(isset($doc['b24_document_id']) ? $doc['b24_document_id'] : 0) > 0 && (string)$doc['b24_sync_status'] === 'sent') {
+                throw new Exception('Документ уже синхронизирован в Б24: #' . intval($doc['b24_document_id']));
+            }
+
+            $linesStmt = $db->prepare("
+                SELECT product_id, qty_rolls, quantity_m
+                FROM stock_operation_lines
+                WHERE doc_id = ?
+                ORDER BY id ASC
+            ");
+            $linesStmt->execute(array($docId));
+            $lineRows = $linesStmt->fetchAll(PDO::FETCH_ASSOC);
+            if (empty($lineRows)) {
+                throw new Exception('У документа нет строк для синка.');
+            }
+
+            $syncResult = syncOperationDocumentToBitrix(
+                $db,
+                $docId,
+                (string)$doc['operation_type'],
+                (string)$doc['doc_number'],
+                (string)$doc['comment_text'],
+                $lineRows
+            );
+            $syncStatus = ($syncResult && isset($syncResult['ok']) && $syncResult['ok']) ? 'sent' : 'error';
+            $db->prepare("UPDATE stock_operation_docs SET b24_document_id = ?, b24_sync_status = ?, b24_sync_response = ? WHERE id = ?")
+                ->execute(array(
+                    isset($syncResult['b24_document_id']) ? intval($syncResult['b24_document_id']) : null,
+                    $syncStatus,
+                    json_encode($syncResult, JSON_UNESCAPED_UNICODE),
+                    $docId
+                ));
+
+            if ($syncStatus === 'sent') {
+                $successMsg = 'Повторный синк документа #' . $docId . ' выполнен. Б24 документ #' . intval($syncResult['b24_document_id']);
+            } else {
+                $errorMsg = 'Повторный синк документа #' . $docId . ' завершился с ошибкой.';
+            }
+        } catch (Exception $e) {
+            $errorMsg = $e->getMessage();
+        }
+    }
+    }
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'delete_doc') {
+    if (!validateFormToken('delete_doc', isset($_POST['form_token']) ? $_POST['form_token'] : '')) {
+        $errorMsg = 'Сессия формы устарела. Обновите страницу и повторите.';
+    } else {
     $docId = intval(isset($_POST['doc_id']) ? $_POST['doc_id'] : 0);
     if ($docId <= 0) {
         $errorMsg = 'Некорректный документ для удаления.';
@@ -208,9 +439,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             $errorMsg = $e->getMessage();
         }
     }
+    }
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'create_receipt') {
+    if (!validateFormToken('create_receipt', isset($_POST['form_token']) ? $_POST['form_token'] : '')) {
+        $errorMsg = 'Сессия формы устарела. Обновите страницу и повторите.';
+    } else {
     $docNumber = trim(isset($_POST['doc_number']) ? $_POST['doc_number'] : '');
     $supplier = trim(isset($_POST['supplier']) ? $_POST['supplier'] : '');
     $commentText = trim(isset($_POST['comment_text']) ? $_POST['comment_text'] : '');
@@ -298,16 +533,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         $db->prepare("UPDATE stock_operation_docs SET total_amount = ? WHERE id = ?")
             ->execute(array($totalAmount, $docId));
         $db->commit();
+        $syncResult = syncOperationDocumentToBitrix($db, $docId, 'receipt', $docNumber, $commentText, $db->query("SELECT product_id, qty_rolls, quantity_m FROM stock_operation_lines WHERE doc_id=" . intval($docId))->fetchAll(PDO::FETCH_ASSOC));
+        $syncStatus = ($syncResult && isset($syncResult['ok']) && $syncResult['ok']) ? 'sent' : 'error';
+        $db->prepare("UPDATE stock_operation_docs SET b24_document_id = ?, b24_sync_status = ?, b24_sync_response = ? WHERE id = ?")
+            ->execute(array(
+                isset($syncResult['b24_document_id']) ? intval($syncResult['b24_document_id']) : null,
+                $syncStatus,
+                json_encode($syncResult, JSON_UNESCAPED_UNICODE),
+                $docId
+            ));
         $successMsg = 'Документ прихода #' . $docId . ' проведен. Сумма: ' . number_format($totalAmount, 2, '.', ' ');
+        if ($syncStatus === 'sent') {
+            $successMsg .= ' | Б24 документ #' . intval($syncResult['b24_document_id']);
+        } else {
+            $errorMsg = 'Приход проведен локально, но синк в Б24 завершился с ошибкой.';
+        }
     } catch (Exception $e) {
         if ($db->inTransaction()) {
             $db->rollBack();
         }
         $errorMsg = $e->getMessage();
     }
+    }
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'create_writeoff') {
+    if (!validateFormToken('create_writeoff', isset($_POST['form_token']) ? $_POST['form_token'] : '')) {
+        $errorMsg = 'Сессия формы устарела. Обновите страницу и повторите.';
+    } else {
     $docNumber = trim(isset($_POST['writeoff_doc_number']) ? $_POST['writeoff_doc_number'] : '');
     $commentText = trim(isset($_POST['writeoff_comment_text']) ? $_POST['writeoff_comment_text'] : '');
     $lineProductId = isset($_POST['writeoff_product_id']) && is_array($_POST['writeoff_product_id']) ? $_POST['writeoff_product_id'] : array();
@@ -378,14 +631,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         }
 
         $db->commit();
+        $syncResult = syncOperationDocumentToBitrix($db, $docId, 'writeoff', $docNumber, $commentText, $db->query("SELECT product_id, qty_rolls, quantity_m FROM stock_operation_lines WHERE doc_id=" . intval($docId))->fetchAll(PDO::FETCH_ASSOC));
+        $syncStatus = ($syncResult && isset($syncResult['ok']) && $syncResult['ok']) ? 'sent' : 'error';
+        $db->prepare("UPDATE stock_operation_docs SET b24_document_id = ?, b24_sync_status = ?, b24_sync_response = ? WHERE id = ?")
+            ->execute(array(
+                isset($syncResult['b24_document_id']) ? intval($syncResult['b24_document_id']) : null,
+                $syncStatus,
+                json_encode($syncResult, JSON_UNESCAPED_UNICODE),
+                $docId
+            ));
         $successMsg = 'Документ списания #' . $docId . ' проведен.';
+        if ($syncStatus === 'sent') {
+            $successMsg .= ' | Б24 документ #' . intval($syncResult['b24_document_id']);
+        } else {
+            $errorMsg = 'Списание проведено локально, но синк в Б24 завершился с ошибкой.';
+        }
     } catch (Exception $e) {
         if ($db->inTransaction()) {
             $db->rollBack();
         }
         $errorMsg = $e->getMessage();
     }
+    }
 }
+
+$receiptToken = ensureFormToken('create_receipt');
+$writeoffToken = ensureFormToken('create_writeoff');
+$deleteToken = ensureFormToken('delete_doc');
+$retryToken = ensureFormToken('retry_b24_sync');
 
 $products = $db->query("SELECT id, name, roll_length, purchase_price FROM products ORDER BY name ASC")->fetchAll(PDO::FETCH_ASSOC);
 $stockProducts = $db->query("
@@ -403,7 +676,7 @@ $stockProducts = $db->query("
     ORDER BY p.name ASC
 ")->fetchAll(PDO::FETCH_ASSOC);
 $recentDocs = $db->query("
-    SELECT id, operation_type, doc_number, supplier, total_amount, status, created_at
+    SELECT id, operation_type, doc_number, supplier, total_amount, status, created_at, b24_document_id, b24_sync_status
     FROM stock_operation_docs
     ORDER BY id DESC
     LIMIT 20
@@ -428,6 +701,7 @@ require 'includes/header.php';
 
         <form method="POST" id="receipt-doc-form">
             <input type="hidden" name="action" value="create_receipt">
+            <input type="hidden" name="form_token" value="<?= htmlspecialchars($receiptToken) ?>">
             <div class="form-row">
                 <div class="form-group">
                     <label>Номер документа</label>
@@ -489,6 +763,7 @@ require 'includes/header.php';
         <h3>🗑️ Создать списание</h3>
         <form method="POST" id="writeoff-doc-form">
             <input type="hidden" name="action" value="create_writeoff">
+            <input type="hidden" name="form_token" value="<?= htmlspecialchars($writeoffToken) ?>">
             <div class="form-row">
                 <div class="form-group">
                     <label>Номер документа</label>
@@ -548,8 +823,11 @@ require 'includes/header.php';
                         <th>Поставщик</th>
                         <th>Сумма</th>
                         <th>Статус</th>
+                        <th>Б24</th>
                         <th>Дата</th>
                         <th>Документ</th>
+                        <th>Синк Б24</th>
+                        <th>Ошибка</th>
                         <th>Удалить</th>
                     </tr>
                 </thead>
@@ -562,13 +840,40 @@ require 'includes/header.php';
                             <td><?= htmlspecialchars((string)$d['supplier']) ?></td>
                             <td><?= number_format(floatval($d['total_amount']), 2, '.', ' ') ?></td>
                             <td><?= htmlspecialchars((string)$d['status']) ?></td>
+                            <td>
+                                <?php if (!empty($d['b24_document_id'])): ?>
+                                    #<?= intval($d['b24_document_id']) ?> (<?= htmlspecialchars((string)$d['b24_sync_status']) ?>)
+                                <?php else: ?>
+                                    <?= htmlspecialchars((string)$d['b24_sync_status']) ?>
+                                <?php endif; ?>
+                            </td>
                             <td><?= htmlspecialchars((string)$d['created_at']) ?></td>
                             <td>
                                 <a href="stock_operation_print.php?id=<?= intval($d['id']) ?>" class="btn btn-light btn-sm" target="_blank">Открыть</a>
                             </td>
                             <td>
+                                <?php if ((string)$d['b24_sync_status'] !== 'sent' && in_array((string)$d['operation_type'], array('receipt', 'writeoff'), true)): ?>
+                                    <form method="POST" style="display:inline;">
+                                        <input type="hidden" name="action" value="retry_b24_sync">
+                                        <input type="hidden" name="form_token" value="<?= htmlspecialchars($retryToken) ?>">
+                                        <input type="hidden" name="doc_id" value="<?= intval($d['id']) ?>">
+                                        <button type="submit" class="btn btn-warning btn-sm">Повторить</button>
+                                    </form>
+                                <?php else: ?>
+                                    -
+                                <?php endif; ?>
+                            </td>
+                            <td>
+                                <?php if ((string)$d['b24_sync_status'] === 'error' && !empty($d['b24_sync_response'])): ?>
+                                    <button type="button" class="btn btn-light btn-sm js-show-b24-error" data-error="<?= htmlspecialchars((string)$d['b24_sync_response']) ?>">Подробнее</button>
+                                <?php else: ?>
+                                    -
+                                <?php endif; ?>
+                            </td>
+                            <td>
                                 <form method="POST" style="display:inline;" onsubmit="return confirm('Удалить документ #<?= intval($d['id']) ?>?');">
                                     <input type="hidden" name="action" value="delete_doc">
+                                    <input type="hidden" name="form_token" value="<?= htmlspecialchars($deleteToken) ?>">
                                     <input type="hidden" name="doc_id" value="<?= intval($d['id']) ?>">
                                     <button type="submit" class="btn btn-danger btn-sm">Удалить</button>
                                 </form>
@@ -581,12 +886,9 @@ require 'includes/header.php';
     </div>
 
     <div class="card">
-        <h3>Синхронизация</h3>
-        <div style="display:flex; gap:10px; flex-wrap:wrap;">
-            <a href="api/bitrix/sync_stock.php?push=1" class="btn btn-warning" target="_blank">📤 Синхронизировать остатки</a>
-            <a href="api/sync_prices.php?action=to_b24" class="btn btn-warning" target="_blank">💰 Синхронизировать цены</a>
-            <a href="api/bitrix/import_products.php" class="btn btn-success" target="_blank">📥 Импортировать товары</a>
-        </div>
+        <h3>Технические моменты</h3>
+        <p>Синк, настройки интеграции и скорость вынесены в отдельную вкладку.</p>
+        <a href="sync_monitor.php" class="btn btn-secondary">⚙️ Открыть центр интеграции</a>
     </div>
 </main>
 
@@ -699,6 +1001,49 @@ require 'includes/header.php';
         }
         bindRow(newRow);
         tableBody.appendChild(newRow);
+    });
+})();
+
+(function () {
+    function ensureErrorModal() {
+        var existing = document.getElementById('b24-error-modal');
+        if (existing) return existing;
+        var wrap = document.createElement('div');
+        wrap.id = 'b24-error-modal';
+        wrap.style.cssText = 'display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:99999;padding:20px;box-sizing:border-box;';
+        wrap.innerHTML = ''
+            + '<div style="max-width:760px;margin:8vh auto;background:#fff;border-radius:10px;overflow:hidden;">'
+            + '<div style="padding:12px 16px;background:#f5f7fb;display:flex;justify-content:space-between;align-items:center;">'
+            + '<strong>Ошибка синка Б24</strong><button type="button" id="b24-error-close" style="border:none;background:transparent;font-size:20px;cursor:pointer;">×</button>'
+            + '</div>'
+            + '<pre id="b24-error-body" style="margin:0;padding:14px 16px;max-height:60vh;overflow:auto;white-space:pre-wrap;"></pre>'
+            + '</div>';
+        document.body.appendChild(wrap);
+        wrap.querySelector('#b24-error-close').addEventListener('click', function () { wrap.style.display = 'none'; });
+        wrap.addEventListener('click', function (e) { if (e.target === wrap) wrap.style.display = 'none'; });
+        return wrap;
+    }
+    document.querySelectorAll('.js-show-b24-error').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            var modal = ensureErrorModal();
+            var body = modal.querySelector('#b24-error-body');
+            var text = btn.getAttribute('data-error') || '';
+            try { text = JSON.stringify(JSON.parse(text), null, 2); } catch (_e) {}
+            body.textContent = text;
+            modal.style.display = 'block';
+        });
+    });
+})();
+
+(function () {
+    document.querySelectorAll('form#receipt-doc-form, form#writeoff-doc-form').forEach(function(form) {
+        form.addEventListener('submit', function() {
+            var btn = form.querySelector('button[type="submit"]');
+            if (btn) {
+                btn.disabled = true;
+                btn.textContent = '⏳ Ждем ответ Б24...';
+            }
+        });
     });
 })();
 </script>

@@ -6,6 +6,7 @@ header('Content-Type: application/json; charset=utf-8');
 
 require __DIR__ . '/../../db.php';
 require __DIR__ . '/send.php';
+require_once __DIR__ . '/../../functions/app_settings.php';
 
 $db = getDB();
 $cfg = require __DIR__ . '/config.php';
@@ -15,7 +16,11 @@ $field = isset($_GET['field']) ? $_GET['field'] : $cfg['product_available_field'
 $method = isset($_GET['method']) ? $_GET['method'] : $cfg['product_update_method'];
 $push = isset($_GET['push']) ? intval($_GET['push']) : 1;
 $offset = isset($_GET['offset']) ? max(0, intval($_GET['offset'])) : 0;
-$limit = isset($_GET['limit']) ? max(1, min(200, intval($_GET['limit']))) : 50;
+$defaultLimit = intval(getAppSetting($db, 'sync_batch_limit', '100'));
+if ($defaultLimit <= 0) {
+    $defaultLimit = 100;
+}
+$limit = isset($_GET['limit']) ? max(1, min(200, intval($_GET['limit']))) : max(1, min(200, $defaultLimit));
 
 $totalRow = $db->query("
     SELECT COUNT(*) as cnt

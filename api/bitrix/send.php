@@ -10,7 +10,13 @@ function sendToBitrix($method, $data = []) {
     if (isset($config['method_urls']) && isset($config['method_urls'][$method])) {
         $url = $config['method_urls'][$method];
     } else {
-        $webhook = isset($config['webhook']) ? $config['webhook'] : '';
+        $isCatalogMethod = strpos((string)$method, 'catalog.') === 0;
+        $webhook = '';
+        if ($isCatalogMethod && isset($config['catalog_webhook']) && trim((string)$config['catalog_webhook']) !== '') {
+            $webhook = $config['catalog_webhook'];
+        } else {
+            $webhook = isset($config['webhook']) ? $config['webhook'] : '';
+        }
         // Bitrix incoming webhooks expect *.json endpoint.
         $url = rtrim($webhook, '/') . '/' . $method . '.json';
     }
