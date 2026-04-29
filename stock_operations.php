@@ -161,6 +161,68 @@ function pauseBeforeConduct($db) {
     }
 }
 
+function waitUntilB24DocumentConducted($db, $b24DocId) {
+    $attempts = intval(getAppSetting($db, 'b24_conduct_check_attempts', '5'));
+    if ($attempts < 1) {
+        $attempts = 1;
+    }
+    if ($attempts > 20) {
+        $attempts = 20;
+    }
+    $sleepMs = intval(getAppSetting($db, 'b24_doc_delay_ms', '700'));
+    if ($sleepMs < 100) {
+        $sleepMs = 100;
+    }
+    if ($sleepMs > 5000) {
+        $sleepMs = 5000;
+    }
+    for ($i = 0; $i < $attempts; $i++) {
+        if (isB24DocumentConducted($b24DocId)) {
+            return true;
+        }
+        usleep($sleepMs * 1000);
+    }
+    return false;
+}
+
+function conductAndEnsurePosted($db, $b24DocId) {
+    $conductResp = sendToBitrix('catalog.document.conduct', array('id' => intval($b24DocId)));
+    if (waitUntilB24DocumentConducted($db, $b24DocId)) {
+        return array(
+            'ok' => true,
+            'b24_document_id' => intval($b24DocId),
+            'conduct_response' => $conductResp,
+            'status_checked' => 'Y'
+        );
+    }
+
+    // Fallback: some portals expose posting as status update.
+    $updateResp = sendToBitrix('catalog.document.update', array(
+        'id' => intval($b24DocId),
+        'fields' => array(
+            'status' => 'Y',
+            'STATUS' => 'Y'
+        )
+    ));
+    if (waitUntilB24DocumentConducted($db, $b24DocId)) {
+        return array(
+            'ok' => true,
+            'b24_document_id' => intval($b24DocId),
+            'conduct_response' => $conductResp,
+            'conduct_fallback_update' => $updateResp,
+            'status_checked' => 'Y'
+        );
+    }
+
+    return array(
+        'ok' => false,
+        'stage' => 'document.conduct',
+        'b24_document_id' => intval($b24DocId),
+        'response' => $conductResp,
+        'fallback_update_response' => $updateResp
+    );
+}
+
 function syncOperationDocumentToBitrix($db, $docId, $docType, $docNumber, $commentary, $lineRows) {
     $storeFrom = intval(getAppSetting($db, 'default_store_from_id', '1'));
     $storeTo = intval(getAppSetting($db, 'default_store_to_id', '1'));
@@ -299,23 +361,13 @@ function syncOperationDocumentToBitrix($db, $docId, $docType, $docNumber, $comme
     $docTotal = calculateDocumentTotalFromLines($lineRows);
     updateB24DocumentTotal($b24DocId, $docTotal, $currency);
     pauseBeforeConduct($db);
-    $conductResp = sendToBitrix('catalog.document.conduct', array('id' => $b24DocId));
-    if (!is_array($conductResp) || isset($conductResp['error'])) {
-        return array(
-            'ok' => false,
-            'stage' => 'document.conduct',
-            'b24_document_id' => $b24DocId,
-            'line_responses' => $lineResponses,
-            'response' => $conductResp
-        );
+    $conductResult = conductAndEnsurePosted($db, $b24DocId);
+    if (!$conductResult['ok']) {
+        $conductResult['line_responses'] = $lineResponses;
+        return $conductResult;
     }
-
-    return array(
-        'ok' => true,
-        'b24_document_id' => $b24DocId,
-        'line_responses' => $lineResponses,
-        'conduct_response' => $conductResp
-    );
+    $conductResult['line_responses'] = $lineResponses;
+    return $conductResult;
 }
 
 function isB24DocumentConducted($b24DocId) {
@@ -385,28 +437,8 @@ function fetchB24DocumentElementsMap($b24DocId) {
 }
 
 function conductExistingB24Document($b24DocId) {
-    $conductResp = sendToBitrix('catalog.document.conduct', array('id' => intval($b24DocId)));
-    if (!is_array($conductResp) || isset($conductResp['error'])) {
-        if (isB24DocumentConducted($b24DocId)) {
-            return array(
-                'ok' => true,
-                'b24_document_id' => intval($b24DocId),
-                'conduct_response' => $conductResp,
-                'status_checked' => 'Y'
-            );
-        }
-        return array(
-            'ok' => false,
-            'stage' => 'document.conduct',
-            'b24_document_id' => intval($b24DocId),
-            'response' => $conductResp
-        );
-    }
-    return array(
-        'ok' => true,
-        'b24_document_id' => intval($b24DocId),
-        'conduct_response' => $conductResp
-    );
+    // Legacy wrapper kept for compatibility.
+    return conductAndEnsurePosted(getDB(), $b24DocId);
 }
 
 function addLinesAndConductExistingB24Document($db, $b24DocId, $docType, $lineRows) {
@@ -527,32 +559,13 @@ function addLinesAndConductExistingB24Document($db, $b24DocId, $docType, $lineRo
     $docTotal = calculateDocumentTotalFromLines($lineRows);
     updateB24DocumentTotal($b24DocId, $docTotal, $currency);
     pauseBeforeConduct($db);
-    $conductResp = sendToBitrix('catalog.document.conduct', array('id' => intval($b24DocId)));
-    if (!is_array($conductResp) || isset($conductResp['error'])) {
-        if (isB24DocumentConducted($b24DocId)) {
-            return array(
-                'ok' => true,
-                'b24_document_id' => intval($b24DocId),
-                'line_responses' => $lineResponses,
-                'conduct_response' => $conductResp,
-                'status_checked' => 'Y'
-            );
-        }
-        return array(
-            'ok' => false,
-            'stage' => 'document.conduct',
-            'b24_document_id' => intval($b24DocId),
-            'line_responses' => $lineResponses,
-            'response' => $conductResp
-        );
+    $conductResult = conductAndEnsurePosted($db, $b24DocId);
+    if (!$conductResult['ok']) {
+        $conductResult['line_responses'] = $lineResponses;
+        return $conductResult;
     }
-
-    return array(
-        'ok' => true,
-        'b24_document_id' => intval($b24DocId),
-        'line_responses' => $lineResponses,
-        'conduct_response' => $conductResp
-    );
+    $conductResult['line_responses'] = $lineResponses;
+    return $conductResult;
 }
 
 function tryFinalizePartialDocument($db, $operationType, $syncResult, $lineRows) {
@@ -568,7 +581,7 @@ function tryFinalizePartialDocument($db, $operationType, $syncResult, $lineRows)
     }
     $stage = isset($syncResult['stage']) ? (string)$syncResult['stage'] : '';
     if ($stage === 'document.conduct') {
-        $finalizeResult = conductExistingB24Document($b24DocId);
+        $finalizeResult = conductAndEnsurePosted($db, $b24DocId);
     } else {
         $finalizeResult = addLinesAndConductExistingB24Document($db, $b24DocId, (string)$operationType, $lineRows);
     }
