@@ -138,9 +138,17 @@ function syncOperationDocumentToBitrix($db, $docId, $docType, $docNumber, $comme
             $elementFields['storeFrom'] = $storeFrom;
         }
 
-        $pricePerMeter = floatval(isset($prod['price_per_meter']) ? $prod['price_per_meter'] : 0);
+        $lineRollLength = floatval(isset($line['roll_length']) ? $line['roll_length'] : 0);
+        $linePricePerRoll = floatval(isset($line['price_per_roll']) ? $line['price_per_roll'] : 0);
+        $pricePerMeter = 0.0;
+        if ($linePricePerRoll > 0 && $lineRollLength > 0) {
+            $pricePerMeter = $linePricePerRoll / $lineRollLength;
+        } else {
+            $pricePerMeter = floatval(isset($prod['price_per_meter']) ? $prod['price_per_meter'] : 0);
+        }
         if ($pricePerMeter > 0) {
             $elementFields['price'] = $pricePerMeter;
+            $elementFields['purchasingPrice'] = $pricePerMeter;
             $elementFields['currency'] = $currency;
         }
 
@@ -206,6 +214,16 @@ function validateFormToken($name, $token) {
     $valid = hash_equals((string)$_SESSION['form_tokens'][$name], (string)$token);
     unset($_SESSION['form_tokens'][$name]);
     return $valid;
+}
+
+function resolveB24SyncStatus($syncResult) {
+    if (is_array($syncResult) && isset($syncResult['ok']) && $syncResult['ok']) {
+        return 'sent';
+    }
+    if (is_array($syncResult) && !empty($syncResult['b24_document_id'])) {
+        return 'partial';
+    }
+    return 'error';
 }
 
 function ensureProductForReceipt($db, $productId, $productName, $rollLength, $pricePerRoll) {
@@ -376,27 +394,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 throw new Exception('Документ уже синхронизирован в Б24: #' . intval($doc['b24_document_id']));
             }
 
-            $linesStmt = $db->prepare("
-                SELECT product_id, qty_rolls, quantity_m
-                FROM stock_operation_lines
-                WHERE doc_id = ?
-                ORDER BY id ASC
-            ");
-            $linesStmt->execute(array($docId));
-            $lineRows = $linesStmt->fetchAll(PDO::FETCH_ASSOC);
-            if (empty($lineRows)) {
-                throw new Exception('У документа нет строк для синка.');
-            }
+            if (intval(isset($doc['b24_document_id']) ? $doc['b24_document_id'] : 0) > 0) {
+                $syncResult = array(
+                    'ok' => false,
+                    'stage' => 'document.conduct',
+                    'b24_document_id' => intval($doc['b24_document_id']),
+                    'response' => sendToBitrix('catalog.document.conduct', array('id' => intval($doc['b24_document_id'])))
+                );
+                if (is_array($syncResult['response']) && !isset($syncResult['response']['error'])) {
+                    $syncResult['ok'] = true;
+                }
+            } else {
+                $linesStmt = $db->prepare("
+                    SELECT product_id, qty_rolls, quantity_m, roll_length, price_per_roll
+                    FROM stock_operation_lines
+                    WHERE doc_id = ?
+                    ORDER BY id ASC
+                ");
+                $linesStmt->execute(array($docId));
+                $lineRows = $linesStmt->fetchAll(PDO::FETCH_ASSOC);
+                if (empty($lineRows)) {
+                    throw new Exception('У документа нет строк для синка.');
+                }
 
-            $syncResult = syncOperationDocumentToBitrix(
-                $db,
-                $docId,
-                (string)$doc['operation_type'],
-                (string)$doc['doc_number'],
-                (string)$doc['comment_text'],
-                $lineRows
-            );
-            $syncStatus = ($syncResult && isset($syncResult['ok']) && $syncResult['ok']) ? 'sent' : 'error';
+                $syncResult = syncOperationDocumentToBitrix(
+                    $db,
+                    $docId,
+                    (string)$doc['operation_type'],
+                    (string)$doc['doc_number'],
+                    (string)$doc['comment_text'],
+                    $lineRows
+                );
+            }
+            $syncStatus = resolveB24SyncStatus($syncResult);
             $db->prepare("UPDATE stock_operation_docs SET b24_document_id = ?, b24_sync_status = ?, b24_sync_response = ? WHERE id = ?")
                 ->execute(array(
                     isset($syncResult['b24_document_id']) ? intval($syncResult['b24_document_id']) : null,
@@ -407,6 +437,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
 
             if ($syncStatus === 'sent') {
                 $successMsg = 'Повторный синк документа #' . $docId . ' выполнен. Б24 документ #' . intval($syncResult['b24_document_id']);
+            } elseif ($syncStatus === 'partial') {
+                $errorMsg = 'Документ #' . $docId . ' уже создан в Б24 (#' . intval($syncResult['b24_document_id']) . '), но есть ошибка в фиксации данных.';
             } else {
                 $errorMsg = 'Повторный синк документа #' . $docId . ' завершился с ошибкой.';
             }
@@ -539,8 +571,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         $db->prepare("UPDATE stock_operation_docs SET total_amount = ? WHERE id = ?")
             ->execute(array($totalAmount, $docId));
         $db->commit();
-        $syncResult = syncOperationDocumentToBitrix($db, $docId, 'receipt', $docNumber, $commentText, $db->query("SELECT product_id, qty_rolls, quantity_m FROM stock_operation_lines WHERE doc_id=" . intval($docId))->fetchAll(PDO::FETCH_ASSOC));
-        $syncStatus = ($syncResult && isset($syncResult['ok']) && $syncResult['ok']) ? 'sent' : 'error';
+        $syncResult = syncOperationDocumentToBitrix($db, $docId, 'receipt', $docNumber, $commentText, $db->query("SELECT product_id, qty_rolls, quantity_m, roll_length, price_per_roll FROM stock_operation_lines WHERE doc_id=" . intval($docId))->fetchAll(PDO::FETCH_ASSOC));
+        $syncStatus = resolveB24SyncStatus($syncResult);
         $db->prepare("UPDATE stock_operation_docs SET b24_document_id = ?, b24_sync_status = ?, b24_sync_response = ? WHERE id = ?")
             ->execute(array(
                 isset($syncResult['b24_document_id']) ? intval($syncResult['b24_document_id']) : null,
@@ -551,6 +583,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         $successMsg = 'Документ прихода #' . $docId . ' проведен. Сумма: ' . number_format($totalAmount, 2, '.', ' ');
         if ($syncStatus === 'sent') {
             $successMsg .= ' | Б24 документ #' . intval($syncResult['b24_document_id']);
+        } elseif ($syncStatus === 'partial') {
+            $errorMsg = 'Приход создан в Б24 (#' . intval($syncResult['b24_document_id']) . '), но фиксация строк/проведение завершились с ошибкой.';
         } else {
             $errorMsg = 'Приход проведен локально, но синк в Б24 завершился с ошибкой.';
         }
@@ -637,8 +671,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         }
 
         $db->commit();
-        $syncResult = syncOperationDocumentToBitrix($db, $docId, 'writeoff', $docNumber, $commentText, $db->query("SELECT product_id, qty_rolls, quantity_m FROM stock_operation_lines WHERE doc_id=" . intval($docId))->fetchAll(PDO::FETCH_ASSOC));
-        $syncStatus = ($syncResult && isset($syncResult['ok']) && $syncResult['ok']) ? 'sent' : 'error';
+        $syncResult = syncOperationDocumentToBitrix($db, $docId, 'writeoff', $docNumber, $commentText, $db->query("SELECT product_id, qty_rolls, quantity_m, roll_length, price_per_roll FROM stock_operation_lines WHERE doc_id=" . intval($docId))->fetchAll(PDO::FETCH_ASSOC));
+        $syncStatus = resolveB24SyncStatus($syncResult);
         $db->prepare("UPDATE stock_operation_docs SET b24_document_id = ?, b24_sync_status = ?, b24_sync_response = ? WHERE id = ?")
             ->execute(array(
                 isset($syncResult['b24_document_id']) ? intval($syncResult['b24_document_id']) : null,
@@ -649,6 +683,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         $successMsg = 'Документ списания #' . $docId . ' проведен.';
         if ($syncStatus === 'sent') {
             $successMsg .= ' | Б24 документ #' . intval($syncResult['b24_document_id']);
+        } elseif ($syncStatus === 'partial') {
+            $errorMsg = 'Списание создано в Б24 (#' . intval($syncResult['b24_document_id']) . '), но фиксация строк/проведение завершились с ошибкой.';
         } else {
             $errorMsg = 'Списание проведено локально, но синк в Б24 завершился с ошибкой.';
         }
@@ -682,7 +718,7 @@ $stockProducts = $db->query("
     ORDER BY p.name ASC
 ")->fetchAll(PDO::FETCH_ASSOC);
 $recentDocs = $db->query("
-    SELECT id, operation_type, doc_number, supplier, total_amount, status, created_at, b24_document_id, b24_sync_status
+    SELECT id, operation_type, doc_number, supplier, total_amount, status, created_at, b24_document_id, b24_sync_status, b24_sync_response
     FROM stock_operation_docs
     ORDER BY id DESC
     LIMIT 20
@@ -863,14 +899,14 @@ require 'includes/header.php';
                                         <input type="hidden" name="action" value="retry_b24_sync">
                                         <input type="hidden" name="form_token" value="<?= htmlspecialchars($retryToken) ?>">
                                         <input type="hidden" name="doc_id" value="<?= intval($d['id']) ?>">
-                                        <button type="submit" class="btn btn-warning btn-sm">Повторить</button>
+                                        <button type="submit" class="btn btn-warning btn-sm"><?= intval(isset($d['b24_document_id']) ? $d['b24_document_id'] : 0) > 0 ? 'Дофиксировать' : 'Повторить' ?></button>
                                     </form>
                                 <?php else: ?>
                                     -
                                 <?php endif; ?>
                             </td>
                             <td>
-                                <?php if ((string)$d['b24_sync_status'] === 'error' && !empty($d['b24_sync_response'])): ?>
+                                <?php if (in_array((string)$d['b24_sync_status'], array('error', 'partial'), true) && !empty($d['b24_sync_response'])): ?>
                                     <button type="button" class="btn btn-light btn-sm js-show-b24-error" data-error="<?= htmlspecialchars((string)$d['b24_sync_response']) ?>">Подробнее</button>
                                 <?php else: ?>
                                     -
