@@ -185,7 +185,13 @@ function ensureFormToken($name) {
     if (!isset($_SESSION['form_tokens']) || !is_array($_SESSION['form_tokens'])) {
         $_SESSION['form_tokens'] = array();
     }
-    $token = bin2hex(random_bytes(16));
+    if (function_exists('random_bytes')) {
+        $token = bin2hex(random_bytes(16));
+    } elseif (function_exists('openssl_random_pseudo_bytes')) {
+        $token = bin2hex(openssl_random_pseudo_bytes(16));
+    } else {
+        $token = md5(uniqid(mt_rand(), true) . microtime(true));
+    }
     $_SESSION['form_tokens'][$name] = $token;
     return $token;
 }
