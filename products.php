@@ -6,6 +6,7 @@ header('Content-Type: text/html; charset=utf-8');
 require 'db.php';
 $db = getDB();
 require_once __DIR__ . '/api/bitrix/send.php';
+require_once __DIR__ . '/functions/pricing.php';
 
 function hasColumn($db, $table, $column) {
     try {
@@ -53,7 +54,115 @@ function calculateMeterPriceFromRoll($rollLength, $deliveryPrice, $fallbackMeter
     return $fallbackMeterPrice;
 }
 
+function normalizeDecimalInput($value) {
+    $value = trim((string)$value);
+    $value = str_replace("\xc2\xa0", '', $value);
+    $value = str_replace(' ', '', $value);
+    $value = str_replace(',', '.', $value);
+    return $value;
+}
+
+function parseDecimalField($value) {
+    $normalized = normalizeDecimalInput($value);
+    if ($normalized === '') {
+        return array(
+            'is_empty' => true,
+            'is_valid' => true,
+            'value' => 0.0
+        );
+    }
+    if (!is_numeric($normalized)) {
+        return array(
+            'is_empty' => false,
+            'is_valid' => false,
+            'value' => 0.0
+        );
+    }
+    return array(
+        'is_empty' => false,
+        'is_valid' => true,
+        'value' => floatval($normalized)
+    );
+}
+
+function validatePricingPayload($postData) {
+    $labels = array(
+        'roll_length' => 'Метраж рулона',
+        'price_per_meter' => 'Цена за метр',
+        'purchase_price' => 'Себестоимость',
+        'delivery_price' => 'С доставкой за рулон',
+        'price_1_4' => 'Цена 1-4',
+        'price_5_9' => 'Цена 5-9',
+        'price_10_19' => 'Цена 10-19',
+        'price_20_plus' => 'Цена 20+'
+    );
+    $errors = array();
+    $warnings = array();
+    $values = array();
+
+    foreach ($labels as $field => $label) {
+        $raw = isset($postData[$field]) ? $postData[$field] : '';
+        $parsed = parseDecimalField($raw);
+        if (!$parsed['is_valid']) {
+            $errors[] = $label . ': некорректное число.';
+            continue;
+        }
+        if ($parsed['value'] < 0) {
+            $errors[] = $label . ': отрицательные значения запрещены.';
+        }
+        if ($parsed['value'] > 100000000) {
+            $errors[] = $label . ': значение выглядит аномально большим.';
+        }
+        $values[$field] = $parsed['value'];
+    }
+
+    $tierFields = array('price_1_4', 'price_5_9', 'price_10_19', 'price_20_plus');
+    foreach ($tierFields as $tierField) {
+        $raw = isset($postData[$tierField]) ? $postData[$tierField] : '';
+        if (normalizeDecimalInput($raw) === '') {
+            $warnings[] = 'Поле ' . $labels[$tierField] . ' пустое: будет применен fallback.';
+        }
+    }
+
+    for ($i = 1; $i < count($tierFields); $i++) {
+        $prevField = $tierFields[$i - 1];
+        $currField = $tierFields[$i];
+        $prev = isset($values[$prevField]) ? floatval($values[$prevField]) : 0.0;
+        $curr = isset($values[$currField]) ? floatval($values[$currField]) : 0.0;
+        if ($prev > 0 && $curr > 0) {
+            if ($curr > ($prev * 1.8) || $curr < ($prev * 0.5)) {
+                $warnings[] = 'Нетипичный скачок: ' . $labels[$prevField] . ' (' . $prev . ') -> ' . $labels[$currField] . ' (' . $curr . ').';
+            }
+        }
+    }
+
+    $suggestions = getTierAutofillSuggestions($postData);
+    foreach ($suggestions as $tierKey => $suggestedPrice) {
+        $warnings[] = 'Подсказка: заполнить ' . $labels[$tierKey] . ' значением ' . round($suggestedPrice, 2) . ' по цепочке fallback.';
+    }
+
+    return array(
+        'errors' => $errors,
+        'warnings' => $warnings,
+        'values' => $values,
+        'suggestions' => $suggestions
+    );
+}
+
+function buildPricePreviewRows($priceSource) {
+    $previewQty = array(3, 7, 12, 25);
+    $rows = array();
+    foreach ($previewQty as $qty) {
+        $rows[] = explainTierPriceResolution($priceSource, $qty);
+    }
+    return $rows;
+}
+
 ensureColumnExists($db, 'products', 'delivery_price', '`delivery_price` decimal(14,2) NOT NULL DEFAULT 0');
+$formErrors = array();
+$formWarnings = array();
+$tierAutofillSuggestions = array();
+$previewRows = array();
 
 function syncProductPriceToB24($db, $productId) {
     $stmt = $db->prepare("
@@ -158,11 +267,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
-    if (!empty($_POST['id'])) {
+    $validation = validatePricingPayload($_POST);
+    $formErrors = $validation['errors'];
+    $formWarnings = $validation['warnings'];
+    $tierAutofillSuggestions = $validation['suggestions'];
+    $previewRows = buildPricePreviewRows(array(
+        'price_1_4' => isset($validation['values']['price_1_4']) ? $validation['values']['price_1_4'] : 0,
+        'price_5_9' => isset($validation['values']['price_5_9']) ? $validation['values']['price_5_9'] : 0,
+        'price_10_19' => isset($validation['values']['price_10_19']) ? $validation['values']['price_10_19'] : 0,
+        'price_20_plus' => isset($validation['values']['price_20_plus']) ? $validation['values']['price_20_plus'] : 0,
+        'price_per_meter' => isset($validation['values']['price_per_meter']) ? $validation['values']['price_per_meter'] : 0,
+        'roll_length' => isset($validation['values']['roll_length']) ? $validation['values']['roll_length'] : 0
+    ));
+
+    if (!empty($formErrors)) {
+        $editProduct = $_POST;
+    } elseif (!empty($_POST['id'])) {
         $calculatedMeterPrice = calculateMeterPriceFromRoll(
-            isset($_POST['roll_length']) ? $_POST['roll_length'] : 0,
-            isset($_POST['delivery_price']) ? $_POST['delivery_price'] : 0,
-            isset($_POST['price_per_meter']) ? $_POST['price_per_meter'] : 0
+            isset($validation['values']['roll_length']) ? $validation['values']['roll_length'] : 0,
+            isset($validation['values']['delivery_price']) ? $validation['values']['delivery_price'] : 0,
+            isset($validation['values']['price_per_meter']) ? $validation['values']['price_per_meter'] : 0
         );
         $stmt = $db->prepare("
             UPDATE products SET
@@ -180,14 +304,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         $stmt->execute(array(
             $_POST['name'],
-            $_POST['roll_length'],
+            isset($validation['values']['roll_length']) ? $validation['values']['roll_length'] : 0,
             $calculatedMeterPrice,
-            normalizeNumber($_POST['purchase_price']),
-            normalizeNumber($_POST['delivery_price']),
-            normalizeNumber($_POST['price_1_4']),
-            normalizeNumber($_POST['price_5_9']),
-            normalizeNumber($_POST['price_10_19']),
-            normalizeNumber($_POST['price_20_plus']),
+            isset($validation['values']['purchase_price']) ? $validation['values']['purchase_price'] : 0,
+            isset($validation['values']['delivery_price']) ? $validation['values']['delivery_price'] : 0,
+            isset($validation['values']['price_1_4']) ? $validation['values']['price_1_4'] : 0,
+            isset($validation['values']['price_5_9']) ? $validation['values']['price_5_9'] : 0,
+            isset($validation['values']['price_10_19']) ? $validation['values']['price_10_19'] : 0,
+            isset($validation['values']['price_20_plus']) ? $validation['values']['price_20_plus'] : 0,
             $_POST['id']
         ));
         // Safe auto-sync: try to update B24, but don't break local save.
@@ -195,11 +319,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $syncTail = $syncResult['ok'] ? ' | Б24: ок' : (' | Б24: ' . $syncResult['message']);
         header("Location: products.php?sync_msg=" . urlencode("Товар обновлен" . $syncTail));
         exit;
-    } else {
+    } elseif ($action === 'save') {
         $calculatedMeterPrice = calculateMeterPriceFromRoll(
-            isset($_POST['roll_length']) ? $_POST['roll_length'] : 0,
-            isset($_POST['delivery_price']) ? $_POST['delivery_price'] : 0,
-            isset($_POST['price_per_meter']) ? $_POST['price_per_meter'] : 0
+            isset($validation['values']['roll_length']) ? $validation['values']['roll_length'] : 0,
+            isset($validation['values']['delivery_price']) ? $validation['values']['delivery_price'] : 0,
+            isset($validation['values']['price_per_meter']) ? $validation['values']['price_per_meter'] : 0
         );
         $stmt = $db->prepare("
             INSERT INTO products
@@ -209,14 +333,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         $stmt->execute(array(
             $_POST['name'],
-            $_POST['roll_length'],
+            isset($validation['values']['roll_length']) ? $validation['values']['roll_length'] : 0,
             $calculatedMeterPrice,
-            normalizeNumber($_POST['purchase_price']),
-            normalizeNumber($_POST['delivery_price']),
-            normalizeNumber($_POST['price_1_4']),
-            normalizeNumber($_POST['price_5_9']),
-            normalizeNumber($_POST['price_10_19']),
-            normalizeNumber($_POST['price_20_plus'])
+            isset($validation['values']['purchase_price']) ? $validation['values']['purchase_price'] : 0,
+            isset($validation['values']['delivery_price']) ? $validation['values']['delivery_price'] : 0,
+            isset($validation['values']['price_1_4']) ? $validation['values']['price_1_4'] : 0,
+            isset($validation['values']['price_5_9']) ? $validation['values']['price_5_9'] : 0,
+            isset($validation['values']['price_10_19']) ? $validation['values']['price_10_19'] : 0,
+            isset($validation['values']['price_20_plus']) ? $validation['values']['price_20_plus'] : 0
         ));
         header("Location: products.php?sync_msg=" . urlencode("Товар сохранен локально"));
         exit;
@@ -231,6 +355,16 @@ $catalogLabels = array();
 if (isset($b24Config['catalog_labels']) && is_array($b24Config['catalog_labels'])) {
     $catalogLabels = $b24Config['catalog_labels'];
 }
+if (empty($previewRows)) {
+    $previewRows = buildPricePreviewRows(array(
+        'price_1_4' => isset($editProduct['price_1_4']) ? $editProduct['price_1_4'] : 0,
+        'price_5_9' => isset($editProduct['price_5_9']) ? $editProduct['price_5_9'] : 0,
+        'price_10_19' => isset($editProduct['price_10_19']) ? $editProduct['price_10_19'] : 0,
+        'price_20_plus' => isset($editProduct['price_20_plus']) ? $editProduct['price_20_plus'] : 0,
+        'price_per_meter' => isset($editProduct['price_per_meter']) ? $editProduct['price_per_meter'] : 0,
+        'roll_length' => isset($editProduct['roll_length']) ? $editProduct['roll_length'] : 0
+    ));
+}
 $page_title = 'Товары';
 require 'includes/header.php';
 ?>
@@ -239,6 +373,26 @@ require 'includes/header.php';
 <h2>Товары (совместимый режим)</h2>
 <?php if ($syncMsg): ?>
     <p style="color:green;"><?php echo htmlspecialchars($syncMsg); ?></p>
+<?php endif; ?>
+<?php if (!empty($formErrors)): ?>
+    <div style="border:1px solid #d33; background:#fff6f6; padding:8px; margin-bottom:10px;">
+        <b>Ошибки валидации:</b>
+        <ul>
+            <?php foreach ($formErrors as $errorText): ?>
+                <li><?php echo htmlspecialchars($errorText); ?></li>
+            <?php endforeach; ?>
+        </ul>
+    </div>
+<?php endif; ?>
+<?php if (!empty($formWarnings)): ?>
+    <div style="border:1px solid #d8a700; background:#fffbea; padding:8px; margin-bottom:10px;">
+        <b>Предупреждения:</b>
+        <ul>
+            <?php foreach ($formWarnings as $warningText): ?>
+                <li><?php echo htmlspecialchars($warningText); ?></li>
+            <?php endforeach; ?>
+        </ul>
+    </div>
 <?php endif; ?>
 <p>Каталогизация возвращена по локальному `catalog_id` без рискованных внешних вызовов на открытии страницы.</p>
 
@@ -263,9 +417,37 @@ require 'includes/header.php';
     <input name="price_5_9" placeholder="5-9" value="<?php echo isset($editProduct['price_5_9']) ? $editProduct['price_5_9'] : ''; ?>"><br>
     <input name="price_10_19" placeholder="10-19" value="<?php echo isset($editProduct['price_10_19']) ? $editProduct['price_10_19'] : ''; ?>"><br>
     <input name="price_20_plus" placeholder="20+" value="<?php echo isset($editProduct['price_20_plus']) ? $editProduct['price_20_plus'] : ''; ?>"><br><br>
+    <?php if (!empty($tierAutofillSuggestions)): ?>
+        <small>
+            Подсказка автозаполнения:
+            <?php foreach ($tierAutofillSuggestions as $tierKey => $tierValue): ?>
+                <?php echo htmlspecialchars($tierKey); ?> → <?php echo htmlspecialchars(round($tierValue, 2)); ?>&nbsp;
+            <?php endforeach; ?>
+        </small><br><br>
+    <?php endif; ?>
 
     <button><?php echo $editProduct ? 'Обновить' : 'Сохранить'; ?></button>
 </form>
+
+<h3>Превью итоговой цены</h3>
+<table border="1" style="margin-bottom:16px;">
+    <tr>
+        <th>Рулонов</th>
+        <th>Итоговая цена</th>
+        <th>Целевой tier</th>
+        <th>Источник цены</th>
+        <th>Режим</th>
+    </tr>
+    <?php foreach ($previewRows as $preview): ?>
+    <tr>
+        <td><?php echo intval($preview['qty']); ?></td>
+        <td><?php echo round(floatval($preview['price']), 2); ?></td>
+        <td><?php echo htmlspecialchars($preview['targetTier']); ?></td>
+        <td><?php echo htmlspecialchars($preview['sourceTier']); ?></td>
+        <td><?php echo !empty($preview['fallbackUsed']) ? 'fallback' : 'tier'; ?></td>
+    </tr>
+    <?php endforeach; ?>
+</table>
 
 <h3>Список</h3>
 <?php if ($hasCatalogId): ?>

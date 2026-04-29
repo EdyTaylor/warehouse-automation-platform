@@ -97,6 +97,85 @@ function formatTierSourceLabel($sourceTier) {
     return isset($map[$key]) ? $map[$key] : $key;
 }
 
+function getTargetTierByQty($qtyRolls) {
+    $qty = intval($qtyRolls);
+    if ($qty < 1) {
+        $qty = 1;
+    }
+    if ($qty <= 4) {
+        return 'price_1_4';
+    }
+    if ($qty <= 9) {
+        return 'price_5_9';
+    }
+    if ($qty <= 19) {
+        return 'price_10_19';
+    }
+    return 'price_20_plus';
+}
+
+function explainTierPriceResolution($product, $qtyRolls) {
+    $resolved = resolveTierPrice($product, $qtyRolls);
+    $targetTier = getTargetTierByQty($qtyRolls);
+    $reason = 'direct_tier_match';
+
+    if ($resolved['sourceTier'] === 'meter_roll_fallback') {
+        $reason = 'fallback_meter_roll';
+    } elseif ($resolved['sourceTier'] === 'none') {
+        $reason = 'missing_all_prices';
+    } elseif ($resolved['sourceTier'] === 'price_1_4' && $targetTier !== 'price_1_4') {
+        $reason = 'fallback_to_base_tier';
+    } elseif ($resolved['sourceTier'] !== $targetTier) {
+        $reason = 'fallback_to_previous_tier';
+    }
+
+    return array(
+        'qty' => intval($qtyRolls),
+        'targetTier' => $targetTier,
+        'targetLabel' => formatTierSourceLabel($targetTier),
+        'price' => floatval($resolved['price']),
+        'sourceTier' => $resolved['sourceTier'],
+        'sourceLabel' => formatTierSourceLabel($resolved['sourceTier']),
+        'fallbackUsed' => !empty($resolved['fallbackUsed']),
+        'reason' => $reason
+    );
+}
+
+function getTierAutofillSuggestions($rawTiers) {
+    $tierOrder = array('price_1_4', 'price_5_9', 'price_10_19', 'price_20_plus');
+    $normalized = array();
+    $isEmpty = array();
+    $suggestions = array();
+    $lastKnown = 0.0;
+
+    foreach ($tierOrder as $tierKey) {
+        $value = isset($rawTiers[$tierKey]) ? trim((string)$rawTiers[$tierKey]) : '';
+        $value = str_replace(' ', '', $value);
+        $value = str_replace(',', '.', $value);
+        $isEmpty[$tierKey] = ($value === '');
+        $normalized[$tierKey] = $isEmpty[$tierKey] ? 0.0 : floatval($value);
+    }
+
+    if ($normalized['price_1_4'] > 0) {
+        $lastKnown = $normalized['price_1_4'];
+    }
+
+    foreach ($tierOrder as $tierKey) {
+        if ($normalized[$tierKey] > 0) {
+            $lastKnown = $normalized[$tierKey];
+            continue;
+        }
+        if (!$isEmpty[$tierKey]) {
+            continue;
+        }
+        if ($lastKnown > 0) {
+            $suggestions[$tierKey] = $lastKnown;
+        }
+    }
+
+    return $suggestions;
+}
+
 /**
  * Optional manual helper for quick verification in dev/debug.
  * Open with ?debug_price_selfcheck=1 on pages that include this file.
