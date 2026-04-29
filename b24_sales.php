@@ -5,6 +5,7 @@ header('Content-Type: text/html; charset=utf-8');
 
 require __DIR__ . '/db.php';
 require_once __DIR__ . '/functions/stock_movements.php';
+require_once __DIR__ . '/api/bitrix/send.php';
 
 $db = getDB();
 $message = '';
@@ -13,6 +14,284 @@ $page_title = 'Продажи Б24';
 require __DIR__ . '/includes/header.php';
 
 function h($v) { return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
+
+function ensureColumnExists($db, $tableName, $columnName, $columnSql) {
+    $stmt = $db->prepare("SHOW COLUMNS FROM `{$tableName}` LIKE ?");
+    $stmt->execute([$columnName]);
+    if (!$stmt->fetch(PDO::FETCH_ASSOC)) {
+        $db->exec("ALTER TABLE `{$tableName}` ADD COLUMN {$columnSql}");
+    }
+}
+
+function ensureDealRowsSyncSchema($db) {
+    ensureColumnExists($db, 'b24_sale_requests', 'deal_rows_sync_status', "`deal_rows_sync_status` varchar(20) NOT NULL DEFAULT 'pending'");
+    ensureColumnExists($db, 'b24_sale_requests', 'deal_rows_sync_stage', "`deal_rows_sync_stage` varchar(64) DEFAULT NULL");
+    ensureColumnExists($db, 'b24_sale_requests', 'deal_rows_sync_error', "`deal_rows_sync_error` text");
+    ensureColumnExists($db, 'b24_sale_requests', 'deal_rows_sync_payload', "`deal_rows_sync_payload` longtext");
+    ensureColumnExists($db, 'b24_sale_requests', 'deal_rows_sync_last_response', "`deal_rows_sync_last_response` longtext");
+    ensureColumnExists($db, 'b24_sale_requests', 'deal_rows_sync_last_hash', "`deal_rows_sync_last_hash` varchar(64) DEFAULT NULL");
+    ensureColumnExists($db, 'b24_sale_requests', 'deal_rows_sync_attempts', "`deal_rows_sync_attempts` int NOT NULL DEFAULT 0");
+    ensureColumnExists($db, 'b24_sale_requests', 'deal_rows_sync_attempted_at', "`deal_rows_sync_attempted_at` datetime DEFAULT NULL");
+    ensureColumnExists($db, 'b24_sale_requests', 'deal_rows_synced_at', "`deal_rows_synced_at` datetime DEFAULT NULL");
+    ensureColumnExists($db, 'b24_sale_requests', 'deal_rows_verified_at', "`deal_rows_verified_at` datetime DEFAULT NULL");
+
+    $db->exec("
+        CREATE TABLE IF NOT EXISTS b24_integration_errors (
+            id int NOT NULL AUTO_INCREMENT,
+            source varchar(64) NOT NULL,
+            request_id int DEFAULT NULL,
+            b24_deal_id int DEFAULT NULL,
+            stage varchar(64) DEFAULT NULL,
+            error_code varchar(190) DEFAULT NULL,
+            error_description text,
+            context_payload longtext,
+            created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            KEY idx_b24_integration_errors_deal (b24_deal_id, created_at),
+            KEY idx_b24_integration_errors_request (request_id, created_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ");
+}
+
+function logDealRowsSyncError($db, $requestId, $dealId, $stage, $response, $payload) {
+    $errorCode = '';
+    $errorDescription = '';
+    if (is_array($response)) {
+        $errorCode = isset($response['error']) ? (string)$response['error'] : '';
+        $errorDescription = isset($response['error_description']) ? (string)$response['error_description'] : '';
+    } else {
+        $errorDescription = (string)$response;
+    }
+    $db->prepare("
+        INSERT INTO b24_integration_errors
+        (source, request_id, b24_deal_id, stage, error_code, error_description, context_payload, created_at)
+        VALUES ('deal_productrows_sync', ?, ?, ?, ?, ?, ?, NOW())
+    ")->execute([
+        $requestId > 0 ? $requestId : null,
+        $dealId > 0 ? $dealId : null,
+        (string)$stage,
+        $errorCode,
+        $errorDescription,
+        json_encode([
+            'payload' => $payload,
+            'response' => $response
+        ], JSON_UNESCAPED_UNICODE)
+    ]);
+}
+
+function callBitrixWithRetry($method, $payload, $maxAttempts = 3, $sleepMs = 350) {
+    $attempt = 0;
+    $lastResp = null;
+    while ($attempt < $maxAttempts) {
+        $attempt++;
+        $lastResp = sendToBitrix($method, $payload);
+        if (is_array($lastResp) && !isset($lastResp['error'])) {
+            return ['ok' => true, 'response' => $lastResp, 'attempts' => $attempt];
+        }
+        if ($attempt < $maxAttempts) {
+            usleep(max(0, intval($sleepMs)) * 1000);
+        }
+    }
+    return ['ok' => false, 'response' => $lastResp, 'attempts' => $attempt];
+}
+
+function normalizeDealProductRows($rows) {
+    $normalized = [];
+    if (!is_array($rows)) {
+        return $normalized;
+    }
+    foreach ($rows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        $productId = intval(isset($row['PRODUCT_ID']) ? $row['PRODUCT_ID'] : (isset($row['productId']) ? $row['productId'] : 0));
+        if ($productId <= 0) {
+            continue;
+        }
+        $qty = floatval(isset($row['QUANTITY']) ? $row['QUANTITY'] : (isset($row['quantity']) ? $row['quantity'] : 0));
+        $price = floatval(isset($row['PRICE']) ? $row['PRICE'] : (isset($row['price']) ? $row['price'] : 0));
+        $total = floatval(isset($row['PRICE_EXCLUSIVE']) ? $row['PRICE_EXCLUSIVE'] : ($qty * $price));
+        if (!isset($normalized[$productId])) {
+            $normalized[$productId] = ['qty' => 0.0, 'price' => $price, 'total' => 0.0];
+        }
+        $normalized[$productId]['qty'] += $qty;
+        $normalized[$productId]['price'] = $price;
+        $normalized[$productId]['total'] += $total;
+    }
+    ksort($normalized);
+    return $normalized;
+}
+
+function buildDealRowsPayloadForRequest($db, $requestId) {
+    $stmt = $db->prepare("
+        SELECT b24_product_id, product_name, quantity_m, price_per_unit
+        FROM b24_sale_lines
+        WHERE request_id = ?
+        ORDER BY id ASC
+    ");
+    $stmt->execute([$requestId]);
+    $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    $payloadRows = [];
+    foreach ($rows as $row) {
+        $productId = intval(isset($row['b24_product_id']) ? $row['b24_product_id'] : 0);
+        $qty = floatval(isset($row['quantity_m']) ? $row['quantity_m'] : 0);
+        $price = floatval(isset($row['price_per_unit']) ? $row['price_per_unit'] : 0);
+        if ($productId <= 0 || $qty <= 0) {
+            continue;
+        }
+        $payloadRows[] = [
+            'PRODUCT_ID' => $productId,
+            'PRODUCT_NAME' => (string)(isset($row['product_name']) ? $row['product_name'] : ''),
+            'PRICE' => round($price, 2),
+            'QUANTITY' => round($qty, 2)
+        ];
+    }
+    return $payloadRows;
+}
+
+function verifyDealRowsOnBitrix($expectedRows, $actualRows) {
+    $expected = normalizeDealProductRows($expectedRows);
+    $actual = normalizeDealProductRows($actualRows);
+    if (count($expected) !== count($actual)) {
+        return ['ok' => false, 'reason' => 'row_count_mismatch', 'expected' => $expected, 'actual' => $actual];
+    }
+    foreach ($expected as $productId => $exp) {
+        if (!isset($actual[$productId])) {
+            return ['ok' => false, 'reason' => 'missing_product', 'product_id' => $productId, 'expected' => $expected, 'actual' => $actual];
+        }
+        $act = $actual[$productId];
+        if (abs($exp['qty'] - $act['qty']) > 0.01 || abs($exp['price'] - $act['price']) > 0.01 || abs($exp['total'] - $act['total']) > 0.05) {
+            return [
+                'ok' => false,
+                'reason' => 'value_mismatch',
+                'product_id' => $productId,
+                'expected_row' => $exp,
+                'actual_row' => $act
+            ];
+        }
+    }
+    return ['ok' => true, 'expected' => $expected, 'actual' => $actual];
+}
+
+function syncDealProductRowsForRequest($db, $requestId, $force = false) {
+    $reqStmt = $db->prepare("
+        SELECT id, b24_deal_id, deal_rows_sync_status, deal_rows_sync_last_hash
+        FROM b24_sale_requests
+        WHERE id = ?
+        LIMIT 1
+    ");
+    $reqStmt->execute([$requestId]);
+    $request = $reqStmt->fetch(PDO::FETCH_ASSOC);
+    if (!$request) {
+        return ['ok' => false, 'stage' => 'request.load', 'error' => 'request_not_found'];
+    }
+    $dealId = intval($request['b24_deal_id']);
+    if ($dealId <= 0) {
+        return ['ok' => false, 'stage' => 'request.load', 'error' => 'invalid_deal_id'];
+    }
+
+    $rows = buildDealRowsPayloadForRequest($db, $requestId);
+    if (empty($rows)) {
+        return ['ok' => false, 'stage' => 'payload.build', 'error' => 'empty_rows'];
+    }
+    $payloadHash = hash('sha256', json_encode($rows, JSON_UNESCAPED_UNICODE));
+
+    if (!$force
+        && (string)$request['deal_rows_sync_status'] === 'sent'
+        && !empty($request['deal_rows_sync_last_hash'])
+        && hash_equals((string)$request['deal_rows_sync_last_hash'], $payloadHash)
+    ) {
+        return ['ok' => true, 'stage' => 'idempotent.skip', 'idempotent' => true, 'b24_deal_id' => $dealId];
+    }
+
+    $db->prepare("
+        UPDATE b24_sale_requests
+        SET
+            deal_rows_sync_status = 'in_progress',
+            deal_rows_sync_stage = 'deal.productrows.set',
+            deal_rows_sync_payload = ?,
+            deal_rows_sync_last_hash = ?,
+            deal_rows_sync_attempts = deal_rows_sync_attempts + 1,
+            deal_rows_sync_attempted_at = NOW(),
+            updated_at = NOW()
+        WHERE id = ?
+    ")->execute([json_encode($rows, JSON_UNESCAPED_UNICODE), $payloadHash, $requestId]);
+
+    $setPayload = ['id' => $dealId, 'rows' => $rows];
+    $setResult = callBitrixWithRetry('crm.deal.productrows.set', $setPayload, 3, 450);
+    if (!$setResult['ok']) {
+        $response = $setResult['response'];
+        $db->prepare("
+            UPDATE b24_sale_requests
+            SET deal_rows_sync_status='failed', deal_rows_sync_stage='deal.productrows.set', deal_rows_sync_error=?, deal_rows_sync_last_response=?, updated_at=NOW()
+            WHERE id = ?
+        ")->execute([
+            is_array($response) ? (string)($response['error_description'] ?? ($response['error'] ?? 'set_failed')) : 'set_failed',
+            json_encode($response, JSON_UNESCAPED_UNICODE),
+            $requestId
+        ]);
+        logDealRowsSyncError($db, $requestId, $dealId, 'deal.productrows.set', $response, $setPayload);
+        return ['ok' => false, 'stage' => 'deal.productrows.set', 'response' => $response, 'b24_deal_id' => $dealId];
+    }
+
+    $getPayload = ['id' => $dealId];
+    $getResult = callBitrixWithRetry('crm.deal.productrows.get', $getPayload, 3, 450);
+    if (!$getResult['ok']) {
+        $response = $getResult['response'];
+        $db->prepare("
+            UPDATE b24_sale_requests
+            SET deal_rows_sync_status='failed', deal_rows_sync_stage='deal.productrows.get', deal_rows_sync_error=?, deal_rows_sync_last_response=?, deal_rows_synced_at = NOW(), updated_at=NOW()
+            WHERE id = ?
+        ")->execute([
+            is_array($response) ? (string)($response['error_description'] ?? ($response['error'] ?? 'get_failed')) : 'get_failed',
+            json_encode($response, JSON_UNESCAPED_UNICODE),
+            $requestId
+        ]);
+        logDealRowsSyncError($db, $requestId, $dealId, 'deal.productrows.get', $response, $getPayload);
+        return ['ok' => false, 'stage' => 'deal.productrows.get', 'response' => $response, 'b24_deal_id' => $dealId];
+    }
+
+    $actualRows = [];
+    if (is_array($getResult['response']) && isset($getResult['response']['result']) && is_array($getResult['response']['result'])) {
+        $actualRows = $getResult['response']['result'];
+    }
+    $verify = verifyDealRowsOnBitrix($rows, $actualRows);
+    if (!$verify['ok']) {
+        $db->prepare("
+            UPDATE b24_sale_requests
+            SET deal_rows_sync_status='failed', deal_rows_sync_stage='deal.productrows.verify', deal_rows_sync_error=?, deal_rows_sync_last_response=?, deal_rows_synced_at = NOW(), updated_at=NOW()
+            WHERE id = ?
+        ")->execute([
+            'verify_failed:' . (string)$verify['reason'],
+            json_encode(['verify' => $verify, 'response' => $getResult['response']], JSON_UNESCAPED_UNICODE),
+            $requestId
+        ]);
+        logDealRowsSyncError($db, $requestId, $dealId, 'deal.productrows.verify', $verify, ['expected_rows' => $rows]);
+        return ['ok' => false, 'stage' => 'deal.productrows.verify', 'verify' => $verify, 'b24_deal_id' => $dealId];
+    }
+
+    $db->prepare("
+        UPDATE b24_sale_requests
+        SET
+            deal_rows_sync_status='sent',
+            deal_rows_sync_stage='done',
+            deal_rows_sync_error=NULL,
+            deal_rows_sync_last_response=?,
+            deal_rows_synced_at=NOW(),
+            deal_rows_verified_at=NOW(),
+            updated_at=NOW()
+        WHERE id = ?
+    ")->execute([json_encode($getResult['response'], JSON_UNESCAPED_UNICODE), $requestId]);
+
+    return [
+        'ok' => true,
+        'stage' => 'done',
+        'b24_deal_id' => $dealId,
+        'verify' => $verify,
+        'set_attempts' => $setResult['attempts'],
+        'get_attempts' => $getResult['attempts']
+    ];
+}
 
 // If migrations are not applied yet, show readable message instead of HTTP 500.
 try {
@@ -25,9 +304,25 @@ try {
     echo '<p>Примени SQL миграцию в базе и обнови страницу.</p>';
     exit;
 }
+ensureDealRowsSyncSchema($db);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = isset($_POST['action']) ? $_POST['action'] : '';
+
+    if ($action === 'retry_deal_rows_sync') {
+        $requestId = intval(isset($_POST['request_id']) ? $_POST['request_id'] : 0);
+        if ($requestId <= 0) {
+            $error = 'Некорректная заявка для повторной отправки в Б24.';
+        } else {
+            $syncResult = syncDealProductRowsForRequest($db, $requestId, true);
+            if (!empty($syncResult['ok'])) {
+                $message = 'Повторная отправка строк сделки в Б24 выполнена успешно.';
+            } else {
+                $stage = isset($syncResult['stage']) ? (string)$syncResult['stage'] : 'unknown';
+                $error = 'Повторная отправка в Б24 завершилась с ошибкой на этапе: ' . $stage;
+            }
+        }
+    }
 
     if ($action === 'add_cut') {
         $lineId = intval(isset($_POST['line_id']) ? $_POST['line_id'] : 0);
@@ -278,7 +573,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         }
 
                         $db->commit();
-                        $message = 'Строка подтверждена и списана со склада.';
+                        $syncResult = syncDealProductRowsForRequest($db, intval($line['request_id']), false);
+                        if (!empty($syncResult['ok'])) {
+                            $message = 'Строка подтверждена и списана со склада. Строки сделки отправлены и сверены в Б24.';
+                        } else {
+                            $message = 'Строка подтверждена и списана со склада.';
+                            $stage = isset($syncResult['stage']) ? (string)$syncResult['stage'] : 'unknown';
+                            $error = 'Синк строк сделки в Б24 не прошел проверку. Этап: ' . $stage . '. Используйте кнопку повторной отправки.';
+                        }
                     } catch (Exception $e) {
                         $db->rollBack();
                         $error = $e->getMessage();
@@ -377,6 +679,8 @@ if ($requestId > 0) {
         <th>Название</th>
         <th>Ответственный</th>
         <th>Статус</th>
+        <th>Синк строк</th>
+        <th>Повтор</th>
         <th>Открыть</th>
     </tr>
     <?php foreach ($requests as $r): ?>
@@ -386,6 +690,23 @@ if ($requestId > 0) {
         <td><?= h($r['deal_name']) ?></td>
         <td><?= h($r['responsible']) ?></td>
         <td><?= h($r['status']) ?></td>
+        <td>
+            <?= h(isset($r['deal_rows_sync_status']) ? $r['deal_rows_sync_status'] : 'pending') ?>
+            <?php if (!empty($r['deal_rows_sync_stage'])): ?>
+                (<?= h($r['deal_rows_sync_stage']) ?>)
+            <?php endif; ?>
+        </td>
+        <td>
+            <?php if (in_array((string)($r['deal_rows_sync_status'] ?? 'pending'), ['failed', 'pending', 'in_progress'], true)): ?>
+                <form method="POST" style="display:inline;">
+                    <input type="hidden" name="action" value="retry_deal_rows_sync">
+                    <input type="hidden" name="request_id" value="<?= (int)$r['id'] ?>">
+                    <button type="submit">Повторить синк</button>
+                </form>
+            <?php else: ?>
+                -
+            <?php endif; ?>
+        </td>
         <td><a href="?request_id=<?= (int)$r['id'] ?>">Открыть</a></td>
     </tr>
     <?php endforeach; ?>
