@@ -736,48 +736,53 @@ body {
 }
 
 .products-table .sticky-col-select {
-    left: 0;
+    left: 0 !important;
     width: 44px;
     min-width: 44px;
 }
 
 .products-table .sticky-col-id {
-    left: 44px;
+    left: 44px !important;
     width: 68px;
     min-width: 68px;
 }
 
 .products-table .sticky-col-name {
-    left: 112px;
+    left: 112px !important;
 }
 
 .products-row-actions {
-    display: flex;
+    display: grid;
+    grid-template-columns: repeat(6, minmax(56px, 1fr));
     gap: 0.2rem;
-    flex-wrap: nowrap;
-    min-width: 285px;
+    min-width: 396px;
+    align-items: center;
 }
 
 .products-row-actions .btn {
-    min-width: 0;
-    padding: 0.16rem 0.3rem;
-    font-size: 0.72rem;
+    min-width: 56px;
+    width: 100%;
+    padding: 0.14rem 0.2rem;
+    font-size: 0.69rem;
     line-height: 1.05;
     white-space: nowrap;
+    text-align: center;
 }
 
 .products-table .sticky-col-price {
     position: sticky;
-    right: 285px;
+    right: 396px !important;
     background: var(--card-background);
     z-index: 4;
 }
 
 .products-table .sticky-col-actions {
     position: sticky;
-    right: 0;
+    right: 0 !important;
     background: var(--card-background);
     z-index: 4;
+    width: 408px;
+    min-width: 408px;
 }
 
 .products-table thead .sticky-col-price,
@@ -806,11 +811,23 @@ body.products-compact .products-table .product-name-text {
 }
 
 body.products-compact .products-row-actions {
-    min-width: 255px;
+    grid-template-columns: repeat(6, minmax(50px, 1fr));
+    min-width: 348px;
 }
 
 body.products-compact .products-table .sticky-col-price {
-    right: 255px;
+    right: 348px !important;
+}
+
+body.products-compact .products-table .sticky-col-actions {
+    width: 360px;
+    min-width: 360px;
+}
+
+body.products-compact .products-row-actions .btn {
+    min-width: 50px;
+    padding: 0.12rem 0.16rem;
+    font-size: 0.66rem;
 }
 
 .inline-row-error {

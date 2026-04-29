@@ -10,14 +10,16 @@ $current_page = basename($_SERVER['PHP_SELF']);
     <title><?= isset($page_title) ? htmlspecialchars($page_title) : 'Склад пленок' ?></title>
     <script>
         (function () {
+            window.setUiTheme = function (theme) {
+                var next = theme === 'dark' ? 'dark' : 'light';
+                document.documentElement.setAttribute('data-theme', next);
+                try { localStorage.setItem('ui_theme', next); } catch (_e) {}
+            };
             try {
                 var theme = localStorage.getItem('ui_theme');
-                if (theme !== 'dark' && theme !== 'light') {
-                    theme = 'light';
-                }
-                document.documentElement.setAttribute('data-theme', theme);
+                window.setUiTheme(theme === 'dark' ? 'dark' : 'light');
             } catch (_e) {
-                document.documentElement.setAttribute('data-theme', 'light');
+                window.setUiTheme('light');
             }
         })();
     </script>
@@ -41,7 +43,7 @@ $current_page = basename($_SERVER['PHP_SELF']);
                 <a href="warehouse_orders.php" class="nav-link <?= $current_page == 'warehouse_orders.php' ? 'active' : '' ?>">🧰 Место кладовщика</a>
                 <a href="report_day.php" class="nav-link <?= in_array($current_page, ['report_day.php','report_month.php','report_all.php']) ? 'active' : '' ?>">📊 Отчеты</a>
                 <a href="sync_monitor.php" class="nav-link <?= $current_page == 'sync_monitor.php' ? 'active' : '' ?>">⚙️ Интеграция</a>
-                <button type="button" class="btn btn-light btn-sm js-theme-toggle">🌓 Тема</button>
+                <button type="button" class="btn btn-light btn-sm js-theme-toggle" onclick="window.setUiTheme(document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark')">🌓 Тема</button>
             </nav>
         </div>
     </header>

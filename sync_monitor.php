@@ -111,7 +111,7 @@ try {
     <div class="card">
         <h3>Настройки интеграции</h3>
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
-            <button type="button" class="btn btn-light btn-sm js-theme-toggle">🌓 Переключить тему</button>
+            <button type="button" class="btn btn-light btn-sm js-theme-toggle" onclick="window.setUiTheme(document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark')">🌓 Переключить тему</button>
         </div>
         <form method="POST">
             <input type="hidden" name="action" value="save_integration_settings">
