@@ -293,73 +293,70 @@ function ensureDocumentSupplierForReceipt($b24DocId, $supplierName) {
     return $bound;
 }
 
-function ensureB24ProductStockType($b24ProductId) {
+function getB24ProductType($b24ProductId) {
     $id = intval($b24ProductId);
     if ($id <= 0) {
-        return false;
+        return null;
     }
-    $currentType = null;
+    $catalogGetResp = sendToBitrix('catalog.product.get', array('id' => $id));
+    if (is_array($catalogGetResp) && !isset($catalogGetResp['error']) && isset($catalogGetResp['result']) && is_array($catalogGetResp['result'])) {
+        if (isset($catalogGetResp['result']['type'])) {
+            return intval($catalogGetResp['result']['type']);
+        }
+        if (isset($catalogGetResp['result']['TYPE'])) {
+            return intval($catalogGetResp['result']['TYPE']);
+        }
+    }
 
     $crmGetResp = sendToBitrix('crm.product.get', array('id' => $id));
-    if (is_array($crmGetResp) && !isset($crmGetResp['error']) && isset($crmGetResp['result']) && is_array($crmGetResp['result'])) {
-        if (isset($crmGetResp['result']['TYPE'])) {
-            $currentType = intval($crmGetResp['result']['TYPE']);
-        }
+    if (is_array($crmGetResp) && !isset($crmGetResp['error']) && isset($crmGetResp['result']) && is_array($crmGetResp['result']) && isset($crmGetResp['result']['TYPE'])) {
+        return intval($crmGetResp['result']['TYPE']);
+    }
+    return null;
+}
+
+function ensureUsableB24ProductId($db, $localProductId, $b24ProductId, $productName, $pricePerMeter) {
+    $id = intval($b24ProductId);
+    if ($id <= 0) {
+        return 0;
     }
 
-    if ($currentType === null) {
-        $catalogGetResp = sendToBitrix('catalog.product.get', array('id' => $id));
-        if (is_array($catalogGetResp) && !isset($catalogGetResp['error']) && isset($catalogGetResp['result']) && is_array($catalogGetResp['result'])) {
-            if (isset($catalogGetResp['result']['type'])) {
-                $currentType = intval($catalogGetResp['result']['type']);
-            } elseif (isset($catalogGetResp['result']['TYPE'])) {
-                $currentType = intval($catalogGetResp['result']['TYPE']);
-            }
-        }
-    }
-
+    $currentType = getB24ProductType($id);
     if ($currentType === 1) {
-        return true;
+        return $id;
     }
 
-    $crmUpdResp = sendToBitrix('crm.product.update', array(
-        'id' => $id,
-        'fields' => array('TYPE' => 1)
-    ));
-    $catalogUpdResp = sendToBitrix('catalog.product.update', array(
-        'id' => $id,
-        'fields' => array('type' => 1, 'TYPE' => 1)
-    ));
-
-    $crmUpdated = is_array($crmUpdResp) && !isset($crmUpdResp['error']);
-    $catalogUpdated = is_array($catalogUpdResp) && !isset($catalogUpdResp['error']);
-
-    // Re-check final state. At least one successful update plus readable type=1.
-    $finalType = null;
-    $crmGetResp2 = sendToBitrix('crm.product.get', array('id' => $id));
-    if (is_array($crmGetResp2) && !isset($crmGetResp2['error']) && isset($crmGetResp2['result']) && is_array($crmGetResp2['result']) && isset($crmGetResp2['result']['TYPE'])) {
-        $finalType = intval($crmGetResp2['result']['TYPE']);
-    } else {
-        $catalogGetResp2 = sendToBitrix('catalog.product.get', array('id' => $id));
-        if (is_array($catalogGetResp2) && !isset($catalogGetResp2['error']) && isset($catalogGetResp2['result']) && is_array($catalogGetResp2['result'])) {
-            if (isset($catalogGetResp2['result']['type'])) {
-                $finalType = intval($catalogGetResp2['result']['type']);
-            } elseif (isset($catalogGetResp2['result']['TYPE'])) {
-                $finalType = intval($catalogGetResp2['result']['TYPE']);
-            }
-        }
+    sendToBitrix('crm.product.update', array('id' => $id, 'fields' => array('TYPE' => 1)));
+    sendToBitrix('catalog.product.update', array('id' => $id, 'fields' => array('type' => 1, 'TYPE' => 1)));
+    $afterType = getB24ProductType($id);
+    if ($afterType === 1) {
+        return $id;
     }
 
-    if ($finalType === 1) {
-        return true;
+    // Hard fallback: create a dedicated stock-compatible product and remap local link.
+    $newName = trim((string)$productName);
+    if ($newName === '') {
+        $newName = 'Товар #' . intval($localProductId);
+    }
+    $createFields = array(
+        'NAME' => $newName . ' [stock]',
+        'TYPE' => 1
+    );
+    if (floatval($pricePerMeter) > 0) {
+        $createFields['PRICE'] = floatval($pricePerMeter);
+    }
+    $createResp = sendToBitrix('crm.product.add', array('fields' => $createFields));
+    $newB24Id = 0;
+    if (is_array($createResp) && !isset($createResp['error']) && isset($createResp['result'])) {
+        $newB24Id = intval($createResp['result']);
+    }
+    if ($newB24Id > 0) {
+        $db->prepare("UPDATE products SET b24_product_id = ? WHERE id = ?")
+            ->execute(array($newB24Id, intval($localProductId)));
+        return $newB24Id;
     }
 
-    // If re-read is unavailable, still allow only when at least one update succeeded.
-    if ($finalType === null && ($crmUpdated || $catalogUpdated)) {
-        return true;
-    }
-
-    return false;
+    return 0;
 }
 
 function waitUntilB24DocumentConducted($db, $b24DocId) {
@@ -475,7 +472,7 @@ function syncOperationDocumentToBitrix($db, $docId, $docType, $docNumber, $comme
             continue;
         }
 
-        $pStmt = $db->prepare("SELECT b24_product_id, price_per_meter, delivery_price FROM products WHERE id = ? LIMIT 1");
+        $pStmt = $db->prepare("SELECT b24_product_id, price_per_meter, delivery_price, name FROM products WHERE id = ? LIMIT 1");
         $pStmt->execute(array($localProductId));
         $prod = $pStmt->fetch(PDO::FETCH_ASSOC);
         $b24ProductId = intval(isset($prod['b24_product_id']) ? $prod['b24_product_id'] : 0);
@@ -486,7 +483,14 @@ function syncOperationDocumentToBitrix($db, $docId, $docType, $docNumber, $comme
             );
             continue;
         }
-        if (!ensureB24ProductStockType($b24ProductId)) {
+        $resolvedB24ProductId = ensureUsableB24ProductId(
+            $db,
+            $localProductId,
+            $b24ProductId,
+            isset($prod['name']) ? (string)$prod['name'] : '',
+            floatval(isset($prod['price_per_meter']) ? $prod['price_per_meter'] : 0)
+        );
+        if ($resolvedB24ProductId <= 0) {
             return array(
                 'ok' => false,
                 'stage' => 'product.type',
@@ -494,10 +498,11 @@ function syncOperationDocumentToBitrix($db, $docId, $docType, $docNumber, $comme
                 'line_responses' => $lineResponses,
                 'response' => array(
                     'error' => 'invalid_product_type',
-                    'error_description' => 'Товар #' . $b24ProductId . ' в Б24 имеет неподдерживаемый тип для складского документа.'
+                    'error_description' => 'Товар #' . $b24ProductId . ' в Б24 имеет неподдерживаемый тип для складского документа, и не удалось создать складской клон.'
                 )
             );
         }
+        $b24ProductId = $resolvedB24ProductId;
 
         $amount = floatval(isset($line['quantity_m']) ? $line['quantity_m'] : 0);
         if ($amount <= 0) {
@@ -663,7 +668,7 @@ function addLinesAndConductExistingB24Document($db, $b24DocId, $docType, $lineRo
             continue;
         }
 
-        $pStmt = $db->prepare("SELECT b24_product_id, price_per_meter, delivery_price FROM products WHERE id = ? LIMIT 1");
+        $pStmt = $db->prepare("SELECT b24_product_id, price_per_meter, delivery_price, name FROM products WHERE id = ? LIMIT 1");
         $pStmt->execute(array($localProductId));
         $prod = $pStmt->fetch(PDO::FETCH_ASSOC);
         $b24ProductId = intval(isset($prod['b24_product_id']) ? $prod['b24_product_id'] : 0);
@@ -671,7 +676,14 @@ function addLinesAndConductExistingB24Document($db, $b24DocId, $docType, $lineRo
             $lineResponses[] = array('product_id' => $localProductId, 'status' => 'skip_no_b24_product_id');
             continue;
         }
-        if (!ensureB24ProductStockType($b24ProductId)) {
+        $resolvedB24ProductId = ensureUsableB24ProductId(
+            $db,
+            $localProductId,
+            $b24ProductId,
+            isset($prod['name']) ? (string)$prod['name'] : '',
+            floatval(isset($prod['price_per_meter']) ? $prod['price_per_meter'] : 0)
+        );
+        if ($resolvedB24ProductId <= 0) {
             return array(
                 'ok' => false,
                 'stage' => 'product.type',
@@ -679,10 +691,11 @@ function addLinesAndConductExistingB24Document($db, $b24DocId, $docType, $lineRo
                 'line_responses' => $lineResponses,
                 'response' => array(
                     'error' => 'invalid_product_type',
-                    'error_description' => 'Товар #' . $b24ProductId . ' в Б24 имеет неподдерживаемый тип для складского документа.'
+                    'error_description' => 'Товар #' . $b24ProductId . ' в Б24 имеет неподдерживаемый тип для складского документа, и не удалось создать складской клон.'
                 )
             );
         }
+        $b24ProductId = $resolvedB24ProductId;
 
         $amount = floatval(isset($line['quantity_m']) ? $line['quantity_m'] : 0);
         if ($amount <= 0) {
