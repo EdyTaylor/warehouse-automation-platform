@@ -22,6 +22,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         $responsibleId = max(1, intval(isset($_POST['default_responsible_id']) ? $_POST['default_responsible_id'] : 1));
         $currency = strtoupper(trim(isset($_POST['default_currency']) ? $_POST['default_currency'] : 'KGS'));
         $batchLimit = max(10, min(500, intval(isset($_POST['sync_batch_limit']) ? $_POST['sync_batch_limit'] : 100)));
+        $docDelayMs = max(0, min(5000, intval(isset($_POST['b24_doc_delay_ms']) ? $_POST['b24_doc_delay_ms'] : 700)));
         if ($currency === '') {
             $currency = 'KGS';
         }
@@ -30,6 +31,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         setAppSetting($db, 'default_responsible_id', (string)$responsibleId);
         setAppSetting($db, 'default_currency', $currency);
         setAppSetting($db, 'sync_batch_limit', (string)$batchLimit);
+        setAppSetting($db, 'b24_doc_delay_ms', (string)$docDelayMs);
         $successMsg = 'Настройки интеграции сохранены.';
     } catch (Exception $e) {
         $errorMsg = 'Не удалось сохранить настройки: ' . $e->getMessage();
@@ -41,7 +43,8 @@ $integrationSettings = array(
     'default_store_to_id' => getAppSetting($db, 'default_store_to_id', '1'),
     'default_responsible_id' => getAppSetting($db, 'default_responsible_id', '1'),
     'default_currency' => getAppSetting($db, 'default_currency', 'KGS'),
-    'sync_batch_limit' => getAppSetting($db, 'sync_batch_limit', '100')
+    'sync_batch_limit' => getAppSetting($db, 'sync_batch_limit', '100'),
+    'b24_doc_delay_ms' => getAppSetting($db, 'b24_doc_delay_ms', '700')
 );
 
 try {
@@ -120,6 +123,10 @@ try {
                 <div class="form-group">
                     <label>Скорость синка (batch limit)</label>
                     <input class="input" type="number" min="10" max="500" name="sync_batch_limit" value="<?= (int)$integrationSettings['sync_batch_limit'] ?>">
+                </div>
+                <div class="form-group">
+                    <label>Задержка перед проведением документа Б24 (мс)</label>
+                    <input class="input" type="number" min="0" max="5000" name="b24_doc_delay_ms" value="<?= (int)$integrationSettings['b24_doc_delay_ms'] ?>">
                 </div>
             </div>
             <button class="btn btn-success" type="submit">Сохранить настройки</button>

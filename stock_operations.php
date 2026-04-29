@@ -113,6 +113,54 @@ function resolveDocTypeCodeFromBitrix($logicalType) {
     return '';
 }
 
+function calculateDocumentTotalFromLines($lineRows) {
+    $total = 0.0;
+    foreach ($lineRows as $line) {
+        if (isset($line['line_total'])) {
+            $total += floatval($line['line_total']);
+            continue;
+        }
+        $qtyRolls = floatval(isset($line['qty_rolls']) ? $line['qty_rolls'] : 0);
+        $pricePerRoll = floatval(isset($line['delivery_price_per_roll']) ? $line['delivery_price_per_roll'] : 0);
+        if ($pricePerRoll <= 0) {
+            $pricePerRoll = floatval(isset($line['price_per_roll']) ? $line['price_per_roll'] : 0);
+        }
+        if ($qtyRolls > 0 && $pricePerRoll > 0) {
+            $total += ($qtyRolls * $pricePerRoll);
+        }
+    }
+    return $total;
+}
+
+function updateB24DocumentTotal($b24DocId, $total, $currency) {
+    if ($total <= 0) {
+        return;
+    }
+    $fields = array(
+        'total' => $total,
+        'currency' => (string)$currency,
+        'TOTAL' => $total,
+        'CURRENCY' => (string)$currency
+    );
+    sendToBitrix('catalog.document.update', array(
+        'id' => intval($b24DocId),
+        'fields' => $fields
+    ));
+}
+
+function pauseBeforeConduct($db) {
+    $delayMs = intval(getAppSetting($db, 'b24_doc_delay_ms', '700'));
+    if ($delayMs < 0) {
+        $delayMs = 0;
+    }
+    if ($delayMs > 5000) {
+        $delayMs = 5000;
+    }
+    if ($delayMs > 0) {
+        usleep($delayMs * 1000);
+    }
+}
+
 function syncOperationDocumentToBitrix($db, $docId, $docType, $docNumber, $commentary, $lineRows) {
     $storeFrom = intval(getAppSetting($db, 'default_store_from_id', '1'));
     $storeTo = intval(getAppSetting($db, 'default_store_to_id', '1'));
@@ -248,6 +296,9 @@ function syncOperationDocumentToBitrix($db, $docId, $docType, $docNumber, $comme
         );
     }
 
+    $docTotal = calculateDocumentTotalFromLines($lineRows);
+    updateB24DocumentTotal($b24DocId, $docTotal, $currency);
+    pauseBeforeConduct($db);
     $conductResp = sendToBitrix('catalog.document.conduct', array('id' => $b24DocId));
     if (!is_array($conductResp) || isset($conductResp['error'])) {
         return array(
@@ -473,6 +524,9 @@ function addLinesAndConductExistingB24Document($db, $b24DocId, $docType, $lineRo
         $existingElements[$b24ProductId] += $amount;
     }
 
+    $docTotal = calculateDocumentTotalFromLines($lineRows);
+    updateB24DocumentTotal($b24DocId, $docTotal, $currency);
+    pauseBeforeConduct($db);
     $conductResp = sendToBitrix('catalog.document.conduct', array('id' => intval($b24DocId)));
     if (!is_array($conductResp) || isset($conductResp['error'])) {
         if (isB24DocumentConducted($b24DocId)) {
@@ -750,7 +804,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             }
 
             $linesStmt = $db->prepare("
-                SELECT product_id, qty_rolls, quantity_m, roll_length, price_per_roll, delivery_price_per_roll
+                SELECT product_id, qty_rolls, quantity_m, roll_length, price_per_roll, delivery_price_per_roll, line_total
                 FROM stock_operation_lines
                 WHERE doc_id = ?
                 ORDER BY id ASC
@@ -926,7 +980,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         $db->prepare("UPDATE stock_operation_docs SET total_amount = ? WHERE id = ?")
             ->execute(array($totalAmount, $docId));
         $db->commit();
-        $lineRowsForSync = $db->query("SELECT product_id, qty_rolls, quantity_m, roll_length, price_per_roll, delivery_price_per_roll FROM stock_operation_lines WHERE doc_id=" . intval($docId))->fetchAll(PDO::FETCH_ASSOC);
+        $lineRowsForSync = $db->query("SELECT product_id, qty_rolls, quantity_m, roll_length, price_per_roll, delivery_price_per_roll, line_total FROM stock_operation_lines WHERE doc_id=" . intval($docId))->fetchAll(PDO::FETCH_ASSOC);
         $syncResult = syncOperationDocumentToBitrix($db, $docId, 'receipt', $docNumber, $commentText, $lineRowsForSync);
         $syncResult = tryFinalizePartialDocument($db, 'receipt', $syncResult, $lineRowsForSync);
         $syncStatus = resolveB24SyncStatus($syncResult);
@@ -1028,7 +1082,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         }
 
         $db->commit();
-        $lineRowsForSync = $db->query("SELECT product_id, qty_rolls, quantity_m, roll_length, price_per_roll, delivery_price_per_roll FROM stock_operation_lines WHERE doc_id=" . intval($docId))->fetchAll(PDO::FETCH_ASSOC);
+        $lineRowsForSync = $db->query("SELECT product_id, qty_rolls, quantity_m, roll_length, price_per_roll, delivery_price_per_roll, line_total FROM stock_operation_lines WHERE doc_id=" . intval($docId))->fetchAll(PDO::FETCH_ASSOC);
         $syncResult = syncOperationDocumentToBitrix($db, $docId, 'writeoff', $docNumber, $commentText, $lineRowsForSync);
         $syncResult = tryFinalizePartialDocument($db, 'writeoff', $syncResult, $lineRowsForSync);
         $syncStatus = resolveB24SyncStatus($syncResult);
