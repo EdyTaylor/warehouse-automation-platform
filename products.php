@@ -24,6 +24,43 @@ function ensureColumnExists($db, $table, $column, $columnSql) {
     }
 }
 
+function hasTable($db, $table) {
+    try {
+        $stmt = $db->prepare("SHOW TABLES LIKE ?");
+        $stmt->execute(array($table));
+        return (bool)$stmt->fetchColumn();
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
+function logProductPriceHistory($db, $productId, $oldValues, $newValues) {
+    try {
+        if (!hasTable($db, 'product_price_history')) {
+            return array('ok' => false, 'message' => 'Таблица product_price_history не найдена');
+        }
+
+        $stmt = $db->prepare("
+            INSERT INTO product_price_history
+                (product_id, old_price_per_meter, new_price_per_meter, old_purchase_price, new_purchase_price, old_delivery_price, new_delivery_price, change_source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'products.php')
+        ");
+        $stmt->execute(array(
+            intval($productId),
+            isset($oldValues['price_per_meter']) ? $oldValues['price_per_meter'] : null,
+            isset($newValues['price_per_meter']) ? $newValues['price_per_meter'] : null,
+            isset($oldValues['purchase_price']) ? $oldValues['purchase_price'] : null,
+            isset($newValues['purchase_price']) ? $newValues['purchase_price'] : null,
+            isset($oldValues['delivery_price']) ? $oldValues['delivery_price'] : null,
+            isset($newValues['delivery_price']) ? $newValues['delivery_price'] : null
+        ));
+        return array('ok' => true, 'message' => 'История обновлена');
+    } catch (Exception $e) {
+        error_log('products.php: failed to write product_price_history for product #' . intval($productId) . ': ' . $e->getMessage());
+        return array('ok' => false, 'message' => 'Не удалось сохранить историю цен');
+    }
+}
+
 function getBrandFromProductName($name) {
     $name = trim((string)$name);
     if ($name === '') {
@@ -212,10 +249,22 @@ if (isset($_GET['delete_id'])) {
 
 // EDIT
 $editProduct = null;
+$editProductHistory = array();
 if (isset($_GET['edit_id'])) {
     $stmt = $db->prepare("SELECT * FROM products WHERE id = ?");
     $stmt->execute(array(intval($_GET['edit_id'])));
     $editProduct = $stmt->fetch(PDO::FETCH_ASSOC);
+    if ($editProduct && hasTable($db, 'product_price_history')) {
+        $historyStmt = $db->prepare("
+            SELECT *
+            FROM product_price_history
+            WHERE product_id = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT 10
+        ");
+        $historyStmt->execute(array(intval($_GET['edit_id'])));
+        $editProductHistory = $historyStmt->fetchAll(PDO::FETCH_ASSOC);
+    }
 }
 
 // SAVE
@@ -283,10 +332,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!empty($formErrors)) {
         $editProduct = $_POST;
     } elseif (!empty($_POST['id'])) {
+        $productId = intval($_POST['id']);
+        $oldPriceValues = null;
+        $oldPriceStmt = $db->prepare("
+            SELECT price_per_meter, purchase_price, delivery_price
+            FROM products
+            WHERE id = ?
+            LIMIT 1
+        ");
+        $oldPriceStmt->execute(array($productId));
+        $oldPriceValues = $oldPriceStmt->fetch(PDO::FETCH_ASSOC);
         $calculatedMeterPrice = calculateMeterPriceFromRoll(
             isset($validation['values']['roll_length']) ? $validation['values']['roll_length'] : 0,
             isset($validation['values']['delivery_price']) ? $validation['values']['delivery_price'] : 0,
             isset($validation['values']['price_per_meter']) ? $validation['values']['price_per_meter'] : 0
+        );
+        $newPriceValues = array(
+            'price_per_meter' => $calculatedMeterPrice,
+            'purchase_price' => normalizeNumber($_POST['purchase_price']),
+            'delivery_price' => normalizeNumber($_POST['delivery_price'])
         );
         $stmt = $db->prepare("
             UPDATE products SET
@@ -314,16 +378,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             isset($validation['values']['price_20_plus']) ? $validation['values']['price_20_plus'] : 0,
             $_POST['id']
         ));
+
+        $historyResult = logProductPriceHistory(
+            $db,
+            $productId,
+            $oldPriceValues ? $oldPriceValues : array(),
+            $newPriceValues
+        );
         // Safe auto-sync: try to update B24, but don't break local save.
         $syncResult = syncProductPriceToB24($db, $_POST['id']);
         $syncTail = $syncResult['ok'] ? ' | Б24: ок' : (' | Б24: ' . $syncResult['message']);
-        header("Location: products.php?sync_msg=" . urlencode("Товар обновлен" . $syncTail));
+        $historyTail = $historyResult['ok'] ? '' : (' | История: ' . $historyResult['message']);
+        header("Location: products.php?sync_msg=" . urlencode("Товар обновлен" . $syncTail . $historyTail));
         exit;
     } elseif ($action === 'save') {
         $calculatedMeterPrice = calculateMeterPriceFromRoll(
             isset($validation['values']['roll_length']) ? $validation['values']['roll_length'] : 0,
             isset($validation['values']['delivery_price']) ? $validation['values']['delivery_price'] : 0,
             isset($validation['values']['price_per_meter']) ? $validation['values']['price_per_meter'] : 0
+        );
+        $newPriceValues = array(
+            'price_per_meter' => $calculatedMeterPrice,
+            'purchase_price' => normalizeNumber($_POST['purchase_price']),
+            'delivery_price' => normalizeNumber($_POST['delivery_price'])
         );
         $stmt = $db->prepare("
             INSERT INTO products
@@ -342,7 +419,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             isset($validation['values']['price_10_19']) ? $validation['values']['price_10_19'] : 0,
             isset($validation['values']['price_20_plus']) ? $validation['values']['price_20_plus'] : 0
         ));
-        header("Location: products.php?sync_msg=" . urlencode("Товар сохранен локально"));
+
+        $newProductId = intval($db->lastInsertId());
+        $historyResult = logProductPriceHistory(
+            $db,
+            $newProductId,
+            array(),
+            $newPriceValues
+        );
+        $historyTail = $historyResult['ok'] ? '' : (' | История: ' . $historyResult['message']);
+        header("Location: products.php?sync_msg=" . urlencode("Товар сохранен локально" . $historyTail));
         exit;
     }
 }
@@ -448,6 +534,35 @@ require 'includes/header.php';
     </tr>
     <?php endforeach; ?>
 </table>
+<?php if ($editProduct): ?>
+<h3>История цен (последние 10)</h3>
+<?php if (empty($editProductHistory)): ?>
+    <p>Записей пока нет.</p>
+<?php else: ?>
+    <table border="1" style="margin-bottom:12px;">
+        <tr>
+            <th>Когда</th>
+            <th>Старая цена/м</th>
+            <th>Новая цена/м</th>
+            <th>Старая себестоимость</th>
+            <th>Новая себестоимость</th>
+            <th>Старая с доставкой</th>
+            <th>Новая с доставкой</th>
+        </tr>
+        <?php foreach ($editProductHistory as $h): ?>
+        <tr>
+            <td><?php echo htmlspecialchars($h['created_at']); ?></td>
+            <td><?php echo htmlspecialchars((string)$h['old_price_per_meter']); ?></td>
+            <td><?php echo htmlspecialchars((string)$h['new_price_per_meter']); ?></td>
+            <td><?php echo htmlspecialchars((string)$h['old_purchase_price']); ?></td>
+            <td><?php echo htmlspecialchars((string)$h['new_purchase_price']); ?></td>
+            <td><?php echo htmlspecialchars((string)$h['old_delivery_price']); ?></td>
+            <td><?php echo htmlspecialchars((string)$h['new_delivery_price']); ?></td>
+        </tr>
+        <?php endforeach; ?>
+    </table>
+<?php endif; ?>
+<?php endif; ?>
 
 <h3>Список</h3>
 <?php if ($hasCatalogId): ?>
