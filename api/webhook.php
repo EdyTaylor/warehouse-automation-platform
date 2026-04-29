@@ -404,6 +404,11 @@ function applyDealPaidOrReserveMark($db, $dealId, $dealData) {
                 }
             }
         } else {
+            $isCancelled = $semantic === 'f' || strpos($stage, 'LOSE') !== false || strpos($stage, 'CANCEL') !== false;
+            if ($isCancelled) {
+                cancelDealReservations($db, $dealId);
+                return;
+            }
             $db->prepare("UPDATE b24_sale_requests SET status = IF(status='completed','completed','in_progress'), updated_at = NOW() WHERE b24_deal_id = ?")
                 ->execute([$dealId]);
         }
