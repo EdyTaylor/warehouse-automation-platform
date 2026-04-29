@@ -196,6 +196,19 @@ function buildPricePreviewRows($priceSource) {
     return $rows;
 }
 
+function buildProductsUrl($overrides) {
+    $query = $_GET;
+    foreach ($overrides as $key => $value) {
+        if ($value === null || $value === '') {
+            unset($query[$key]);
+        } else {
+            $query[$key] = $value;
+        }
+    }
+    $qs = http_build_query($query);
+    return 'products.php' . ($qs ? ('?' . $qs) : '');
+}
+
 ensureColumnExists($db, 'products', 'delivery_price', '`delivery_price` decimal(14,2) NOT NULL DEFAULT 0');
 $formErrors = array();
 $formWarnings = array();
@@ -319,7 +332,6 @@ function syncProductPriceToB24($db, $productId) {
     return array('ok' => false, 'message' => $err);
 }
 
-// DELETE
 if (isset($_GET['delete_id'])) {
     $stmt = $db->prepare("DELETE FROM products WHERE id = ?");
     $stmt->execute(array(intval($_GET['delete_id'])));
@@ -327,7 +339,6 @@ if (isset($_GET['delete_id'])) {
     exit;
 }
 
-// EDIT
 $editProduct = null;
 $editProductHistory = array();
 if (isset($_GET['edit_id'])) {
@@ -347,7 +358,6 @@ if (isset($_GET['edit_id'])) {
     }
 }
 
-// SAVE
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = isset($_POST['action']) ? $_POST['action'] : 'save';
 
@@ -385,6 +395,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $ids = array_map(function($r) { return intval($r['id']); }, $rows);
         $stats = runB24SyncForProductIds($db, $ids);
         header("Location: products.php?sync_msg=" . urlencode("Retry ошибок: обновлено {$stats['ok']}, ошибок {$stats['err']}, всего {$stats['total']}"));
+        exit;
+    }
+
+    if ($action === 'sync_row_to_b24') {
+        $productId = intval(isset($_POST['product_id']) ? $_POST['product_id'] : 0);
+        $result = syncProductPriceToB24($db, $productId);
+        $message = $result['ok'] ? "Товар #{$productId}: синк Б24 выполнен" : ("Товар #{$productId}: " . $result['message']);
+        header("Location: products.php?sync_msg=" . urlencode($message));
         exit;
     }
 
@@ -535,7 +553,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 $hasCatalogId = hasColumn($db, 'products', 'catalog_id');
-$products = $db->query("SELECT * FROM products ORDER BY " . ($hasCatalogId ? "catalog_id ASC, " : "") . "id DESC")->fetchAll(PDO::FETCH_ASSOC);
 $syncMsg = isset($_GET['sync_msg']) ? $_GET['sync_msg'] : '';
 $b24Config = require __DIR__ . '/api/bitrix/config.php';
 $catalogLabels = array();
@@ -552,277 +569,470 @@ if (empty($previewRows)) {
         'roll_length' => isset($editProduct['roll_length']) ? $editProduct['roll_length'] : 0
     ));
 }
+
+$search = isset($_GET['q']) ? trim($_GET['q']) : '';
+$brandPrefix = isset($_GET['brand_prefix']) ? trim($_GET['brand_prefix']) : '';
+$catalogFilter = isset($_GET['catalog_id']) ? trim($_GET['catalog_id']) : '';
+$hasB24Filter = isset($_GET['has_b24']) ? $_GET['has_b24'] : 'all';
+$emptyPricesOnly = isset($_GET['empty_prices']) && $_GET['empty_prices'] === '1';
+$allowedPerPage = array(50, 100, 200);
+$perPage = isset($_GET['per_page']) ? intval($_GET['per_page']) : 50;
+if (!in_array($perPage, $allowedPerPage, true)) {
+    $perPage = 50;
+}
+$page = isset($_GET['page']) ? intval($_GET['page']) : 1;
+if ($page < 1) {
+    $page = 1;
+}
+
+$where = array();
+$params = array();
+
+if ($search !== '') {
+    $where[] = "name LIKE ?";
+    $params[] = '%' . $search . '%';
+}
+if ($hasCatalogId && $catalogFilter !== '') {
+    $where[] = "catalog_id = ?";
+    $params[] = intval($catalogFilter);
+}
+if ($brandPrefix !== '') {
+    $where[] = "name LIKE ?";
+    $params[] = $brandPrefix . '%';
+}
+if ($hasB24Filter === 'yes') {
+    $where[] = "b24_product_id IS NOT NULL AND b24_product_id <> 0";
+} elseif ($hasB24Filter === 'no') {
+    $where[] = "(b24_product_id IS NULL OR b24_product_id = 0)";
+}
+if ($emptyPricesOnly) {
+    $where[] = "(
+        purchase_price IS NULL OR purchase_price = 0
+        OR delivery_price IS NULL OR delivery_price = 0
+        OR price_per_meter IS NULL OR price_per_meter = 0
+        OR price_1_4 IS NULL OR price_1_4 = 0
+        OR price_5_9 IS NULL OR price_5_9 = 0
+        OR price_10_19 IS NULL OR price_10_19 = 0
+        OR price_20_plus IS NULL OR price_20_plus = 0
+    )";
+}
+
+$whereSql = '';
+if (!empty($where)) {
+    $whereSql = ' WHERE ' . implode(' AND ', $where);
+}
+
+$countStmt = $db->prepare("SELECT COUNT(*) AS total FROM products" . $whereSql);
+$countStmt->execute($params);
+$totalRows = intval($countStmt->fetchColumn());
+$totalPages = $totalRows > 0 ? intval(ceil($totalRows / $perPage)) : 1;
+if ($page > $totalPages) {
+    $page = $totalPages;
+}
+$offset = ($page - 1) * $perPage;
+
+$orderSql = $hasCatalogId ? "catalog_id ASC, id DESC" : "id DESC";
+$sql = "SELECT * FROM products" . $whereSql . " ORDER BY " . $orderSql . " LIMIT " . intval($perPage) . " OFFSET " . intval($offset);
+$stmt = $db->prepare($sql);
+$stmt->execute($params);
+$products = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+$catalogOptions = array();
+if ($hasCatalogId) {
+    $catalogRows = $db->query("SELECT DISTINCT catalog_id FROM products WHERE catalog_id IS NOT NULL ORDER BY catalog_id ASC")->fetchAll(PDO::FETCH_ASSOC);
+    foreach ($catalogRows as $catalogRow) {
+        $cid = intval($catalogRow['catalog_id']);
+        if ($cid > 0) {
+            $catalogOptions[] = $cid;
+        }
+    }
+}
 $page_title = 'Товары';
 require 'includes/header.php';
 ?>
 
-<main class="container">
-<h2>Товары (совместимый режим)</h2>
-<?php if ($syncMsg): ?>
-    <p style="color:green;"><?php echo htmlspecialchars($syncMsg); ?></p>
-<?php endif; ?>
-<?php if (!empty($formErrors)): ?>
-    <div style="border:1px solid #d33; background:#fff6f6; padding:8px; margin-bottom:10px;">
-        <b>Ошибки валидации:</b>
-        <ul>
-            <?php foreach ($formErrors as $errorText): ?>
-                <li><?php echo htmlspecialchars($errorText); ?></li>
-            <?php endforeach; ?>
-        </ul>
-    </div>
-<?php endif; ?>
-<?php if (!empty($formWarnings)): ?>
-    <div style="border:1px solid #d8a700; background:#fffbea; padding:8px; margin-bottom:10px;">
-        <b>Предупреждения:</b>
-        <ul>
-            <?php foreach ($formWarnings as $warningText): ?>
-                <li><?php echo htmlspecialchars($warningText); ?></li>
-            <?php endforeach; ?>
-        </ul>
-    </div>
-<?php endif; ?>
-<p>Каталогизация возвращена по локальному `catalog_id` без рискованных внешних вызовов на открытии страницы.</p>
+<main class="container products-catalog-page">
+    <h2>Каталог товаров</h2>
 
-<form method="POST" style="margin-bottom:12px;">
-    <input type="hidden" name="action" value="sync_to_b24">
-    <button type="submit">Отправить цены в Б24</button>
-</form>
-<form id="bulk-sync-form" method="POST" style="margin-bottom:12px;">
-    <button type="submit" name="action" value="sync_selected">Синк выбранных</button>
-    <button type="submit" name="action" value="retry_sync_errors">Retry ошибок</button>
-</form>
-
-<form method="POST">
-    <input type="hidden" name="action" value="save">
-    <input type="hidden" name="id" value="<?php echo isset($editProduct['id']) ? $editProduct['id'] : ''; ?>">
-
-    <input name="name" placeholder="Название" value="<?php echo isset($editProduct['name']) ? htmlspecialchars($editProduct['name']) : ''; ?>" required><br><br>
-    <input name="roll_length" placeholder="Метраж рулона" value="<?php echo isset($editProduct['roll_length']) ? $editProduct['roll_length'] : ''; ?>" required><br><br>
-
-    <input name="price_per_meter" placeholder="Цена за метр" value="<?php echo isset($editProduct['price_per_meter']) ? $editProduct['price_per_meter'] : ''; ?>"><br>
-    <input name="purchase_price" placeholder="Себестоимость (KGS)" value="<?php echo isset($editProduct['purchase_price']) ? $editProduct['purchase_price'] : ''; ?>"><br>
-    <input name="delivery_price" placeholder="С доставкой за рулон (KGS)" value="<?php echo isset($editProduct['delivery_price']) ? $editProduct['delivery_price'] : ''; ?>"><br><br>
-
-    <b>Цены:</b><br>
-    <input name="price_1_4" placeholder="1-4" value="<?php echo isset($editProduct['price_1_4']) ? $editProduct['price_1_4'] : ''; ?>"><br>
-    <input name="price_5_9" placeholder="5-9" value="<?php echo isset($editProduct['price_5_9']) ? $editProduct['price_5_9'] : ''; ?>"><br>
-    <input name="price_10_19" placeholder="10-19" value="<?php echo isset($editProduct['price_10_19']) ? $editProduct['price_10_19'] : ''; ?>"><br>
-    <input name="price_20_plus" placeholder="20+" value="<?php echo isset($editProduct['price_20_plus']) ? $editProduct['price_20_plus'] : ''; ?>"><br><br>
-    <?php if (!empty($tierAutofillSuggestions)): ?>
-        <small>
-            Подсказка автозаполнения:
-            <?php foreach ($tierAutofillSuggestions as $tierKey => $tierValue): ?>
-                <?php echo htmlspecialchars($tierKey); ?> → <?php echo htmlspecialchars(round($tierValue, 2)); ?>&nbsp;
-            <?php endforeach; ?>
-        </small><br><br>
+    <?php if ($syncMsg): ?>
+        <div class="alert alert-info"><?php echo htmlspecialchars($syncMsg); ?></div>
+    <?php endif; ?>
+    <?php if (!empty($formErrors)): ?>
+        <div class="alert alert-danger">
+            <ul>
+                <?php foreach ($formErrors as $errorText): ?>
+                    <li><?php echo htmlspecialchars($errorText); ?></li>
+                <?php endforeach; ?>
+            </ul>
+        </div>
+    <?php endif; ?>
+    <?php if (!empty($formWarnings)): ?>
+        <div class="alert alert-warning">
+            <ul>
+                <?php foreach ($formWarnings as $warningText): ?>
+                    <li><?php echo htmlspecialchars($warningText); ?></li>
+                <?php endforeach; ?>
+            </ul>
+        </div>
     <?php endif; ?>
 
-    <button><?php echo $editProduct ? 'Обновить' : 'Сохранить'; ?></button>
-</form>
-
-<h3>Превью итоговой цены</h3>
-<table border="1" style="margin-bottom:16px;">
-    <tr>
-        <th>Рулонов</th>
-        <th>Итоговая цена</th>
-        <th>Целевой tier</th>
-        <th>Источник цены</th>
-        <th>Режим</th>
-    </tr>
-    <?php foreach ($previewRows as $preview): ?>
-    <tr>
-        <td><?php echo intval($preview['qty']); ?></td>
-        <td><?php echo round(floatval($preview['price']), 2); ?></td>
-        <td><?php echo htmlspecialchars($preview['targetTier']); ?></td>
-        <td><?php echo htmlspecialchars($preview['sourceTier']); ?></td>
-        <td><?php echo !empty($preview['fallbackUsed']) ? 'fallback' : 'tier'; ?></td>
-    </tr>
-    <?php endforeach; ?>
-</table>
-<?php if ($editProduct): ?>
-<h3>История цен (последние 10)</h3>
-<?php if (empty($editProductHistory)): ?>
-    <p>Записей пока нет.</p>
-<?php else: ?>
-    <table border="1" style="margin-bottom:12px;">
-        <tr>
-            <th>Когда</th>
-            <th>Старая цена/м</th>
-            <th>Новая цена/м</th>
-            <th>Старая себестоимость</th>
-            <th>Новая себестоимость</th>
-            <th>Старая с доставкой</th>
-            <th>Новая с доставкой</th>
-        </tr>
-        <?php foreach ($editProductHistory as $h): ?>
-        <tr>
-            <td><?php echo htmlspecialchars($h['created_at']); ?></td>
-            <td><?php echo htmlspecialchars((string)$h['old_price_per_meter']); ?></td>
-            <td><?php echo htmlspecialchars((string)$h['new_price_per_meter']); ?></td>
-            <td><?php echo htmlspecialchars((string)$h['old_purchase_price']); ?></td>
-            <td><?php echo htmlspecialchars((string)$h['new_purchase_price']); ?></td>
-            <td><?php echo htmlspecialchars((string)$h['old_delivery_price']); ?></td>
-            <td><?php echo htmlspecialchars((string)$h['new_delivery_price']); ?></td>
-        </tr>
-        <?php endforeach; ?>
-    </table>
-<?php endif; ?>
-<?php endif; ?>
-
-<h3>Список</h3>
-<?php if ($hasCatalogId): ?>
-<?php
-$groups = array();
-foreach ($products as $p) {
-    $cid = isset($p['catalog_id']) ? intval($p['catalog_id']) : 0;
-    $brand = getBrandFromProductName(isset($p['name']) ? $p['name'] : '');
-    if (!isset($groups[$cid])) {
-        $groups[$cid] = array();
-    }
-    if (!isset($groups[$cid][$brand])) {
-        $groups[$cid][$brand] = array();
-    }
-    $groups[$cid][$brand][] = $p;
-}
-?>
-<?php foreach ($groups as $catalogId => $brands): ?>
-<details open style="margin-bottom:12px;">
-<?php
-$catalogCount = 0;
-foreach ($brands as $brandItems) {
-    $catalogCount += count($brandItems);
-}
-$catalogLabel = $catalogId > 0
-    ? (isset($catalogLabels[$catalogId]) ? $catalogLabels[$catalogId] : ("Каталог #".$catalogId))
-    : "Без каталога";
-?>
-<summary><strong><?php echo htmlspecialchars($catalogLabel); ?></strong> — <?php echo $catalogCount; ?> тов.</summary>
-
-<?php foreach ($brands as $brand => $brandProducts): ?>
-<details style="margin:10px 0 0 20px;" open>
-    <summary><strong><?php echo htmlspecialchars($brand); ?></strong> — <?php echo count($brandProducts); ?> тов.</summary>
-    <table border="1" style="margin-top:8px;">
-    <tr>
-    <th>ID</th>
-    <th>✓</th>
-    <th>Название</th>
-    <th>Метраж</th>
-    <th>Цена/м</th>
-    <th>Себестоимость</th>
-    <th>С доставкой</th>
-    <th>1-4</th>
-    <th>5-9</th>
-    <th>10-19</th>
-    <th>20+</th>
-    <th>B24 ID</th>
-    <th>Действие</th>
-    <th>Последняя ошибка</th>
-    <th>Попытка</th>
-    <th>Sync</th>
-    <th>Каталог</th>
-    <th>Переместить</th>
-    <th>✏️</th>
-    <th>❌</th>
-    </tr>
-
-    <?php foreach ($brandProducts as $p): ?>
-    <tr>
-    <td><?php echo $p['id']; ?></td>
-    <td>
-        <input type="checkbox" form="bulk-sync-form" name="selected_ids[]" value="<?php echo $p['id']; ?>">
-    </td>
-    <td><?php echo htmlspecialchars($p['name']); ?></td>
-    <td><?php echo $p['roll_length']; ?></td>
-    <td><?php echo $p['price_per_meter']; ?></td>
-    <td><?php echo $p['purchase_price']; ?></td>
-    <td><?php echo $p['delivery_price']; ?></td>
-    <td><?php echo $p['price_1_4']; ?></td>
-    <td><?php echo $p['price_5_9']; ?></td>
-    <td><?php echo $p['price_10_19']; ?></td>
-    <td><?php echo $p['price_20_plus']; ?></td>
-    <td><?php echo isset($p['b24_product_id']) ? $p['b24_product_id'] : ''; ?></td>
-    <td><?php echo isset($p['sync_status']) ? htmlspecialchars($p['sync_status']) : 'pending'; ?></td>
-    <td><?php echo !empty($p['last_error']) ? htmlspecialchars($p['last_error']) : '—'; ?></td>
-    <td><?php echo !empty($p['last_attempt_at']) ? htmlspecialchars($p['last_attempt_at']) : '—'; ?></td>
-    <td>
-        <form method="POST" style="display:inline;">
-            <input type="hidden" name="action" value="sync_one">
-            <input type="hidden" name="product_id" value="<?php echo $p['id']; ?>">
-            <button type="submit">↻</button>
+    <div class="card products-toolbar">
+        <form method="GET" class="products-filter-form">
+            <div class="products-filter-grid">
+                <div>
+                    <label class="form-label" for="q">Поиск по названию</label>
+                    <input class="form-control" id="q" type="text" name="q" value="<?php echo htmlspecialchars($search); ?>" placeholder="Например: Oracal 641">
+                </div>
+                <div>
+                    <label class="form-label" for="brand_prefix">Бренд (префикс)</label>
+                    <input class="form-control" id="brand_prefix" type="text" name="brand_prefix" value="<?php echo htmlspecialchars($brandPrefix); ?>" placeholder="Например: Oracal">
+                </div>
+                <?php if ($hasCatalogId): ?>
+                <div>
+                    <label class="form-label" for="catalog_id">catalog_id</label>
+                    <select class="form-control" id="catalog_id" name="catalog_id">
+                        <option value="">Все</option>
+                        <?php foreach ($catalogOptions as $catalogId): ?>
+                            <?php $label = isset($catalogLabels[$catalogId]) ? $catalogLabels[$catalogId] : ('Каталог #' . $catalogId); ?>
+                            <option value="<?php echo $catalogId; ?>" <?php echo ((string)$catalogId === $catalogFilter) ? 'selected' : ''; ?>>
+                                <?php echo htmlspecialchars($label); ?>
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <?php endif; ?>
+                <div>
+                    <label class="form-label" for="has_b24">Наличие b24_product_id</label>
+                    <select class="form-control" id="has_b24" name="has_b24">
+                        <option value="all" <?php echo $hasB24Filter === 'all' ? 'selected' : ''; ?>>Все</option>
+                        <option value="yes" <?php echo $hasB24Filter === 'yes' ? 'selected' : ''; ?>>Только с B24</option>
+                        <option value="no" <?php echo $hasB24Filter === 'no' ? 'selected' : ''; ?>>Только без B24</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="form-label" for="per_page">Строк на странице</label>
+                    <select class="form-control" id="per_page" name="per_page">
+                        <?php foreach ($allowedPerPage as $pp): ?>
+                            <option value="<?php echo $pp; ?>" <?php echo $perPage === $pp ? 'selected' : ''; ?>><?php echo $pp; ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+            </div>
+            <div class="products-filter-actions">
+                <label>
+                    <input type="checkbox" name="empty_prices" value="1" <?php echo $emptyPricesOnly ? 'checked' : ''; ?>>
+                    Есть пустые цены
+                </label>
+                <div class="d-flex gap-1">
+                    <button class="btn btn-primary btn-sm" type="submit">Применить</button>
+                    <a class="btn btn-light btn-sm" href="products.php">Сбросить</a>
+                </div>
+            </div>
         </form>
-    </td>
-    <td><?php echo isset($p['catalog_id']) ? intval($p['catalog_id']) : ''; ?></td>
-    <td>
-        <form method="POST" style="display:inline;">
-            <input type="hidden" name="action" value="move_group">
-            <input type="hidden" name="product_id" value="<?php echo $p['id']; ?>">
-            <input type="number" name="target_catalog_id" min="1" style="width:80px;" placeholder="ID" required>
-            <button type="submit">↔</button>
+
+        <div class="products-bulk-tools">
+            <form method="POST">
+                <input type="hidden" name="action" value="sync_to_b24">
+                <button class="btn btn-warning btn-sm" type="submit">Синк всех цен в Б24</button>
+            </form>
+            <form method="POST" id="bulk-sync-form">
+                <button class="btn btn-light btn-sm" type="submit" name="action" value="sync_selected">Синк выбранных</button>
+                <button class="btn btn-light btn-sm" type="submit" name="action" value="retry_sync_errors">Retry ошибок</button>
+            </form>
+            <span class="text-muted">Найдено: <?php echo $totalRows; ?></span>
+        </div>
+    </div>
+
+    <details class="card" <?php echo $editProduct ? 'open' : ''; ?>>
+        <summary><strong><?php echo $editProduct ? 'Редактирование через форму' : 'Добавить товар'; ?></strong></summary>
+        <form method="POST" class="products-legacy-form mt-2">
+            <input type="hidden" name="action" value="save">
+            <input type="hidden" name="id" value="<?php echo isset($editProduct['id']) ? $editProduct['id'] : ''; ?>">
+
+            <input class="form-control mb-1" name="name" placeholder="Название" value="<?php echo isset($editProduct['name']) ? htmlspecialchars($editProduct['name']) : ''; ?>" required>
+            <input class="form-control mb-1" name="roll_length" placeholder="Метраж рулона" value="<?php echo isset($editProduct['roll_length']) ? $editProduct['roll_length'] : ''; ?>" required>
+            <input class="form-control mb-1" name="price_per_meter" placeholder="Цена за метр" value="<?php echo isset($editProduct['price_per_meter']) ? $editProduct['price_per_meter'] : ''; ?>">
+            <input class="form-control mb-1" name="purchase_price" placeholder="Себестоимость (KGS)" value="<?php echo isset($editProduct['purchase_price']) ? $editProduct['purchase_price'] : ''; ?>">
+            <input class="form-control mb-1" name="delivery_price" placeholder="С доставкой за рулон (KGS)" value="<?php echo isset($editProduct['delivery_price']) ? $editProduct['delivery_price'] : ''; ?>">
+            <input class="form-control mb-1" name="price_1_4" placeholder="1-4" value="<?php echo isset($editProduct['price_1_4']) ? $editProduct['price_1_4'] : ''; ?>">
+            <input class="form-control mb-1" name="price_5_9" placeholder="5-9" value="<?php echo isset($editProduct['price_5_9']) ? $editProduct['price_5_9'] : ''; ?>">
+            <input class="form-control mb-1" name="price_10_19" placeholder="10-19" value="<?php echo isset($editProduct['price_10_19']) ? $editProduct['price_10_19'] : ''; ?>">
+            <input class="form-control mb-2" name="price_20_plus" placeholder="20+" value="<?php echo isset($editProduct['price_20_plus']) ? $editProduct['price_20_plus'] : ''; ?>">
+
+            <button class="btn btn-success btn-sm" type="submit"><?php echo $editProduct ? 'Обновить' : 'Сохранить'; ?></button>
         </form>
-    </td>
-    <td><a href="?edit_id=<?php echo $p['id']; ?>">✏️</a></td>
-    <td><a href="?delete_id=<?php echo $p['id']; ?>">❌</a></td>
-    </tr>
-    <?php endforeach; ?>
-    </table>
-</details>
-<?php endforeach; ?>
-</details>
-<?php endforeach; ?>
-<?php else: ?>
-<table border="1">
-<tr>
-<th>ID</th>
-<th>✓</th>
-<th>Название</th>
-<th>Метраж</th>
-<th>Цена/м</th>
-<th>Себестоимость</th>
-<th>С доставкой</th>
-<th>1-4</th>
-<th>5-9</th>
-<th>10-19</th>
-<th>20+</th>
-<th>B24 ID</th>
-<th>Действие</th>
-<th>Последняя ошибка</th>
-<th>Попытка</th>
-<th>Sync</th>
-<th>✏️</th>
-<th>❌</th>
-</tr>
-<?php foreach ($products as $p): ?>
-<tr>
-<td><?php echo $p['id']; ?></td>
-<td>
-    <input type="checkbox" form="bulk-sync-form" name="selected_ids[]" value="<?php echo $p['id']; ?>">
-</td>
-<td><?php echo htmlspecialchars($p['name']); ?></td>
-<td><?php echo $p['roll_length']; ?></td>
-<td><?php echo $p['price_per_meter']; ?></td>
-<td><?php echo $p['purchase_price']; ?></td>
-<td><?php echo $p['delivery_price']; ?></td>
-<td><?php echo $p['price_1_4']; ?></td>
-<td><?php echo $p['price_5_9']; ?></td>
-<td><?php echo $p['price_10_19']; ?></td>
-<td><?php echo $p['price_20_plus']; ?></td>
-<td><?php echo isset($p['b24_product_id']) ? $p['b24_product_id'] : ''; ?></td>
-<td><?php echo isset($p['sync_status']) ? htmlspecialchars($p['sync_status']) : 'pending'; ?></td>
-<td><?php echo !empty($p['last_error']) ? htmlspecialchars($p['last_error']) : '—'; ?></td>
-<td><?php echo !empty($p['last_attempt_at']) ? htmlspecialchars($p['last_attempt_at']) : '—'; ?></td>
-<td>
-    <form method="POST" style="display:inline;">
-        <input type="hidden" name="action" value="sync_one">
-        <input type="hidden" name="product_id" value="<?php echo $p['id']; ?>">
-        <button type="submit">↻</button>
-    </form>
-</td>
-<td><a href="?edit_id=<?php echo $p['id']; ?>">✏️</a></td>
-<td><a href="?delete_id=<?php echo $p['id']; ?>">❌</a></td>
-</tr>
-<?php endforeach; ?>
-</table>
-<?php endif; ?>
+    </details>
+
+    <div class="card">
+        <h3>Превью итоговой цены</h3>
+        <table class="table">
+            <tr><th>Рулонов</th><th>Цена</th><th>Целевой tier</th><th>Источник</th><th>Режим</th></tr>
+            <?php foreach ($previewRows as $preview): ?>
+                <tr>
+                    <td><?php echo intval($preview['qty']); ?></td>
+                    <td><?php echo round(floatval($preview['price']), 2); ?></td>
+                    <td><?php echo htmlspecialchars($preview['targetTier']); ?></td>
+                    <td><?php echo htmlspecialchars($preview['sourceTier']); ?></td>
+                    <td><?php echo !empty($preview['fallbackUsed']) ? 'fallback' : 'tier'; ?></td>
+                </tr>
+            <?php endforeach; ?>
+        </table>
+    </div>
+    <?php if ($editProduct): ?>
+    <div class="card">
+        <h3>История цен (последние 10)</h3>
+        <?php if (empty($editProductHistory)): ?>
+            <p>Записей пока нет.</p>
+        <?php else: ?>
+            <table class="table">
+                <tr><th>Когда</th><th>Старая цена/м</th><th>Новая цена/м</th><th>Старая себестоимость</th><th>Новая себестоимость</th><th>Старая с доставкой</th><th>Новая с доставкой</th></tr>
+                <?php foreach ($editProductHistory as $h): ?>
+                    <tr>
+                        <td><?php echo htmlspecialchars($h['created_at']); ?></td>
+                        <td><?php echo htmlspecialchars((string)$h['old_price_per_meter']); ?></td>
+                        <td><?php echo htmlspecialchars((string)$h['new_price_per_meter']); ?></td>
+                        <td><?php echo htmlspecialchars((string)$h['old_purchase_price']); ?></td>
+                        <td><?php echo htmlspecialchars((string)$h['new_purchase_price']); ?></td>
+                        <td><?php echo htmlspecialchars((string)$h['old_delivery_price']); ?></td>
+                        <td><?php echo htmlspecialchars((string)$h['new_delivery_price']); ?></td>
+                    </tr>
+                <?php endforeach; ?>
+            </table>
+        <?php endif; ?>
+    </div>
+    <?php endif; ?>
+
+    <div class="table-responsive products-table-wrap">
+        <table class="table products-table">
+            <thead>
+                <tr>
+                    <th><input type="checkbox" id="select-all-rows"></th>
+                    <th>ID</th>
+                    <th>Название</th>
+                    <?php if ($hasCatalogId): ?><th>Каталог</th><?php endif; ?>
+                    <th>B24</th>
+                    <th>Метраж</th>
+                    <th>Себест.</th>
+                    <th>Доставка</th>
+                    <th>Цена/м</th>
+                    <th>1-4</th>
+                    <th>5-9</th>
+                    <th>10-19</th>
+                    <th>20+</th>
+                    <th>Действия</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php if (empty($products)): ?>
+                    <tr><td colspan="<?php echo $hasCatalogId ? '14' : '13'; ?>" class="text-center text-muted">Ничего не найдено по текущим фильтрам.</td></tr>
+                <?php endif; ?>
+                <?php foreach ($products as $p): ?>
+                    <?php
+                    $catalogId = $hasCatalogId ? intval(isset($p['catalog_id']) ? $p['catalog_id'] : 0) : 0;
+                    $catalogLabel = $catalogId > 0
+                        ? (isset($catalogLabels[$catalogId]) ? $catalogLabels[$catalogId] : ('#' . $catalogId))
+                        : '—';
+                    $b24Id = isset($p['b24_product_id']) ? intval($p['b24_product_id']) : 0;
+                    ?>
+                    <tr class="product-row" data-product-id="<?php echo intval($p['id']); ?>" data-product-name="<?php echo htmlspecialchars(isset($p['name']) ? $p['name'] : '', ENT_QUOTES, 'UTF-8'); ?>">
+                        <td><input type="checkbox" class="row-selector" name="selected_ids[]" form="bulk-sync-form" value="<?php echo intval($p['id']); ?>"></td>
+                        <td><?php echo intval($p['id']); ?></td>
+                        <td class="product-name-cell"><?php echo htmlspecialchars(isset($p['name']) ? $p['name'] : ''); ?><div class="inline-row-error"></div></td>
+                        <?php if ($hasCatalogId): ?><td><?php echo htmlspecialchars($catalogLabel); ?></td><?php endif; ?>
+                        <td><?php echo $b24Id > 0 ? $b24Id : '—'; ?></td>
+                        <td>
+                            <span class="cell-view"><?php echo htmlspecialchars((string)$p['roll_length']); ?></span>
+                            <input class="form-control cell-edit" data-field="roll_length" type="text" value="<?php echo htmlspecialchars((string)$p['roll_length']); ?>">
+                        </td>
+                        <td>
+                            <span class="cell-view"><?php echo htmlspecialchars((string)$p['purchase_price']); ?></span>
+                            <input class="form-control cell-edit" data-field="purchase_price" type="text" value="<?php echo htmlspecialchars((string)$p['purchase_price']); ?>">
+                        </td>
+                        <td>
+                            <span class="cell-view"><?php echo htmlspecialchars((string)$p['delivery_price']); ?></span>
+                            <input class="form-control cell-edit" data-field="delivery_price" type="text" value="<?php echo htmlspecialchars((string)$p['delivery_price']); ?>">
+                        </td>
+                        <td>
+                            <span class="cell-view"><?php echo htmlspecialchars((string)$p['price_per_meter']); ?></span>
+                            <input class="form-control cell-edit" data-field="price_per_meter" type="text" value="<?php echo htmlspecialchars((string)$p['price_per_meter']); ?>">
+                        </td>
+                        <td>
+                            <span class="cell-view"><?php echo htmlspecialchars((string)$p['price_1_4']); ?></span>
+                            <input class="form-control cell-edit" data-field="price_1_4" type="text" value="<?php echo htmlspecialchars((string)$p['price_1_4']); ?>">
+                        </td>
+                        <td>
+                            <span class="cell-view"><?php echo htmlspecialchars((string)$p['price_5_9']); ?></span>
+                            <input class="form-control cell-edit" data-field="price_5_9" type="text" value="<?php echo htmlspecialchars((string)$p['price_5_9']); ?>">
+                        </td>
+                        <td>
+                            <span class="cell-view"><?php echo htmlspecialchars((string)$p['price_10_19']); ?></span>
+                            <input class="form-control cell-edit" data-field="price_10_19" type="text" value="<?php echo htmlspecialchars((string)$p['price_10_19']); ?>">
+                        </td>
+                        <td>
+                            <span class="cell-view"><?php echo htmlspecialchars((string)$p['price_20_plus']); ?></span>
+                            <input class="form-control cell-edit" data-field="price_20_plus" type="text" value="<?php echo htmlspecialchars((string)$p['price_20_plus']); ?>">
+                        </td>
+                        <td>
+                            <div class="products-row-actions">
+                                <button type="button" class="btn btn-light btn-sm inline-edit-btn">Ред.</button>
+                                <button type="button" class="btn btn-success btn-sm inline-save-btn">Сохранить</button>
+                                <button type="button" class="btn btn-light btn-sm inline-cancel-btn">Отмена</button>
+                                <button type="button" class="btn btn-warning btn-sm inline-sync-btn">Синк B24</button>
+                                <?php if ($hasCatalogId): ?>
+                                <form method="POST" class="inline-move-form">
+                                    <input type="hidden" name="action" value="move_group">
+                                    <input type="hidden" name="product_id" value="<?php echo intval($p['id']); ?>">
+                                    <input type="number" name="target_catalog_id" min="1" placeholder="cat_id" required>
+                                    <button class="btn btn-light btn-sm" type="submit">↔</button>
+                                </form>
+                                <?php endif; ?>
+                                <a class="btn btn-light btn-sm" href="<?php echo buildProductsUrl(array('edit_id' => intval($p['id']))); ?>">Форма</a>
+                                <a class="btn btn-danger btn-sm" href="products.php?delete_id=<?php echo intval($p['id']); ?>" onclick="return confirm('Удалить товар #<?php echo intval($p['id']); ?>?');">Удалить</a>
+                            </div>
+                        </td>
+                    </tr>
+                <?php endforeach; ?>
+            </tbody>
+        </table>
+    </div>
+
+    <div class="products-pagination">
+        <span>Страница <?php echo $page; ?> из <?php echo $totalPages; ?></span>
+        <div class="d-flex gap-1">
+            <?php if ($page > 1): ?>
+                <a class="btn btn-light btn-sm" href="<?php echo htmlspecialchars(buildProductsUrl(array('page' => 1))); ?>">« Первая</a>
+                <a class="btn btn-light btn-sm" href="<?php echo htmlspecialchars(buildProductsUrl(array('page' => $page - 1))); ?>">‹ Назад</a>
+            <?php endif; ?>
+            <?php if ($page < $totalPages): ?>
+                <a class="btn btn-light btn-sm" href="<?php echo htmlspecialchars(buildProductsUrl(array('page' => $page + 1))); ?>">Вперед ›</a>
+                <a class="btn btn-light btn-sm" href="<?php echo htmlspecialchars(buildProductsUrl(array('page' => $totalPages))); ?>">Последняя »</a>
+            <?php endif; ?>
+        </div>
+    </div>
 </main>
+
+<script>
+(function () {
+    function postForm(payload) {
+        var form = document.createElement('form');
+        form.method = 'POST';
+        form.action = 'products.php';
+        for (var key in payload) {
+            if (!payload.hasOwnProperty(key)) {
+                continue;
+            }
+            var input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = key;
+            input.value = payload[key];
+            form.appendChild(input);
+        }
+        document.body.appendChild(form);
+        form.submit();
+    }
+
+    function isNumericValue(value) {
+        if (value === null || value === '') {
+            return true;
+        }
+        var normalized = String(value).replace(/\s+/g, '').replace(',', '.');
+        return !isNaN(parseFloat(normalized)) && isFinite(normalized);
+    }
+
+    function getRowPayload(row) {
+        var payload = {
+            action: 'save',
+            id: row.getAttribute('data-product-id'),
+            name: row.getAttribute('data-product-name')
+        };
+        var edits = row.querySelectorAll('.cell-edit');
+        for (var i = 0; i < edits.length; i++) {
+            payload[edits[i].getAttribute('data-field')] = edits[i].value;
+        }
+        return payload;
+    }
+
+    function setRowMode(row, editing) {
+        var views = row.querySelectorAll('.cell-view');
+        var edits = row.querySelectorAll('.cell-edit');
+        for (var i = 0; i < views.length; i++) {
+            views[i].style.display = editing ? 'none' : '';
+        }
+        for (var j = 0; j < edits.length; j++) {
+            edits[j].style.display = editing ? 'block' : 'none';
+        }
+        row.classList[editing ? 'add' : 'remove']('is-editing');
+    }
+
+    function showRowError(row, message) {
+        var errorEl = row.querySelector('.inline-row-error');
+        if (errorEl) {
+            errorEl.textContent = message;
+        }
+    }
+
+    var rows = document.querySelectorAll('.product-row');
+    for (var i = 0; i < rows.length; i++) {
+        (function (row) {
+            var edits = row.querySelectorAll('.cell-edit');
+            for (var j = 0; j < edits.length; j++) {
+                edits[j].setAttribute('data-original', edits[j].value);
+            }
+            setRowMode(row, false);
+
+            var editBtn = row.querySelector('.inline-edit-btn');
+            var saveBtn = row.querySelector('.inline-save-btn');
+            var cancelBtn = row.querySelector('.inline-cancel-btn');
+            var syncBtn = row.querySelector('.inline-sync-btn');
+
+            if (editBtn) {
+                editBtn.addEventListener('click', function () {
+                    showRowError(row, '');
+                    setRowMode(row, true);
+                });
+            }
+            if (cancelBtn) {
+                cancelBtn.addEventListener('click', function () {
+                    for (var k = 0; k < edits.length; k++) {
+                        edits[k].value = edits[k].getAttribute('data-original');
+                    }
+                    showRowError(row, '');
+                    setRowMode(row, false);
+                });
+            }
+            if (saveBtn) {
+                saveBtn.addEventListener('click', function () {
+                    var fieldsToValidate = row.querySelectorAll('.cell-edit');
+                    for (var p = 0; p < fieldsToValidate.length; p++) {
+                        if (!isNumericValue(fieldsToValidate[p].value)) {
+                            showRowError(row, 'Проверьте числовые поля в строке перед сохранением.');
+                            return;
+                        }
+                    }
+                    postForm(getRowPayload(row));
+                });
+            }
+            if (syncBtn) {
+                syncBtn.addEventListener('click', function () {
+                    postForm({
+                        action: 'sync_row_to_b24',
+                        product_id: row.getAttribute('data-product-id')
+                    });
+                });
+            }
+        })(rows[i]);
+    }
+
+    var selectAll = document.getElementById('select-all-rows');
+    if (selectAll) {
+        selectAll.addEventListener('change', function () {
+            var selectors = document.querySelectorAll('.row-selector');
+            for (var i = 0; i < selectors.length; i++) {
+                selectors[i].checked = selectAll.checked;
+            }
+        });
+    }
+})();
+</script>
 
 <?php require 'includes/footer.php'; ?>
