@@ -58,7 +58,19 @@ function ensureStockOperationTables($db) {
     ensureColumnExists($db, 'stock_operation_docs', 'b24_sync_status', '`b24_sync_status` varchar(20) NOT NULL DEFAULT \'pending\'');
     ensureColumnExists($db, 'stock_operation_docs', 'b24_sync_response', '`b24_sync_response` longtext');
     ensureColumnExists($db, 'stock_operation_lines', 'delivery_price_per_roll', '`delivery_price_per_roll` decimal(14,2) NOT NULL DEFAULT 0');
+    ensureColumnExists($db, 'stock_operation_lines', 'price_per_roll_usd', '`price_per_roll_usd` decimal(14,2) NOT NULL DEFAULT 0');
+    ensureColumnExists($db, 'stock_operation_lines', 'delivery_price_per_roll_usd', '`delivery_price_per_roll_usd` decimal(14,2) NOT NULL DEFAULT 0');
+    ensureColumnExists($db, 'stock_operation_lines', 'usd_to_kgs_rate', '`usd_to_kgs_rate` decimal(12,4) NOT NULL DEFAULT 90');
     ensureColumnExists($db, 'products', 'delivery_price', '`delivery_price` decimal(14,2) NOT NULL DEFAULT 0');
+}
+
+function getUsdToKgsRate($db) {
+    $raw = getAppSetting($db, 'usd_to_kgs_rate', '90');
+    $rate = floatval($raw);
+    if ($rate <= 0) {
+        $rate = 90.0;
+    }
+    return $rate;
 }
 
 function resolveDocTypeCodeFromBitrix($logicalType) {
@@ -1142,13 +1154,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     $docNumber = trim(isset($_POST['doc_number']) ? $_POST['doc_number'] : '');
     $supplier = trim(isset($_POST['supplier']) ? $_POST['supplier'] : '');
     $commentText = trim(isset($_POST['comment_text']) ? $_POST['comment_text'] : '');
+    $receiptCurrency = strtoupper(trim(isset($_POST['receipt_currency']) ? $_POST['receipt_currency'] : 'USD'));
+    if (!in_array($receiptCurrency, array('USD', 'KGS'), true)) {
+        $receiptCurrency = 'USD';
+    }
     $minFull = floatval(isset($_POST['min_full']) ? $_POST['min_full'] : 0.5);
     $lineProductId = isset($_POST['line_product_id']) && is_array($_POST['line_product_id']) ? $_POST['line_product_id'] : array();
     $lineProductName = isset($_POST['line_product_name']) && is_array($_POST['line_product_name']) ? $_POST['line_product_name'] : array();
     $lineQtyRolls = isset($_POST['line_qty_rolls']) && is_array($_POST['line_qty_rolls']) ? $_POST['line_qty_rolls'] : array();
     $lineRollLength = isset($_POST['line_roll_length']) && is_array($_POST['line_roll_length']) ? $_POST['line_roll_length'] : array();
-    $linePrice = isset($_POST['line_price_per_roll']) && is_array($_POST['line_price_per_roll']) ? $_POST['line_price_per_roll'] : array();
-    $lineDeliveryPrice = isset($_POST['line_delivery_price_per_roll']) && is_array($_POST['line_delivery_price_per_roll']) ? $_POST['line_delivery_price_per_roll'] : array();
+    $linePriceUsd = isset($_POST['line_price_per_roll_usd']) && is_array($_POST['line_price_per_roll_usd']) ? $_POST['line_price_per_roll_usd'] : array();
+    $lineDeliveryPriceUsd = isset($_POST['line_delivery_price_per_roll_usd']) && is_array($_POST['line_delivery_price_per_roll_usd']) ? $_POST['line_delivery_price_per_roll_usd'] : array();
+    $usdToKgsRate = getUsdToKgsRate($db);
 
     try {
         $db->beginTransaction();
@@ -1161,8 +1178,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
 
         $insLine = $db->prepare("
             INSERT INTO stock_operation_lines
-            (doc_id, product_id, product_name, qty_rolls, roll_length, quantity_m, price_per_roll, delivery_price_per_roll, line_total)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (doc_id, product_id, product_name, qty_rolls, roll_length, quantity_m, price_per_roll, delivery_price_per_roll, price_per_roll_usd, delivery_price_per_roll_usd, usd_to_kgs_rate, line_total)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ");
 
         $totalAmount = 0.0;
@@ -1171,8 +1188,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         for ($i = 0; $i < count($lineQtyRolls); $i++) {
             $qtyRolls = intval($lineQtyRolls[$i]);
             $rollLength = floatval(isset($lineRollLength[$i]) ? $lineRollLength[$i] : 0);
-            $pricePerRoll = floatval(isset($linePrice[$i]) ? $linePrice[$i] : 0);
-            $deliveryPricePerRoll = floatval(isset($lineDeliveryPrice[$i]) ? $lineDeliveryPrice[$i] : 0);
+            $inputPricePerRoll = floatval(isset($linePriceUsd[$i]) ? $linePriceUsd[$i] : 0);
+            $inputDeliveryPricePerRoll = floatval(isset($lineDeliveryPriceUsd[$i]) ? $lineDeliveryPriceUsd[$i] : 0);
+            if ($receiptCurrency === 'USD') {
+                $pricePerRollUsd = $inputPricePerRoll;
+                $deliveryPricePerRollUsd = $inputDeliveryPricePerRoll;
+                $pricePerRoll = $pricePerRollUsd * $usdToKgsRate;
+                $deliveryPricePerRoll = $deliveryPricePerRollUsd * $usdToKgsRate;
+            } else {
+                $pricePerRoll = $inputPricePerRoll;
+                $deliveryPricePerRoll = $inputDeliveryPricePerRoll;
+                $pricePerRollUsd = $usdToKgsRate > 0 ? ($pricePerRoll / $usdToKgsRate) : 0;
+                $deliveryPricePerRollUsd = $usdToKgsRate > 0 ? ($deliveryPricePerRoll / $usdToKgsRate) : 0;
+            }
             $productId = intval(isset($lineProductId[$i]) ? $lineProductId[$i] : 0);
             $productName = isset($lineProductName[$i]) ? trim($lineProductName[$i]) : '';
 
@@ -1198,6 +1226,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 $quantityM,
                 $pricePerRoll,
                 $deliveryPricePerRoll,
+                $pricePerRollUsd,
+                $deliveryPricePerRollUsd,
+                $usdToKgsRate,
                 $lineTotal
             ));
 
@@ -1240,7 +1271,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 json_encode($syncResult, JSON_UNESCAPED_UNICODE),
                 $docId
             ));
-        $successMsg = 'Документ прихода #' . $docId . ' проведен. Сумма: ' . number_format($totalAmount, 2, '.', ' ');
+        $successMsg = 'Документ прихода #' . $docId . ' проведен. Валюта ввода: ' . $receiptCurrency . '. Курс USD: ' . number_format($usdToKgsRate, 2, '.', ' ') . ' | Сумма: ' . number_format($totalAmount, 2, '.', ' ') . ' KGS';
         if ($syncStatus === 'sent') {
             $successMsg .= ' | Б24 документ #' . intval($syncResult['b24_document_id']);
         } elseif ($syncStatus === 'partial') {
@@ -1365,6 +1396,7 @@ $deleteToken = ensureFormToken('delete_doc');
 $retryToken = ensureFormToken('retry_b24_sync');
 
 $products = $db->query("SELECT id, name, roll_length, purchase_price, delivery_price FROM products ORDER BY name ASC")->fetchAll(PDO::FETCH_ASSOC);
+$usdToKgsRate = getUsdToKgsRate($db);
 $stockProducts = $db->query("
     SELECT
         p.id,
@@ -1419,11 +1451,19 @@ require 'includes/header.php';
                     <label>Мин. остаток рулона (м)</label>
                     <input type="number" name="min_full" step="0.1" min="0" value="0.5">
                 </div>
+                <div class="form-group">
+                    <label>Валюта оприходования</label>
+                    <select name="receipt_currency" id="receipt-currency">
+                        <option value="USD" selected>USD</option>
+                        <option value="KGS">KGS</option>
+                    </select>
+                </div>
             </div>
             <div class="form-group">
                 <label>Комментарий</label>
                 <input type="text" name="comment_text" placeholder="Примечание к приходу">
             </div>
+            <p class="text-muted">Ввод цен в выбранной валюте. Отчет и синк в Б24 всегда в KGS. Курс USD из вкладки "Интеграция": <strong><?= htmlspecialchars(number_format($usdToKgsRate, 2, '.', ' ')) ?></strong>.</p>
 
             <div class="table-responsive receipt-table-wrap">
                 <table class="table" id="receipt-lines">
@@ -1433,8 +1473,8 @@ require 'includes/header.php';
                             <th>Название (если новый)</th>
                             <th>Рулонов</th>
                             <th>Длина рулона (м)</th>
-                            <th>Закупка за рулон</th>
-                            <th>С доставкой за рулон</th>
+                            <th class="js-price-head">Закупка за рулон (USD)</th>
+                            <th class="js-delivery-head">С доставкой за рулон (USD)</th>
                             <th></th>
                         </tr>
                     </thead>
@@ -1444,7 +1484,7 @@ require 'includes/header.php';
                                 <select name="line_product_id[]">
                                     <option value="0">-- Новый товар --</option>
                                     <?php foreach ($products as $p): ?>
-                                        <option value="<?= intval($p['id']) ?>" data-roll-length="<?= htmlspecialchars((string)$p['roll_length']) ?>" data-price="<?= htmlspecialchars((string)$p['purchase_price']) ?>" data-delivery-price="<?= htmlspecialchars((string)$p['delivery_price']) ?>">
+                                        <option value="<?= intval($p['id']) ?>" data-roll-length="<?= htmlspecialchars((string)$p['roll_length']) ?>" data-price-kgs="<?= htmlspecialchars((string)floatval($p['purchase_price'])) ?>" data-delivery-price-kgs="<?= htmlspecialchars((string)floatval($p['delivery_price'])) ?>" data-price-usd="<?= htmlspecialchars((string)($usdToKgsRate > 0 ? (floatval($p['purchase_price']) / $usdToKgsRate) : 0)) ?>" data-delivery-price-usd="<?= htmlspecialchars((string)($usdToKgsRate > 0 ? (floatval($p['delivery_price']) / $usdToKgsRate) : 0)) ?>">
                                             <?= htmlspecialchars($p['name']) ?>
                                         </option>
                                     <?php endforeach; ?>
@@ -1453,8 +1493,8 @@ require 'includes/header.php';
                             <td><input type="text" name="line_product_name[]" placeholder="Если новый товар"></td>
                             <td><input type="number" name="line_qty_rolls[]" min="1" value="1"></td>
                             <td><input type="number" name="line_roll_length[]" min="0.1" step="0.1" value="30"></td>
-                            <td><input type="number" name="line_price_per_roll[]" min="0" step="0.01" value="0"></td>
-                            <td><input type="number" name="line_delivery_price_per_roll[]" min="0" step="0.01" value="0"></td>
+                            <td><input type="number" name="line_price_per_roll_usd[]" min="0" step="0.01" value="0"></td>
+                            <td><input type="number" name="line_delivery_price_per_roll_usd[]" min="0" step="0.01" value="0"></td>
                             <td><button type="button" class="btn btn-danger btn-sm remove-line">×</button></td>
                         </tr>
                     </tbody>
@@ -1604,15 +1644,35 @@ require 'includes/header.php';
 (function () {
     var addBtn = document.getElementById('add-receipt-line');
     var tableBody = document.querySelector('#receipt-lines tbody');
+    var currencySelect = document.getElementById('receipt-currency');
+    var priceHead = document.querySelector('.js-price-head');
+    var deliveryHead = document.querySelector('.js-delivery-head');
     if (!addBtn || !tableBody) {
         return;
     }
 
+    var getCurrentCurrency = function () {
+        if (!currencySelect) {
+            return 'USD';
+        }
+        return currencySelect.value === 'KGS' ? 'KGS' : 'USD';
+    };
+
+    var refreshReceiptHeadings = function () {
+        var curr = getCurrentCurrency();
+        if (priceHead) {
+            priceHead.textContent = 'Закупка за рулон (' + curr + ')';
+        }
+        if (deliveryHead) {
+            deliveryHead.textContent = 'С доставкой за рулон (' + curr + ')';
+        }
+    };
+
     var bindRow = function (row) {
         var select = row.querySelector('select[name="line_product_id[]"]');
         var lenInput = row.querySelector('input[name="line_roll_length[]"]');
-        var priceInput = row.querySelector('input[name="line_price_per_roll[]"]');
-        var deliveryPriceInput = row.querySelector('input[name="line_delivery_price_per_roll[]"]');
+        var priceInput = row.querySelector('input[name="line_price_per_roll_usd[]"]');
+        var deliveryPriceInput = row.querySelector('input[name="line_delivery_price_per_roll_usd[]"]');
         var removeBtn = row.querySelector('.remove-line');
 
         if (select) {
@@ -1624,11 +1684,16 @@ require 'includes/header.php';
                 if (lenInput && opt.getAttribute('data-roll-length')) {
                     lenInput.value = opt.getAttribute('data-roll-length');
                 }
-                if (priceInput && opt.getAttribute('data-price')) {
-                    priceInput.value = opt.getAttribute('data-price');
+                var curr = getCurrentCurrency();
+                if (priceInput) {
+                    var pAttr = curr === 'KGS' ? 'data-price-kgs' : 'data-price-usd';
+                    var pVal = parseFloat(opt.getAttribute(pAttr));
+                    priceInput.value = isNaN(pVal) ? '0' : pVal.toFixed(2);
                 }
-                if (deliveryPriceInput && opt.getAttribute('data-delivery-price')) {
-                    deliveryPriceInput.value = opt.getAttribute('data-delivery-price');
+                if (deliveryPriceInput) {
+                    var dpAttr = curr === 'KGS' ? 'data-delivery-price-kgs' : 'data-delivery-price-usd';
+                    var dpVal = parseFloat(opt.getAttribute(dpAttr));
+                    deliveryPriceInput.value = isNaN(dpVal) ? '0' : dpVal.toFixed(2);
                 }
             });
         }
@@ -1644,6 +1709,22 @@ require 'includes/header.php';
     };
 
     bindRow(tableBody.querySelector('tr'));
+    refreshReceiptHeadings();
+
+    if (currencySelect) {
+        currencySelect.addEventListener('change', function () {
+            refreshReceiptHeadings();
+            var rows = tableBody.querySelectorAll('tr');
+            for (var i = 0; i < rows.length; i++) {
+                var select = rows[i].querySelector('select[name="line_product_id[]"]');
+                if (select && select.value !== '0') {
+                    var evt = document.createEvent('HTMLEvents');
+                    evt.initEvent('change', true, false);
+                    select.dispatchEvent(evt);
+                }
+            }
+        });
+    }
 
     addBtn.addEventListener('click', function () {
         var lastRow = tableBody.querySelector('tr:last-child');
@@ -1657,9 +1738,9 @@ require 'includes/header.php';
                 inputs[i].value = '1';
             } else if (inputs[i].name === 'line_roll_length[]') {
                 inputs[i].value = '30';
-            } else if (inputs[i].name === 'line_price_per_roll[]') {
+            } else if (inputs[i].name === 'line_price_per_roll_usd[]') {
                 inputs[i].value = '0';
-            } else if (inputs[i].name === 'line_delivery_price_per_roll[]') {
+            } else if (inputs[i].name === 'line_delivery_price_per_roll_usd[]') {
                 inputs[i].value = '0';
             } else {
                 inputs[i].value = '';

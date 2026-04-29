@@ -24,6 +24,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         $batchLimit = max(10, min(500, intval(isset($_POST['sync_batch_limit']) ? $_POST['sync_batch_limit'] : 100)));
         $docDelayMs = max(0, min(5000, intval(isset($_POST['b24_doc_delay_ms']) ? $_POST['b24_doc_delay_ms'] : 700)));
         $conductChecks = max(1, min(20, intval(isset($_POST['b24_conduct_check_attempts']) ? $_POST['b24_conduct_check_attempts'] : 5)));
+        $usdToKgsRate = floatval(isset($_POST['usd_to_kgs_rate']) ? $_POST['usd_to_kgs_rate'] : 90);
+        if ($usdToKgsRate <= 0) {
+            $usdToKgsRate = 90;
+        }
         if ($currency === '') {
             $currency = 'KGS';
         }
@@ -34,6 +38,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         setAppSetting($db, 'sync_batch_limit', (string)$batchLimit);
         setAppSetting($db, 'b24_doc_delay_ms', (string)$docDelayMs);
         setAppSetting($db, 'b24_conduct_check_attempts', (string)$conductChecks);
+        setAppSetting($db, 'usd_to_kgs_rate', (string)$usdToKgsRate);
         $successMsg = 'Настройки интеграции сохранены.';
     } catch (Exception $e) {
         $errorMsg = 'Не удалось сохранить настройки: ' . $e->getMessage();
@@ -47,7 +52,8 @@ $integrationSettings = array(
     'default_currency' => getAppSetting($db, 'default_currency', 'KGS'),
     'sync_batch_limit' => getAppSetting($db, 'sync_batch_limit', '100'),
     'b24_doc_delay_ms' => getAppSetting($db, 'b24_doc_delay_ms', '700'),
-    'b24_conduct_check_attempts' => getAppSetting($db, 'b24_conduct_check_attempts', '5')
+    'b24_conduct_check_attempts' => getAppSetting($db, 'b24_conduct_check_attempts', '5'),
+    'usd_to_kgs_rate' => getAppSetting($db, 'usd_to_kgs_rate', '90')
 );
 
 try {
@@ -134,6 +140,10 @@ try {
                 <div class="form-group">
                     <label>Проверок статуса проведения (attempts)</label>
                     <input class="input" type="number" min="1" max="20" name="b24_conduct_check_attempts" value="<?= (int)$integrationSettings['b24_conduct_check_attempts'] ?>">
+                </div>
+                <div class="form-group">
+                    <label>Курс USD → KGS (для прихода)</label>
+                    <input class="input" type="number" min="0.01" step="0.01" name="usd_to_kgs_rate" value="<?= htmlspecialchars((string)$integrationSettings['usd_to_kgs_rate']) ?>">
                 </div>
             </div>
             <button class="btn btn-success" type="submit">Сохранить настройки</button>

@@ -226,7 +226,9 @@ function syncDealProductRowsForRequest($db, $requestId, $force = false) {
             SET deal_rows_sync_status='failed', deal_rows_sync_stage='deal.productrows.set', deal_rows_sync_error=?, deal_rows_sync_last_response=?, updated_at=NOW()
             WHERE id = ?
         ")->execute([
-            is_array($response) ? (string)($response['error_description'] ?? ($response['error'] ?? 'set_failed')) : 'set_failed',
+            is_array($response)
+                ? (string)(isset($response['error_description']) ? $response['error_description'] : (isset($response['error']) ? $response['error'] : 'set_failed'))
+                : 'set_failed',
             json_encode($response, JSON_UNESCAPED_UNICODE),
             $requestId
         ]);
@@ -243,7 +245,9 @@ function syncDealProductRowsForRequest($db, $requestId, $force = false) {
             SET deal_rows_sync_status='failed', deal_rows_sync_stage='deal.productrows.get', deal_rows_sync_error=?, deal_rows_sync_last_response=?, deal_rows_synced_at = NOW(), updated_at=NOW()
             WHERE id = ?
         ")->execute([
-            is_array($response) ? (string)($response['error_description'] ?? ($response['error'] ?? 'get_failed')) : 'get_failed',
+            is_array($response)
+                ? (string)(isset($response['error_description']) ? $response['error_description'] : (isset($response['error']) ? $response['error'] : 'get_failed'))
+                : 'get_failed',
             json_encode($response, JSON_UNESCAPED_UNICODE),
             $requestId
         ]);
@@ -697,7 +701,7 @@ if ($requestId > 0) {
             <?php endif; ?>
         </td>
         <td>
-            <?php if (in_array((string)($r['deal_rows_sync_status'] ?? 'pending'), ['failed', 'pending', 'in_progress'], true)): ?>
+            <?php if (in_array((string)(isset($r['deal_rows_sync_status']) ? $r['deal_rows_sync_status'] : 'pending'), array('failed', 'pending', 'in_progress'), true)): ?>
                 <form method="POST" style="display:inline;">
                     <input type="hidden" name="action" value="retry_deal_rows_sync">
                     <input type="hidden" name="request_id" value="<?= (int)$r['id'] ?>">
