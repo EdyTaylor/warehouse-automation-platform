@@ -365,14 +365,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $rows = $db->query("SELECT id FROM products WHERE b24_product_id IS NOT NULL AND b24_product_id <> 0")->fetchAll(PDO::FETCH_ASSOC);
         $ids = array_map(function($r) { return intval($r['id']); }, $rows);
         $stats = runB24SyncForProductIds($db, $ids);
-        header("Location: products.php?sync_msg=" . urlencode("Синк в Б24: обновлено {$stats['ok']}, ошибок {$stats['err']}, всего {$stats['total']}"));
+        header("Location: products.php?sync_msg=" . urlencode("Отправить в Б24: обновлено {$stats['ok']}, ошибок {$stats['err']}, всего {$stats['total']}"));
         exit;
     }
 
     if ($action === 'sync_one') {
         $productId = intval(isset($_POST['product_id']) ? $_POST['product_id'] : 0);
         $res = syncProductPriceToB24($db, $productId);
-        $msg = $res['ok'] ? "Синк товара #{$productId}: успешно" : ("Синк товара #{$productId}: " . $res['message']);
+        $msg = $res['ok'] ? "Отправка товара #{$productId}: успешно" : ("Отправка товара #{$productId}: " . $res['message']);
         header("Location: products.php?sync_msg=" . urlencode($msg));
         exit;
     }
@@ -380,7 +380,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'sync_selected') {
         $ids = isset($_POST['selected_ids']) && is_array($_POST['selected_ids']) ? $_POST['selected_ids'] : array();
         $stats = runB24SyncForProductIds($db, $ids);
-        header("Location: products.php?sync_msg=" . urlencode("Синк выбранных: обновлено {$stats['ok']}, ошибок {$stats['err']}, всего {$stats['total']}"));
+        header("Location: products.php?sync_msg=" . urlencode("Отправить выбранные: обновлено {$stats['ok']}, ошибок {$stats['err']}, всего {$stats['total']}"));
         exit;
     }
 
@@ -394,14 +394,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         ")->fetchAll(PDO::FETCH_ASSOC);
         $ids = array_map(function($r) { return intval($r['id']); }, $rows);
         $stats = runB24SyncForProductIds($db, $ids);
-        header("Location: products.php?sync_msg=" . urlencode("Retry ошибок: обновлено {$stats['ok']}, ошибок {$stats['err']}, всего {$stats['total']}"));
+        header("Location: products.php?sync_msg=" . urlencode("Повторить ошибки отправки: обновлено {$stats['ok']}, ошибок {$stats['err']}, всего {$stats['total']}"));
         exit;
     }
 
     if ($action === 'sync_row_to_b24') {
         $productId = intval(isset($_POST['product_id']) ? $_POST['product_id'] : 0);
         $result = syncProductPriceToB24($db, $productId);
-        $message = $result['ok'] ? "Товар #{$productId}: синк Б24 выполнен" : ("Товар #{$productId}: " . $result['message']);
+        $message = $result['ok'] ? "Товар #{$productId}: отправка в Б24 выполнена" : ("Товар #{$productId}: " . $result['message']);
         header("Location: products.php?sync_msg=" . urlencode($message));
         exit;
     }
@@ -733,11 +733,11 @@ require 'includes/header.php';
         <div class="products-bulk-tools">
             <form method="POST">
                 <input type="hidden" name="action" value="sync_to_b24">
-                <button class="btn btn-warning btn-sm" type="submit">Синк всех цен в Б24</button>
+                <button class="btn btn-warning btn-sm" type="submit">Отправить все цены в Б24</button>
             </form>
             <form method="POST" id="bulk-sync-form">
-                <button class="btn btn-light btn-sm" type="submit" name="action" value="sync_selected">Синк выбранных</button>
-                <button class="btn btn-light btn-sm" type="submit" name="action" value="retry_sync_errors">Retry ошибок</button>
+                <button class="btn btn-light btn-sm" type="submit" name="action" value="sync_selected">Отправить выбранные</button>
+                <button class="btn btn-light btn-sm" type="submit" name="action" value="retry_sync_errors">Повторить ошибки отправки</button>
             </form>
             <span class="text-muted">Найдено: <?php echo $totalRows; ?></span>
         </div>
@@ -751,7 +751,7 @@ require 'includes/header.php';
 
             <input class="form-control mb-1" name="name" placeholder="Название" value="<?php echo isset($editProduct['name']) ? htmlspecialchars($editProduct['name']) : ''; ?>" required>
             <input class="form-control mb-1" name="roll_length" placeholder="Метраж рулона" value="<?php echo isset($editProduct['roll_length']) ? $editProduct['roll_length'] : ''; ?>" required>
-            <input class="form-control mb-1" name="price_per_meter" placeholder="Цена за метр" value="<?php echo isset($editProduct['price_per_meter']) ? $editProduct['price_per_meter'] : ''; ?>">
+            <input class="form-control mb-1" name="price_per_meter" placeholder="Цена за метр (KGS)" value="<?php echo isset($editProduct['price_per_meter']) ? $editProduct['price_per_meter'] : ''; ?>">
             <input class="form-control mb-1" name="purchase_price" placeholder="Себестоимость (KGS)" value="<?php echo isset($editProduct['purchase_price']) ? $editProduct['purchase_price'] : ''; ?>">
             <input class="form-control mb-1" name="delivery_price" placeholder="С доставкой за рулон (KGS)" value="<?php echo isset($editProduct['delivery_price']) ? $editProduct['delivery_price'] : ''; ?>">
             <input class="form-control mb-1" name="price_1_4" placeholder="1-4" value="<?php echo isset($editProduct['price_1_4']) ? $editProduct['price_1_4'] : ''; ?>">
@@ -806,15 +806,15 @@ require 'includes/header.php';
         <table class="table products-table">
             <thead>
                 <tr>
-                    <th><input type="checkbox" id="select-all-rows"></th>
-                    <th>ID</th>
-                    <th>Название</th>
+                    <th class="sticky-col sticky-col-select"><input type="checkbox" id="select-all-rows"></th>
+                    <th class="sticky-col sticky-col-id">ID</th>
+                    <th class="sticky-col sticky-col-name">Название</th>
                     <?php if ($hasCatalogId): ?><th>Каталог</th><?php endif; ?>
                     <th>B24</th>
                     <th>Метраж</th>
                     <th>Себест.</th>
                     <th>Доставка</th>
-                    <th>Цена/м</th>
+                    <th>Цена за метр (KGS)</th>
                     <th>1-4</th>
                     <th>5-9</th>
                     <th>10-19</th>
@@ -835,9 +835,12 @@ require 'includes/header.php';
                     $b24Id = isset($p['b24_product_id']) ? intval($p['b24_product_id']) : 0;
                     ?>
                     <tr class="product-row" data-product-id="<?php echo intval($p['id']); ?>" data-product-name="<?php echo htmlspecialchars(isset($p['name']) ? $p['name'] : '', ENT_QUOTES, 'UTF-8'); ?>">
-                        <td><input type="checkbox" class="row-selector" name="selected_ids[]" form="bulk-sync-form" value="<?php echo intval($p['id']); ?>"></td>
-                        <td><?php echo intval($p['id']); ?></td>
-                        <td class="product-name-cell"><?php echo htmlspecialchars(isset($p['name']) ? $p['name'] : ''); ?><div class="inline-row-error"></div></td>
+                        <td class="sticky-col sticky-col-select"><input type="checkbox" class="row-selector" name="selected_ids[]" form="bulk-sync-form" value="<?php echo intval($p['id']); ?>"></td>
+                        <td class="sticky-col sticky-col-id"><?php echo intval($p['id']); ?></td>
+                        <td class="product-name-cell sticky-col sticky-col-name">
+                            <span class="product-name-text" title="<?php echo htmlspecialchars(isset($p['name']) ? $p['name'] : '', ENT_QUOTES, 'UTF-8'); ?>"><?php echo htmlspecialchars(isset($p['name']) ? $p['name'] : ''); ?></span>
+                            <div class="inline-row-error"></div>
+                        </td>
                         <?php if ($hasCatalogId): ?><td><?php echo htmlspecialchars($catalogLabel); ?></td><?php endif; ?>
                         <td><?php echo $b24Id > 0 ? $b24Id : '—'; ?></td>
                         <td>
@@ -877,15 +880,7 @@ require 'includes/header.php';
                                 <button type="button" class="btn btn-light btn-sm inline-edit-btn">Ред.</button>
                                 <button type="button" class="btn btn-success btn-sm inline-save-btn">Сохранить</button>
                                 <button type="button" class="btn btn-light btn-sm inline-cancel-btn">Отмена</button>
-                                <button type="button" class="btn btn-warning btn-sm inline-sync-btn">Синк B24</button>
-                                <?php if ($hasCatalogId): ?>
-                                <form method="POST" class="inline-move-form">
-                                    <input type="hidden" name="action" value="move_group">
-                                    <input type="hidden" name="product_id" value="<?php echo intval($p['id']); ?>">
-                                    <input type="number" name="target_catalog_id" min="1" placeholder="cat_id" required>
-                                    <button class="btn btn-light btn-sm" type="submit">↔</button>
-                                </form>
-                                <?php endif; ?>
+                                <button type="button" class="btn btn-warning btn-sm inline-sync-btn">Отправить в B24</button>
                                 <a class="btn btn-light btn-sm" href="<?php echo buildProductsUrl(array('edit_id' => intval($p['id']))); ?>">Форма</a>
                                 <a class="btn btn-danger btn-sm" href="products.php?delete_id=<?php echo intval($p['id']); ?>" onclick="return confirm('Удалить товар #<?php echo intval($p['id']); ?>?');">Удалить</a>
                             </div>
@@ -896,6 +891,11 @@ require 'includes/header.php';
         </table>
     </div>
 
+    <?php
+    $pageWindow = 2;
+    $pageStart = max(1, $page - $pageWindow);
+    $pageEnd = min($totalPages, $page + $pageWindow);
+    ?>
     <div class="products-pagination">
         <span>Страница <?php echo $page; ?> из <?php echo $totalPages; ?></span>
         <div class="d-flex gap-1">
@@ -907,6 +907,15 @@ require 'includes/header.php';
                 <a class="btn btn-light btn-sm" href="<?php echo htmlspecialchars(buildProductsUrl(array('page' => $page + 1))); ?>">Вперед ›</a>
                 <a class="btn btn-light btn-sm" href="<?php echo htmlspecialchars(buildProductsUrl(array('page' => $totalPages))); ?>">Последняя »</a>
             <?php endif; ?>
+        </div>
+        <div class="d-flex gap-1 products-page-numbers">
+            <?php for ($i = $pageStart; $i <= $pageEnd; $i++): ?>
+                <?php if ($i === $page): ?>
+                    <span class="btn btn-primary btn-sm is-current-page"><?php echo $i; ?></span>
+                <?php else: ?>
+                    <a class="btn btn-light btn-sm" href="<?php echo htmlspecialchars(buildProductsUrl(array('page' => $i))); ?>"><?php echo $i; ?></a>
+                <?php endif; ?>
+            <?php endfor; ?>
         </div>
     </div>
 </main>
