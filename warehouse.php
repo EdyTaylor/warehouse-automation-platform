@@ -7,15 +7,13 @@ header('Content-Type: text/html; charset=utf-8');
 require 'db.php';
 $db = getDB();
 require_once __DIR__ . '/functions/stock_movements.php';
+require_once __DIR__ . '/functions/pricing.php';
 require_once __DIR__ . '/api/bitrix/send.php';
 
-// 🔥 ФУНКЦИЯ ЦЕНЫ
+// Compatibility wrapper for legacy calls in this file.
 function getPrice($row, $qty) {
-    if ($qty <= 4 && $row['price_1_4'] > 0) return $row['price_1_4'];
-    if ($qty <= 9 && $row['price_5_9'] > 0) return $row['price_5_9'];
-    if ($qty <= 19 && $row['price_10_19'] > 0) return $row['price_10_19'];
-    if ($row['price_20_plus'] > 0) return $row['price_20_plus'];
-    return 0;
+    $resolved = resolveTierPrice($row, $qty);
+    return floatval($resolved['price']);
 }
 
 function hydrateMissingRollProductNamesFromBitrix($db, &$rolls) {
@@ -245,7 +243,8 @@ if (isset($_POST['sell_rolls'])) {
     if (count($rollsList) < $qty) {
         $error_msg = "Недостаточно целых рулонов";
     } else {
-        $price = getPrice($product, $qty);
+        $priceMeta = resolveTierPrice($product, $qty);
+        $price = floatval($priceMeta['price']);
         $total = $price * $qty;
 
         for ($i = 0; $i < $qty; $i++) {
@@ -273,7 +272,9 @@ if (isset($_POST['sell_rolls'])) {
             'comment' => 'Продажа рулонов'
         ));
 
-        $success_msg = "✅ Продано рулонов: $qty | $total";
+        $sourceLabel = formatTierSourceLabel(isset($priceMeta['sourceTier']) ? $priceMeta['sourceTier'] : 'none');
+        $fallbackNote = !empty($priceMeta['fallbackUsed']) ? ' (fallback)' : '';
+        $success_msg = "✅ Продано рулонов: $qty | $total | Источник цены: {$sourceLabel}{$fallbackNote}";
     }
 }
 
@@ -397,6 +398,9 @@ try {
 }
 
 $products = $db->query("SELECT * FROM products ORDER BY name")->fetchAll(PDO::FETCH_ASSOC);
+if (isset($_GET['debug_price_selfcheck']) && $_GET['debug_price_selfcheck'] === '1') {
+    $pricingSelfCheck = tierPricingSelfCheckCases();
+}
 $b24Queue = null;
 try {
     $b24Queue = $db->query("

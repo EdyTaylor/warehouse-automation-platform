@@ -2,19 +2,11 @@
 $page_title = 'Продажи';
 require 'includes/header.php';
 require 'db.php';
+require_once __DIR__ . '/functions/pricing.php';
 $db = getDB();
 
 // 🔥 ТОВАРЫ
 $products = $db->query("SELECT * FROM products ORDER BY name")->fetchAll(PDO::FETCH_ASSOC);
-
-// 🔥 ФУНКЦИЯ ЦЕНЫ
-function getPrice($row, $qty) {
-    if ($qty <= 4 && $row['price_1_4'] > 0) return $row['price_1_4'];
-    if ($qty <= 9 && $row['price_5_9'] > 0) return $row['price_5_9'];
-    if ($qty <= 19 && $row['price_10_19'] > 0) return $row['price_10_19'];
-    if ($row['price_20_plus'] > 0) return $row['price_20_plus'];
-    return 0;
-}
 
 // 🔥 ПРОДАЖА РУЛОНОВ
 if (isset($_POST['sell_rolls'])) {
@@ -40,7 +32,8 @@ if (isset($_POST['sell_rolls'])) {
         exit;
     }
 
-    $price = getPrice($product, $qty);
+    $priceMeta = resolveTierPrice($product, $qty);
+    $price = floatval($priceMeta['price']);
     $total = $price * $qty;
 
     for ($i = 0; $i < $qty; $i++) {
@@ -56,7 +49,9 @@ if (isset($_POST['sell_rolls'])) {
         VALUES (?, 'roll', ?, ?, ?)
     ")->execute([$product_id, $qty, $price, $total]);
 
-    header("Location: sell.php?success=Продано рулонов: $qty | $total");
+    $sourceLabel = formatTierSourceLabel(isset($priceMeta['sourceTier']) ? $priceMeta['sourceTier'] : 'none');
+    $fallbackNote = !empty($priceMeta['fallbackUsed']) ? ' (fallback)' : '';
+    header("Location: sell.php?success=" . urlencode("Продано рулонов: $qty | $total | Источник цены: {$sourceLabel}{$fallbackNote}"));
     exit;
 }
 
@@ -190,6 +185,10 @@ $cutRolls = array_filter($rolls, fn($r) => $r['status'] === 'cut' && $r['current
             <div class="form-group">
                 <label class="form-label">Цена за рулон</label>
                 <input type="number" id="roll_price" class="form-control" readonly placeholder="Рассчитается автоматически">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Источник цены</label>
+                <input type="text" id="roll_price_source" class="form-control" readonly placeholder="Определится автоматически">
             </div>
             <div class="form-group">
                 <label class="form-label">Итого</label>
@@ -387,7 +386,16 @@ document.addEventListener('DOMContentLoaded', function() {
     const rollProductSelect = document.querySelector('select[name="sell_product_id"]');
     const rollQtyInput = document.querySelector('input[name="sell_qty"]');
     const rollPriceInput = document.getElementById('roll_price');
+    const rollPriceSourceInput = document.getElementById('roll_price_source');
     const rollTotalInput = document.getElementById('roll_total');
+    const tierLabels = {
+        price_1_4: 'Тир 1-4',
+        price_5_9: 'Тир 5-9',
+        price_10_19: 'Тир 10-19',
+        price_20_plus: 'Тир 20+',
+        meter_roll_fallback: 'Fallback: цена за метр * длина рулона',
+        none: 'Цена не задана'
+    };
 
     function calculateRollPrice() {
         const productId = rollProductSelect.value;
@@ -399,20 +407,57 @@ document.addEventListener('DOMContentLoaded', function() {
                 '1-4': <?= json_encode(array_column($products, 'price_1_4', 'id')) ?>[productId] || 0,
                 '5-9': <?= json_encode(array_column($products, 'price_5_9', 'id')) ?>[productId] || 0,
                 '10-19': <?= json_encode(array_column($products, 'price_10_19', 'id')) ?>[productId] || 0,
-                '20+': <?= json_encode(array_column($products, 'price_20_plus', 'id')) ?>[productId] || 0
+                '20+': <?= json_encode(array_column($products, 'price_20_plus', 'id')) ?>[productId] || 0,
+                'meter': <?= json_encode(array_column($products, 'price_per_meter', 'id')) ?>[productId] || 0,
+                'rollLength': <?= json_encode(array_column($products, 'roll_length', 'id')) ?>[productId] || 0
             };
-            
+
+            let targetTier = '20+';
+            if (qty <= 4) targetTier = '1-4';
+            else if (qty <= 9) targetTier = '5-9';
+            else if (qty <= 19) targetTier = '10-19';
+
             let price = 0;
-            if (qty <= 4 && prices['1-4'] > 0) price = prices['1-4'];
-            else if (qty <= 9 && prices['5-9'] > 0) price = prices['5-9'];
-            else if (qty <= 19 && prices['10-19'] > 0) price = prices['10-19'];
-            else if (prices['20+'] > 0) price = prices['20+'];
-            
+            let sourceTier = 'none';
+            let fallbackUsed = false;
+
+            const tierToKey = { '1-4': 'price_1_4', '5-9': 'price_5_9', '10-19': 'price_10_19', '20+': 'price_20_plus' };
+            if (prices[targetTier] > 0) {
+                price = prices[targetTier];
+                sourceTier = tierToKey[targetTier];
+            } else if (prices['1-4'] > 0) {
+                price = prices['1-4'];
+                sourceTier = 'price_1_4';
+                fallbackUsed = targetTier !== '1-4';
+            } else {
+                const prevOrder = {
+                    '1-4': [],
+                    '5-9': ['1-4'],
+                    '10-19': ['5-9', '1-4'],
+                    '20+': ['10-19', '5-9', '1-4']
+                };
+                for (const tier of (prevOrder[targetTier] || [])) {
+                    if (prices[tier] > 0) {
+                        price = prices[tier];
+                        sourceTier = tierToKey[tier];
+                        fallbackUsed = true;
+                        break;
+                    }
+                }
+                if (price <= 0 && prices.meter > 0 && prices.rollLength > 0) {
+                    price = prices.meter * prices.rollLength;
+                    sourceTier = 'meter_roll_fallback';
+                    fallbackUsed = true;
+                }
+            }
+
             rollPriceInput.value = price || 0;
             rollTotalInput.value = price * qty;
+            rollPriceSourceInput.value = tierLabels[sourceTier] + (fallbackUsed ? ' (fallback)' : '');
         } else {
             rollPriceInput.value = '';
             rollTotalInput.value = '';
+            rollPriceSourceInput.value = '';
         }
     }
 

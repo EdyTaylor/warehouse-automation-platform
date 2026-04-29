@@ -4,6 +4,7 @@ error_reporting(E_ALL);
 header('Content-Type: application/json; charset=utf-8');
 
 require __DIR__ . '/../../db.php';
+require_once __DIR__ . '/../../functions/pricing.php';
 
 function ensureColumnExists($db, $tableName, $columnName, $columnSql) {
     $stmt = $db->prepare("
@@ -366,8 +367,34 @@ function queueDealForWarehouse($db, $data) {
                     VALUES (?, 30, 0, ?)
                 ")->execute([$name, $b24_id]);
                 $productId = intval($db->lastInsertId());
+                $product = array(
+                    'id' => $productId,
+                    'price_1_4' => 0,
+                    'price_5_9' => 0,
+                    'price_10_19' => 0,
+                    'price_20_plus' => 0,
+                    'price_per_meter' => 0,
+                    'roll_length' => 30
+                );
             } else {
                 $productId = intval($product['id']);
+                $productDetailsStmt = $db->prepare("
+                    SELECT id, roll_length, price_per_meter, price_1_4, price_5_9, price_10_19, price_20_plus
+                    FROM products
+                    WHERE id = ?
+                    LIMIT 1
+                ");
+                $productDetailsStmt->execute([$productId]);
+                $details = $productDetailsStmt->fetch(PDO::FETCH_ASSOC);
+                if ($details) {
+                    $product = $details;
+                }
+            }
+
+            // If B24 line price is empty, resolve local tier price by roll quantity.
+            if ($price <= 0) {
+                $resolvedPrice = resolveTierPrice($product, intval(ceil($qty)));
+                $price = floatval($resolvedPrice['price']);
             }
 
             $ins->execute([$requestId, $b24_id, $productId, $name, $qty, $price]);
