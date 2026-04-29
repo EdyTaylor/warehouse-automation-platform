@@ -7,6 +7,7 @@ require 'db.php';
 $db = getDB();
 require_once __DIR__ . '/api/bitrix/send.php';
 require_once __DIR__ . '/functions/pricing.php';
+require_once __DIR__ . '/functions/app_settings.php';
 
 function hasColumn($db, $table, $column) {
     try {
@@ -200,6 +201,81 @@ $formErrors = array();
 $formWarnings = array();
 $tierAutofillSuggestions = array();
 $previewRows = array();
+ensureColumnExists($db, 'products', 'sync_status', "`sync_status` varchar(20) NOT NULL DEFAULT 'pending'");
+ensureColumnExists($db, 'products', 'last_error', '`last_error` text NULL');
+ensureColumnExists($db, 'products', 'last_attempt_at', '`last_attempt_at` datetime NULL');
+$db->exec("UPDATE products SET sync_status = 'pending' WHERE sync_status IS NULL OR sync_status = ''");
+
+function getB24SyncBatchSize($db) {
+    $size = intval(getAppSetting($db, 'b24_sync_batch_size', 20));
+    if ($size <= 0) {
+        $size = 20;
+    }
+    if ($size > 200) {
+        $size = 200;
+    }
+    return $size;
+}
+
+function getB24SyncDelayMs($db) {
+    $delay = intval(getAppSetting($db, 'b24_sync_batch_delay_ms', 150));
+    if ($delay < 0) {
+        $delay = 0;
+    }
+    if ($delay > 5000) {
+        $delay = 5000;
+    }
+    return $delay;
+}
+
+function updateProductSyncState($db, $productId, $status, $error, $attemptAt) {
+    $stmt = $db->prepare("
+        UPDATE products
+        SET sync_status = ?, last_error = ?, last_attempt_at = ?
+        WHERE id = ?
+    ");
+    $stmt->execute(array($status, $error, $attemptAt, intval($productId)));
+}
+
+function markProductSyncPending($db, $productId) {
+    $stmt = $db->prepare("
+        UPDATE products
+        SET sync_status = 'pending', last_error = NULL
+        WHERE id = ?
+    ");
+    $stmt->execute(array(intval($productId)));
+}
+
+function runB24SyncForProductIds($db, $productIds) {
+    $ids = array_values(array_unique(array_filter(array_map('intval', (array)$productIds), function($v) {
+        return $v > 0;
+    })));
+
+    if (empty($ids)) {
+        return array('ok' => 0, 'err' => 0, 'total' => 0);
+    }
+
+    $batchSize = getB24SyncBatchSize($db);
+    $delayMs = getB24SyncDelayMs($db);
+    $ok = 0;
+    $err = 0;
+    $chunks = array_chunk($ids, $batchSize);
+    foreach ($chunks as $chunkIndex => $chunk) {
+        foreach ($chunk as $productId) {
+            $res = syncProductPriceToB24($db, $productId);
+            if ($res['ok']) {
+                $ok++;
+            } else {
+                $err++;
+            }
+        }
+        if ($delayMs > 0 && $chunkIndex < count($chunks) - 1) {
+            usleep($delayMs * 1000);
+        }
+    }
+
+    return array('ok' => $ok, 'err' => $err, 'total' => count($ids));
+}
 
 function syncProductPriceToB24($db, $productId) {
     $stmt = $db->prepare("
@@ -213,7 +289,9 @@ function syncProductPriceToB24($db, $productId) {
     if (!$product) {
         return array('ok' => false, 'message' => 'Товар не найден');
     }
+    $attemptAt = date('Y-m-d H:i:s');
     if (empty($product['b24_product_id'])) {
+        updateProductSyncState($db, $productId, 'error', 'Нет b24_product_id', $attemptAt);
         return array('ok' => false, 'message' => 'Нет b24_product_id');
     }
 
@@ -228,6 +306,7 @@ function syncProductPriceToB24($db, $productId) {
     ));
 
     if (is_array($resp) && !isset($resp['error'])) {
+        updateProductSyncState($db, $productId, 'sent', null, $attemptAt);
         return array('ok' => true, 'message' => 'Обновлено в Б24');
     }
     $err = 'Ошибка обновления в Б24';
@@ -236,6 +315,7 @@ function syncProductPriceToB24($db, $productId) {
     } elseif (is_array($resp) && isset($resp['error'])) {
         $err = $resp['error'];
     }
+    updateProductSyncState($db, $productId, 'error', $err, $attemptAt);
     return array('ok' => false, 'message' => $err);
 }
 
@@ -273,17 +353,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if ($action === 'sync_to_b24') {
         $rows = $db->query("SELECT id FROM products WHERE b24_product_id IS NOT NULL AND b24_product_id <> 0")->fetchAll(PDO::FETCH_ASSOC);
-        $ok = 0;
-        $err = 0;
-        foreach ($rows as $r) {
-            $res = syncProductPriceToB24($db, $r['id']);
-            if ($res['ok']) {
-                $ok++;
-            } else {
-                $err++;
-            }
-        }
-        header("Location: products.php?sync_msg=" . urlencode("Синк в Б24: обновлено {$ok}, ошибок {$err}"));
+        $ids = array_map(function($r) { return intval($r['id']); }, $rows);
+        $stats = runB24SyncForProductIds($db, $ids);
+        header("Location: products.php?sync_msg=" . urlencode("Синк в Б24: обновлено {$stats['ok']}, ошибок {$stats['err']}, всего {$stats['total']}"));
+        exit;
+    }
+
+    if ($action === 'sync_one') {
+        $productId = intval(isset($_POST['product_id']) ? $_POST['product_id'] : 0);
+        $res = syncProductPriceToB24($db, $productId);
+        $msg = $res['ok'] ? "Синк товара #{$productId}: успешно" : ("Синк товара #{$productId}: " . $res['message']);
+        header("Location: products.php?sync_msg=" . urlencode($msg));
+        exit;
+    }
+
+    if ($action === 'sync_selected') {
+        $ids = isset($_POST['selected_ids']) && is_array($_POST['selected_ids']) ? $_POST['selected_ids'] : array();
+        $stats = runB24SyncForProductIds($db, $ids);
+        header("Location: products.php?sync_msg=" . urlencode("Синк выбранных: обновлено {$stats['ok']}, ошибок {$stats['err']}, всего {$stats['total']}"));
+        exit;
+    }
+
+    if ($action === 'retry_sync_errors') {
+        $rows = $db->query("
+            SELECT id
+            FROM products
+            WHERE sync_status = 'error'
+              AND b24_product_id IS NOT NULL
+              AND b24_product_id <> 0
+        ")->fetchAll(PDO::FETCH_ASSOC);
+        $ids = array_map(function($r) { return intval($r['id']); }, $rows);
+        $stats = runB24SyncForProductIds($db, $ids);
+        header("Location: products.php?sync_msg=" . urlencode("Retry ошибок: обновлено {$stats['ok']}, ошибок {$stats['err']}, всего {$stats['total']}"));
         exit;
     }
 
@@ -378,13 +479,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             isset($validation['values']['price_20_plus']) ? $validation['values']['price_20_plus'] : 0,
             $_POST['id']
         ));
-
         $historyResult = logProductPriceHistory(
             $db,
             $productId,
             $oldPriceValues ? $oldPriceValues : array(),
             $newPriceValues
         );
+        markProductSyncPending($db, $_POST['id']);
         // Safe auto-sync: try to update B24, but don't break local save.
         $syncResult = syncProductPriceToB24($db, $_POST['id']);
         $syncTail = $syncResult['ok'] ? ' | Б24: ок' : (' | Б24: ' . $syncResult['message']);
@@ -485,6 +586,10 @@ require 'includes/header.php';
 <form method="POST" style="margin-bottom:12px;">
     <input type="hidden" name="action" value="sync_to_b24">
     <button type="submit">Отправить цены в Б24</button>
+</form>
+<form id="bulk-sync-form" method="POST" style="margin-bottom:12px;">
+    <button type="submit" name="action" value="sync_selected">Синк выбранных</button>
+    <button type="submit" name="action" value="retry_sync_errors">Retry ошибок</button>
 </form>
 
 <form method="POST">
@@ -599,6 +704,7 @@ $catalogLabel = $catalogId > 0
     <table border="1" style="margin-top:8px;">
     <tr>
     <th>ID</th>
+    <th>✓</th>
     <th>Название</th>
     <th>Метраж</th>
     <th>Цена/м</th>
@@ -609,6 +715,10 @@ $catalogLabel = $catalogId > 0
     <th>10-19</th>
     <th>20+</th>
     <th>B24 ID</th>
+    <th>Действие</th>
+    <th>Последняя ошибка</th>
+    <th>Попытка</th>
+    <th>Sync</th>
     <th>Каталог</th>
     <th>Переместить</th>
     <th>✏️</th>
@@ -618,6 +728,9 @@ $catalogLabel = $catalogId > 0
     <?php foreach ($brandProducts as $p): ?>
     <tr>
     <td><?php echo $p['id']; ?></td>
+    <td>
+        <input type="checkbox" form="bulk-sync-form" name="selected_ids[]" value="<?php echo $p['id']; ?>">
+    </td>
     <td><?php echo htmlspecialchars($p['name']); ?></td>
     <td><?php echo $p['roll_length']; ?></td>
     <td><?php echo $p['price_per_meter']; ?></td>
@@ -628,6 +741,16 @@ $catalogLabel = $catalogId > 0
     <td><?php echo $p['price_10_19']; ?></td>
     <td><?php echo $p['price_20_plus']; ?></td>
     <td><?php echo isset($p['b24_product_id']) ? $p['b24_product_id'] : ''; ?></td>
+    <td><?php echo isset($p['sync_status']) ? htmlspecialchars($p['sync_status']) : 'pending'; ?></td>
+    <td><?php echo !empty($p['last_error']) ? htmlspecialchars($p['last_error']) : '—'; ?></td>
+    <td><?php echo !empty($p['last_attempt_at']) ? htmlspecialchars($p['last_attempt_at']) : '—'; ?></td>
+    <td>
+        <form method="POST" style="display:inline;">
+            <input type="hidden" name="action" value="sync_one">
+            <input type="hidden" name="product_id" value="<?php echo $p['id']; ?>">
+            <button type="submit">↻</button>
+        </form>
+    </td>
     <td><?php echo isset($p['catalog_id']) ? intval($p['catalog_id']) : ''; ?></td>
     <td>
         <form method="POST" style="display:inline;">
@@ -650,6 +773,7 @@ $catalogLabel = $catalogId > 0
 <table border="1">
 <tr>
 <th>ID</th>
+<th>✓</th>
 <th>Название</th>
 <th>Метраж</th>
 <th>Цена/м</th>
@@ -660,12 +784,19 @@ $catalogLabel = $catalogId > 0
 <th>10-19</th>
 <th>20+</th>
 <th>B24 ID</th>
+<th>Действие</th>
+<th>Последняя ошибка</th>
+<th>Попытка</th>
+<th>Sync</th>
 <th>✏️</th>
 <th>❌</th>
 </tr>
 <?php foreach ($products as $p): ?>
 <tr>
 <td><?php echo $p['id']; ?></td>
+<td>
+    <input type="checkbox" form="bulk-sync-form" name="selected_ids[]" value="<?php echo $p['id']; ?>">
+</td>
 <td><?php echo htmlspecialchars($p['name']); ?></td>
 <td><?php echo $p['roll_length']; ?></td>
 <td><?php echo $p['price_per_meter']; ?></td>
@@ -676,6 +807,16 @@ $catalogLabel = $catalogId > 0
 <td><?php echo $p['price_10_19']; ?></td>
 <td><?php echo $p['price_20_plus']; ?></td>
 <td><?php echo isset($p['b24_product_id']) ? $p['b24_product_id'] : ''; ?></td>
+<td><?php echo isset($p['sync_status']) ? htmlspecialchars($p['sync_status']) : 'pending'; ?></td>
+<td><?php echo !empty($p['last_error']) ? htmlspecialchars($p['last_error']) : '—'; ?></td>
+<td><?php echo !empty($p['last_attempt_at']) ? htmlspecialchars($p['last_attempt_at']) : '—'; ?></td>
+<td>
+    <form method="POST" style="display:inline;">
+        <input type="hidden" name="action" value="sync_one">
+        <input type="hidden" name="product_id" value="<?php echo $p['id']; ?>">
+        <button type="submit">↻</button>
+    </form>
+</td>
 <td><a href="?edit_id=<?php echo $p['id']; ?>">✏️</a></td>
 <td><a href="?delete_id=<?php echo $p['id']; ?>">❌</a></td>
 </tr>
