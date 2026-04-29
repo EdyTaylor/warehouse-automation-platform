@@ -212,21 +212,35 @@ function syncOperationDocumentToBitrix($db, $docId, $docType, $docNumber, $comme
         }
 
         $lineResp = sendToBitrix('catalog.document.element.add', array('fields' => $elementFields));
+        if (is_array($lineResp) && isset($lineResp['error'])) {
+            $fallbackFields = $elementFields;
+            unset($fallbackFields['price'], $fallbackFields['purchasingPrice'], $fallbackFields['currency']);
+            $fallbackResp = sendToBitrix('catalog.document.element.add', array('fields' => $fallbackFields));
+            $lineResponses[] = array(
+                'product_id' => $localProductId,
+                'b24_product_id' => $b24ProductId,
+                'amount' => $amount,
+                'response' => $lineResp,
+                'fallback_response' => $fallbackResp
+            );
+            if (!is_array($fallbackResp) || isset($fallbackResp['error'])) {
+                return array(
+                    'ok' => false,
+                    'stage' => 'document.element.add',
+                    'b24_document_id' => $b24DocId,
+                    'line_responses' => $lineResponses,
+                    'response' => $fallbackResp
+                );
+            }
+            continue;
+        }
+
         $lineResponses[] = array(
             'product_id' => $localProductId,
             'b24_product_id' => $b24ProductId,
             'amount' => $amount,
             'response' => $lineResp
         );
-        if (!is_array($lineResp) || isset($lineResp['error'])) {
-            return array(
-                'ok' => false,
-                'stage' => 'document.element.add',
-                'b24_document_id' => $b24DocId,
-                'line_responses' => $lineResponses,
-                'response' => $lineResp
-            );
-        }
     }
 
     $conductResp = sendToBitrix('catalog.document.conduct', array('id' => $b24DocId));
@@ -246,6 +260,23 @@ function syncOperationDocumentToBitrix($db, $docId, $docType, $docNumber, $comme
         'line_responses' => $lineResponses,
         'conduct_response' => $conductResp
     );
+}
+
+function isB24DocumentConducted($b24DocId) {
+    $resp = sendToBitrix('catalog.document.get', array('id' => intval($b24DocId)));
+    if (!is_array($resp) || isset($resp['error']) || !isset($resp['result'])) {
+        return false;
+    }
+    $row = is_array($resp['result']) ? $resp['result'] : array();
+    $status = '';
+    if (isset($row['status'])) {
+        $status = (string)$row['status'];
+    } elseif (isset($row['STATUS'])) {
+        $status = (string)$row['STATUS'];
+    } elseif (isset($row['document']['status'])) {
+        $status = (string)$row['document']['status'];
+    }
+    return strtoupper($status) === 'Y';
 }
 
 function addLinesAndConductExistingB24Document($db, $b24DocId, $docType, $lineRows) {
@@ -321,6 +352,10 @@ function addLinesAndConductExistingB24Document($db, $b24DocId, $docType, $lineRo
                 'fallback_response' => $fallbackResp
             );
             if (!is_array($fallbackResp) || isset($fallbackResp['error'])) {
+                $fallbackError = isset($fallbackResp['error_description']) ? (string)$fallbackResp['error_description'] : (isset($fallbackResp['error']) ? (string)$fallbackResp['error'] : '');
+                if ($fallbackError !== '' && (stripos($fallbackError, 'already') !== false || stripos($fallbackError, 'уже') !== false || stripos($fallbackError, 'duplicate') !== false || stripos($fallbackError, 'дублик') !== false)) {
+                    continue;
+                }
                 return array(
                     'ok' => false,
                     'stage' => 'document.element.add',
@@ -342,6 +377,15 @@ function addLinesAndConductExistingB24Document($db, $b24DocId, $docType, $lineRo
 
     $conductResp = sendToBitrix('catalog.document.conduct', array('id' => intval($b24DocId)));
     if (!is_array($conductResp) || isset($conductResp['error'])) {
+        if (isB24DocumentConducted($b24DocId)) {
+            return array(
+                'ok' => true,
+                'b24_document_id' => intval($b24DocId),
+                'line_responses' => $lineResponses,
+                'conduct_response' => $conductResp,
+                'status_checked' => 'Y'
+            );
+        }
         return array(
             'ok' => false,
             'stage' => 'document.conduct',
