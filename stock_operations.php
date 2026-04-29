@@ -298,19 +298,68 @@ function ensureB24ProductStockType($b24ProductId) {
     if ($id <= 0) {
         return false;
     }
-    $getResp = sendToBitrix('crm.product.get', array('id' => $id));
-    if (!is_array($getResp) || isset($getResp['error']) || !isset($getResp['result']) || !is_array($getResp['result'])) {
+    $currentType = null;
+
+    $crmGetResp = sendToBitrix('crm.product.get', array('id' => $id));
+    if (is_array($crmGetResp) && !isset($crmGetResp['error']) && isset($crmGetResp['result']) && is_array($crmGetResp['result'])) {
+        if (isset($crmGetResp['result']['TYPE'])) {
+            $currentType = intval($crmGetResp['result']['TYPE']);
+        }
+    }
+
+    if ($currentType === null) {
+        $catalogGetResp = sendToBitrix('catalog.product.get', array('id' => $id));
+        if (is_array($catalogGetResp) && !isset($catalogGetResp['error']) && isset($catalogGetResp['result']) && is_array($catalogGetResp['result'])) {
+            if (isset($catalogGetResp['result']['type'])) {
+                $currentType = intval($catalogGetResp['result']['type']);
+            } elseif (isset($catalogGetResp['result']['TYPE'])) {
+                $currentType = intval($catalogGetResp['result']['TYPE']);
+            }
+        }
+    }
+
+    if ($currentType === 1) {
         return true;
     }
-    $type = isset($getResp['result']['TYPE']) ? intval($getResp['result']['TYPE']) : 1;
-    if ($type === 1) {
-        return true;
-    }
-    $updResp = sendToBitrix('crm.product.update', array(
+
+    $crmUpdResp = sendToBitrix('crm.product.update', array(
         'id' => $id,
         'fields' => array('TYPE' => 1)
     ));
-    return is_array($updResp) && !isset($updResp['error']);
+    $catalogUpdResp = sendToBitrix('catalog.product.update', array(
+        'id' => $id,
+        'fields' => array('type' => 1, 'TYPE' => 1)
+    ));
+
+    $crmUpdated = is_array($crmUpdResp) && !isset($crmUpdResp['error']);
+    $catalogUpdated = is_array($catalogUpdResp) && !isset($catalogUpdResp['error']);
+
+    // Re-check final state. At least one successful update plus readable type=1.
+    $finalType = null;
+    $crmGetResp2 = sendToBitrix('crm.product.get', array('id' => $id));
+    if (is_array($crmGetResp2) && !isset($crmGetResp2['error']) && isset($crmGetResp2['result']) && is_array($crmGetResp2['result']) && isset($crmGetResp2['result']['TYPE'])) {
+        $finalType = intval($crmGetResp2['result']['TYPE']);
+    } else {
+        $catalogGetResp2 = sendToBitrix('catalog.product.get', array('id' => $id));
+        if (is_array($catalogGetResp2) && !isset($catalogGetResp2['error']) && isset($catalogGetResp2['result']) && is_array($catalogGetResp2['result'])) {
+            if (isset($catalogGetResp2['result']['type'])) {
+                $finalType = intval($catalogGetResp2['result']['type']);
+            } elseif (isset($catalogGetResp2['result']['TYPE'])) {
+                $finalType = intval($catalogGetResp2['result']['TYPE']);
+            }
+        }
+    }
+
+    if ($finalType === 1) {
+        return true;
+    }
+
+    // If re-read is unavailable, still allow only when at least one update succeeded.
+    if ($finalType === null && ($crmUpdated || $catalogUpdated)) {
+        return true;
+    }
+
+    return false;
 }
 
 function waitUntilB24DocumentConducted($db, $b24DocId) {
