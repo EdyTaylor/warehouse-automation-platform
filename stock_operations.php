@@ -61,6 +61,58 @@ function ensureStockOperationTables($db) {
     ensureColumnExists($db, 'products', 'delivery_price', '`delivery_price` decimal(14,2) NOT NULL DEFAULT 0');
 }
 
+function resolveDocTypeCodeFromBitrix($logicalType) {
+    static $cache = null;
+    if ($cache === null) {
+        $cache = array();
+        $resp = sendToBitrix('catalog.enum.getStoreDocumentTypes', array());
+        if (is_array($resp) && !isset($resp['error']) && isset($resp['result']) && is_array($resp['result'])) {
+            $cache = $resp['result'];
+        }
+    }
+
+    if (empty($cache)) {
+        if ($logicalType === 'receipt') {
+            return 'A';
+        }
+        if ($logicalType === 'writeoff') {
+            return 'D';
+        }
+        return '';
+    }
+
+    $findByName = function($keywords) use ($cache) {
+        foreach ($cache as $item) {
+            $id = isset($item['id']) ? (string)$item['id'] : '';
+            $name = (string)(isset($item['name']) ? $item['name'] : '');
+            foreach ($keywords as $kw) {
+                if ($kw !== '' && @preg_match('/' . preg_quote($kw, '/') . '/iu', $name) && $id !== '') {
+                    return $id;
+                }
+            }
+        }
+        return '';
+    };
+
+    if ($logicalType === 'receipt') {
+        $code = $findByName(array('приход', 'оприход', 'receipt', 'arrival'));
+        if ($code !== '') {
+            return $code;
+        }
+        return 'A';
+    }
+
+    if ($logicalType === 'writeoff') {
+        $code = $findByName(array('списан', 'write-off', 'write off', 'deduct', 'disposal'));
+        if ($code !== '') {
+            return $code;
+        }
+        return 'D';
+    }
+
+    return '';
+}
+
 function syncOperationDocumentToBitrix($db, $docId, $docType, $docNumber, $commentary, $lineRows) {
     $storeFrom = intval(getAppSetting($db, 'default_store_from_id', '1'));
     $storeTo = intval(getAppSetting($db, 'default_store_to_id', '1'));
@@ -68,8 +120,8 @@ function syncOperationDocumentToBitrix($db, $docId, $docType, $docNumber, $comme
     $currency = (string)getAppSetting($db, 'default_currency', 'KGS');
 
     $docMap = array(
-        'receipt' => 'A',
-        'writeoff' => 'S'
+        'receipt' => resolveDocTypeCodeFromBitrix('receipt'),
+        'writeoff' => resolveDocTypeCodeFromBitrix('writeoff')
     );
     if (!isset($docMap[$docType])) {
         return array('ok' => false, 'error' => 'unsupported_doc_type');
@@ -196,6 +248,117 @@ function syncOperationDocumentToBitrix($db, $docId, $docType, $docNumber, $comme
     );
 }
 
+function addLinesAndConductExistingB24Document($db, $b24DocId, $docType, $lineRows) {
+    $storeFrom = intval(getAppSetting($db, 'default_store_from_id', '1'));
+    $storeTo = intval(getAppSetting($db, 'default_store_to_id', '1'));
+    $currency = (string)getAppSetting($db, 'default_currency', 'KGS');
+
+    $lineResponses = array();
+    foreach ($lineRows as $line) {
+        $localProductId = intval(isset($line['product_id']) ? $line['product_id'] : 0);
+        if ($localProductId <= 0) {
+            continue;
+        }
+
+        $pStmt = $db->prepare("SELECT b24_product_id, price_per_meter, delivery_price FROM products WHERE id = ? LIMIT 1");
+        $pStmt->execute(array($localProductId));
+        $prod = $pStmt->fetch(PDO::FETCH_ASSOC);
+        $b24ProductId = intval(isset($prod['b24_product_id']) ? $prod['b24_product_id'] : 0);
+        if ($b24ProductId <= 0) {
+            $lineResponses[] = array('product_id' => $localProductId, 'status' => 'skip_no_b24_product_id');
+            continue;
+        }
+
+        $amount = floatval(isset($line['quantity_m']) ? $line['quantity_m'] : 0);
+        if ($amount <= 0) {
+            $amount = floatval(isset($line['qty_rolls']) ? $line['qty_rolls'] : 0);
+        }
+        if ($amount <= 0) {
+            continue;
+        }
+
+        $lineRollLength = floatval(isset($line['roll_length']) ? $line['roll_length'] : 0);
+        $linePricePerRoll = floatval(isset($line['price_per_roll']) ? $line['price_per_roll'] : 0);
+        $lineDeliveryPerRoll = floatval(isset($line['delivery_price_per_roll']) ? $line['delivery_price_per_roll'] : 0);
+        $pricePerMeter = 0.0;
+        if ($lineDeliveryPerRoll > 0 && $lineRollLength > 0) {
+            $pricePerMeter = $lineDeliveryPerRoll / $lineRollLength;
+        } elseif ($linePricePerRoll > 0 && $lineRollLength > 0) {
+            $pricePerMeter = $linePricePerRoll / $lineRollLength;
+        } elseif (floatval(isset($prod['delivery_price']) ? $prod['delivery_price'] : 0) > 0 && $lineRollLength > 0) {
+            $pricePerMeter = floatval($prod['delivery_price']) / $lineRollLength;
+        } else {
+            $pricePerMeter = floatval(isset($prod['price_per_meter']) ? $prod['price_per_meter'] : 0);
+        }
+
+        $elementFields = array(
+            'docId' => intval($b24DocId),
+            'elementId' => $b24ProductId,
+            'amount' => $amount
+        );
+        if ($docType === 'receipt') {
+            $elementFields['storeTo'] = $storeTo;
+        } else {
+            $elementFields['storeFrom'] = $storeFrom;
+        }
+        if ($pricePerMeter > 0) {
+            $elementFields['price'] = $pricePerMeter;
+            $elementFields['purchasingPrice'] = $pricePerMeter;
+            $elementFields['currency'] = $currency;
+        }
+
+        $lineResp = sendToBitrix('catalog.document.element.add', array('fields' => $elementFields));
+        if (is_array($lineResp) && isset($lineResp['error'])) {
+            // Compatibility fallback: some portals reject pricing fields for element.add.
+            $fallbackFields = $elementFields;
+            unset($fallbackFields['price'], $fallbackFields['purchasingPrice'], $fallbackFields['currency']);
+            $fallbackResp = sendToBitrix('catalog.document.element.add', array('fields' => $fallbackFields));
+            $lineResponses[] = array(
+                'product_id' => $localProductId,
+                'b24_product_id' => $b24ProductId,
+                'amount' => $amount,
+                'response' => $lineResp,
+                'fallback_response' => $fallbackResp
+            );
+            if (!is_array($fallbackResp) || isset($fallbackResp['error'])) {
+                return array(
+                    'ok' => false,
+                    'stage' => 'document.element.add',
+                    'b24_document_id' => intval($b24DocId),
+                    'line_responses' => $lineResponses,
+                    'response' => $fallbackResp
+                );
+            }
+            continue;
+        }
+
+        $lineResponses[] = array(
+            'product_id' => $localProductId,
+            'b24_product_id' => $b24ProductId,
+            'amount' => $amount,
+            'response' => $lineResp
+        );
+    }
+
+    $conductResp = sendToBitrix('catalog.document.conduct', array('id' => intval($b24DocId)));
+    if (!is_array($conductResp) || isset($conductResp['error'])) {
+        return array(
+            'ok' => false,
+            'stage' => 'document.conduct',
+            'b24_document_id' => intval($b24DocId),
+            'line_responses' => $lineResponses,
+            'response' => $conductResp
+        );
+    }
+
+    return array(
+        'ok' => true,
+        'b24_document_id' => intval($b24DocId),
+        'line_responses' => $lineResponses,
+        'conduct_response' => $conductResp
+    );
+}
+
 function ensureFormToken($name) {
     if (!isset($_SESSION['form_tokens']) || !is_array($_SESSION['form_tokens'])) {
         $_SESSION['form_tokens'] = array();
@@ -231,6 +394,16 @@ function resolveB24SyncStatus($syncResult) {
         return 'partial';
     }
     return 'error';
+}
+
+function localizeOperationType($operationType) {
+    $map = array(
+        'receipt' => 'Приход',
+        'writeoff' => 'Списание',
+        'sale' => 'Реализация'
+    );
+    $key = (string)$operationType;
+    return isset($map[$key]) ? $map[$key] : $key;
 }
 
 function ensureProductForReceipt($db, $productId, $productName, $rollLength, $pricePerRoll, $deliveryPricePerRoll) {
@@ -410,29 +583,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 throw new Exception('Документ уже синхронизирован в Б24: #' . intval($doc['b24_document_id']));
             }
 
-            if (intval(isset($doc['b24_document_id']) ? $doc['b24_document_id'] : 0) > 0) {
-                $syncResult = array(
-                    'ok' => false,
-                    'stage' => 'document.conduct',
-                    'b24_document_id' => intval($doc['b24_document_id']),
-                    'response' => sendToBitrix('catalog.document.conduct', array('id' => intval($doc['b24_document_id'])))
-                );
-                if (is_array($syncResult['response']) && !isset($syncResult['response']['error'])) {
-                    $syncResult['ok'] = true;
-                }
-            } else {
-                $linesStmt = $db->prepare("
-                    SELECT product_id, qty_rolls, quantity_m, roll_length, price_per_roll, delivery_price_per_roll
-                    FROM stock_operation_lines
-                    WHERE doc_id = ?
-                    ORDER BY id ASC
-                ");
-                $linesStmt->execute(array($docId));
-                $lineRows = $linesStmt->fetchAll(PDO::FETCH_ASSOC);
-                if (empty($lineRows)) {
-                    throw new Exception('У документа нет строк для синка.');
-                }
+            $linesStmt = $db->prepare("
+                SELECT product_id, qty_rolls, quantity_m, roll_length, price_per_roll, delivery_price_per_roll
+                FROM stock_operation_lines
+                WHERE doc_id = ?
+                ORDER BY id ASC
+            ");
+            $linesStmt->execute(array($docId));
+            $lineRows = $linesStmt->fetchAll(PDO::FETCH_ASSOC);
+            if (empty($lineRows)) {
+                throw new Exception('У документа нет строк для синка.');
+            }
 
+            if (intval(isset($doc['b24_document_id']) ? $doc['b24_document_id'] : 0) > 0) {
+                $syncResult = addLinesAndConductExistingB24Document(
+                    $db,
+                    intval($doc['b24_document_id']),
+                    (string)$doc['operation_type'],
+                    $lineRows
+                );
+            } else {
                 $syncResult = syncOperationDocumentToBitrix(
                     $db,
                     $docId,
@@ -782,39 +952,41 @@ require 'includes/header.php';
                 <input type="text" name="comment_text" placeholder="Примечание к приходу">
             </div>
 
-            <table class="table" id="receipt-lines">
-                <thead>
-                    <tr>
-                        <th>Товар (из базы)</th>
-                        <th>Название (если новый)</th>
-                        <th>Рулонов</th>
-                        <th>Длина рулона (м)</th>
-                        <th>Закупка за рулон</th>
-                        <th>С доставкой за рулон</th>
-                        <th></th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr>
-                        <td>
-                            <select name="line_product_id[]">
-                                <option value="0">-- Новый товар --</option>
-                                <?php foreach ($products as $p): ?>
-                                    <option value="<?= intval($p['id']) ?>" data-roll-length="<?= htmlspecialchars((string)$p['roll_length']) ?>" data-price="<?= htmlspecialchars((string)$p['purchase_price']) ?>" data-delivery-price="<?= htmlspecialchars((string)$p['delivery_price']) ?>">
-                                        <?= htmlspecialchars($p['name']) ?>
-                                    </option>
-                                <?php endforeach; ?>
-                            </select>
-                        </td>
-                        <td><input type="text" name="line_product_name[]" placeholder="Если новый товар"></td>
-                        <td><input type="number" name="line_qty_rolls[]" min="1" value="1"></td>
-                        <td><input type="number" name="line_roll_length[]" min="0.1" step="0.1" value="30"></td>
-                        <td><input type="number" name="line_price_per_roll[]" min="0" step="0.01" value="0"></td>
-                        <td><input type="number" name="line_delivery_price_per_roll[]" min="0" step="0.01" value="0"></td>
-                        <td><button type="button" class="btn btn-danger btn-sm remove-line">×</button></td>
-                    </tr>
-                </tbody>
-            </table>
+            <div class="table-responsive receipt-table-wrap">
+                <table class="table" id="receipt-lines">
+                    <thead>
+                        <tr>
+                            <th>Товар (из базы)</th>
+                            <th>Название (если новый)</th>
+                            <th>Рулонов</th>
+                            <th>Длина рулона (м)</th>
+                            <th>Закупка за рулон</th>
+                            <th>С доставкой за рулон</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>
+                                <select name="line_product_id[]">
+                                    <option value="0">-- Новый товар --</option>
+                                    <?php foreach ($products as $p): ?>
+                                        <option value="<?= intval($p['id']) ?>" data-roll-length="<?= htmlspecialchars((string)$p['roll_length']) ?>" data-price="<?= htmlspecialchars((string)$p['purchase_price']) ?>" data-delivery-price="<?= htmlspecialchars((string)$p['delivery_price']) ?>">
+                                            <?= htmlspecialchars($p['name']) ?>
+                                        </option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </td>
+                            <td><input type="text" name="line_product_name[]" placeholder="Если новый товар"></td>
+                            <td><input type="number" name="line_qty_rolls[]" min="1" value="1"></td>
+                            <td><input type="number" name="line_roll_length[]" min="0.1" step="0.1" value="30"></td>
+                            <td><input type="number" name="line_price_per_roll[]" min="0" step="0.01" value="0"></td>
+                            <td><input type="number" name="line_delivery_price_per_roll[]" min="0" step="0.01" value="0"></td>
+                            <td><button type="button" class="btn btn-danger btn-sm remove-line">×</button></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
             <div style="display:flex; gap:10px; flex-wrap:wrap;">
                 <button type="button" class="btn btn-light" id="add-receipt-line">+ Добавить строку</button>
                 <button type="submit" class="btn btn-success">Провести приход</button>
@@ -898,7 +1070,7 @@ require 'includes/header.php';
                     <?php foreach ($recentDocs as $d): ?>
                         <tr>
                             <td><?= intval($d['id']) ?></td>
-                            <td><?= htmlspecialchars($d['operation_type']) ?></td>
+                            <td><?= htmlspecialchars(localizeOperationType(isset($d['operation_type']) ? $d['operation_type'] : '')) ?></td>
                             <td><?= htmlspecialchars((string)$d['doc_number']) ?></td>
                             <td><?= htmlspecialchars((string)$d['supplier']) ?></td>
                             <td><?= number_format(floatval($d['total_amount']), 2, '.', ' ') ?></td>

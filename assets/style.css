@@ -283,6 +283,28 @@ body {
     border-radius: var(--border-radius);
 }
 
+/* Receipt form table overflow tuning */
+.receipt-table-wrap {
+    width: 100%;
+}
+
+#receipt-lines {
+    min-width: 980px;
+}
+
+#receipt-lines select,
+#receipt-lines input[type="text"],
+#receipt-lines input[type="number"] {
+    width: 100%;
+    min-width: 110px;
+}
+
+#receipt-lines .remove-line {
+    min-width: 44px;
+    padding-left: 0.75rem;
+    padding-right: 0.75rem;
+}
+
 /* Статистика */
 .stats-grid {
     display: grid;
