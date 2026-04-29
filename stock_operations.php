@@ -181,26 +181,27 @@ function parseBitrixListRows($resp) {
     return array();
 }
 
-function ensureB24ContractorId($supplierName) {
+function ensureB24CompanyId($supplierName) {
     $name = trim((string)$supplierName);
     if ($name === '') {
         return 0;
     }
 
-    $listResp = sendToBitrix('catalog.contractor.list', array(
-        'filter' => array('title' => $name),
-        'select' => array('id', 'title')
+    $listResp = sendToBitrix('crm.company.list', array(
+        'filter' => array('TITLE' => $name),
+        'select' => array('ID', 'TITLE'),
+        'order' => array('ID' => 'ASC')
     ));
     $rows = parseBitrixListRows($listResp);
     foreach ($rows as $row) {
         if (!is_array($row)) {
             continue;
         }
-        $id = intval(isset($row['id']) ? $row['id'] : (isset($row['ID']) ? $row['ID'] : 0));
+        $id = intval(isset($row['ID']) ? $row['ID'] : (isset($row['id']) ? $row['id'] : 0));
         if ($id <= 0) {
             continue;
         }
-        $title = trim((string)(isset($row['title']) ? $row['title'] : (isset($row['TITLE']) ? $row['TITLE'] : '')));
+        $title = trim((string)(isset($row['TITLE']) ? $row['TITLE'] : (isset($row['title']) ? $row['title'] : '')));
         $titleCmp = function_exists('mb_strtolower') ? mb_strtolower($title, 'UTF-8') : strtolower($title);
         $nameCmp = function_exists('mb_strtolower') ? mb_strtolower($name, 'UTF-8') : strtolower($name);
         if ($title === '' || $titleCmp === $nameCmp) {
@@ -208,20 +209,13 @@ function ensureB24ContractorId($supplierName) {
         }
     }
 
-    $addResp = sendToBitrix('catalog.contractor.add', array(
+    $addResp = sendToBitrix('crm.company.add', array(
         'fields' => array(
-            'title' => $name,
             'TITLE' => $name
         )
     ));
     if (!is_array($addResp) || isset($addResp['error'])) {
         return 0;
-    }
-    if (isset($addResp['result']['contractor']['id'])) {
-        return intval($addResp['result']['contractor']['id']);
-    }
-    if (isset($addResp['result']['id'])) {
-        return intval($addResp['result']['id']);
     }
     if (isset($addResp['result'])) {
         return intval($addResp['result']);
@@ -230,18 +224,93 @@ function ensureB24ContractorId($supplierName) {
 }
 
 function ensureDocumentSupplierForReceipt($b24DocId, $supplierName) {
-    $contractorId = ensureB24ContractorId($supplierName);
-    if ($contractorId <= 0) {
+    $companyId = ensureB24CompanyId($supplierName);
+    if ($companyId <= 0) {
         return false;
     }
-    sendToBitrix('catalog.document.update', array(
-        'id' => intval($b24DocId),
-        'fields' => array(
-            'contractorId' => $contractorId,
-            'CONTRACTOR_ID' => $contractorId
-        )
+    $docId = intval($b24DocId);
+
+    // Bind supplier via documentcontractor API (company entityTypeId=4).
+    $bound = false;
+    $listResp = sendToBitrix('catalog.documentcontractor.list', array(
+        'filter' => array('documentId' => $docId),
+        'select' => array('id', 'documentId', 'entityTypeId', 'entityId')
     ));
-    return true;
+    $rows = parseBitrixListRows($listResp);
+    if (!empty($rows)) {
+        foreach ($rows as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            $entityTypeId = intval(isset($row['entityTypeId']) ? $row['entityTypeId'] : (isset($row['ENTITY_TYPE_ID']) ? $row['ENTITY_TYPE_ID'] : 0));
+            $entityId = intval(isset($row['entityId']) ? $row['entityId'] : (isset($row['ENTITY_ID']) ? $row['ENTITY_ID'] : 0));
+            if ($entityTypeId === 4 && $entityId === $companyId) {
+                $bound = true;
+                break;
+            }
+        }
+    }
+
+    if (!$bound) {
+        $payloadFields = array(
+            'documentId' => $docId,
+            'entityTypeId' => 4,
+            'entityId' => $companyId,
+            'DOCUMENT_ID' => $docId,
+            'ENTITY_TYPE_ID' => 4,
+            'ENTITY_ID' => $companyId
+        );
+        $addResp = sendToBitrix('catalog.documentcontractor.add', array(
+            'fields' => array(
+                'documentId' => $docId,
+                'entityTypeId' => 4,
+                'entityId' => $companyId
+            )
+        ));
+        if (is_array($addResp) && isset($addResp['error'])) {
+            // Fallback for portals expecting flat payload without fields wrapper.
+            $addResp = sendToBitrix('catalog.documentcontractor.add', $payloadFields);
+        }
+        if (is_array($addResp) && !isset($addResp['error'])) {
+            $bound = true;
+        }
+    }
+
+    // Compatibility fallback for portals that accept direct document update.
+    if (!$bound) {
+        $updResp = sendToBitrix('catalog.document.update', array(
+            'id' => $docId,
+            'fields' => array(
+                'contractorId' => $companyId,
+                'CONTRACTOR_ID' => $companyId
+            )
+        ));
+        if (is_array($updResp) && !isset($updResp['error'])) {
+            $bound = true;
+        }
+    }
+
+    return $bound;
+}
+
+function ensureB24ProductStockType($b24ProductId) {
+    $id = intval($b24ProductId);
+    if ($id <= 0) {
+        return false;
+    }
+    $getResp = sendToBitrix('crm.product.get', array('id' => $id));
+    if (!is_array($getResp) || isset($getResp['error']) || !isset($getResp['result']) || !is_array($getResp['result'])) {
+        return true;
+    }
+    $type = isset($getResp['result']['TYPE']) ? intval($getResp['result']['TYPE']) : 1;
+    if ($type === 1) {
+        return true;
+    }
+    $updResp = sendToBitrix('crm.product.update', array(
+        'id' => $id,
+        'fields' => array('TYPE' => 1)
+    ));
+    return is_array($updResp) && !isset($updResp['error']);
 }
 
 function waitUntilB24DocumentConducted($db, $b24DocId) {
@@ -367,6 +436,18 @@ function syncOperationDocumentToBitrix($db, $docId, $docType, $docNumber, $comme
                 'status' => 'skip_no_b24_product_id'
             );
             continue;
+        }
+        if (!ensureB24ProductStockType($b24ProductId)) {
+            return array(
+                'ok' => false,
+                'stage' => 'product.type',
+                'b24_document_id' => $b24DocId,
+                'line_responses' => $lineResponses,
+                'response' => array(
+                    'error' => 'invalid_product_type',
+                    'error_description' => 'Товар #' . $b24ProductId . ' в Б24 имеет неподдерживаемый тип для складского документа.'
+                )
+            );
         }
 
         $amount = floatval(isset($line['quantity_m']) ? $line['quantity_m'] : 0);
@@ -540,6 +621,18 @@ function addLinesAndConductExistingB24Document($db, $b24DocId, $docType, $lineRo
         if ($b24ProductId <= 0) {
             $lineResponses[] = array('product_id' => $localProductId, 'status' => 'skip_no_b24_product_id');
             continue;
+        }
+        if (!ensureB24ProductStockType($b24ProductId)) {
+            return array(
+                'ok' => false,
+                'stage' => 'product.type',
+                'b24_document_id' => intval($b24DocId),
+                'line_responses' => $lineResponses,
+                'response' => array(
+                    'error' => 'invalid_product_type',
+                    'error_description' => 'Товар #' . $b24ProductId . ' в Б24 имеет неподдерживаемый тип для складского документа.'
+                )
+            );
         }
 
         $amount = floatval(isset($line['quantity_m']) ? $line['quantity_m'] : 0);
