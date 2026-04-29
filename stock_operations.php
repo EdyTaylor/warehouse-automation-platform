@@ -57,6 +57,8 @@ function ensureStockOperationTables($db) {
     ensureColumnExists($db, 'stock_operation_docs', 'b24_document_id', '`b24_document_id` int DEFAULT NULL');
     ensureColumnExists($db, 'stock_operation_docs', 'b24_sync_status', '`b24_sync_status` varchar(20) NOT NULL DEFAULT \'pending\'');
     ensureColumnExists($db, 'stock_operation_docs', 'b24_sync_response', '`b24_sync_response` longtext');
+    ensureColumnExists($db, 'stock_operation_lines', 'delivery_price_per_roll', '`delivery_price_per_roll` decimal(14,2) NOT NULL DEFAULT 0');
+    ensureColumnExists($db, 'products', 'delivery_price', '`delivery_price` decimal(14,2) NOT NULL DEFAULT 0');
 }
 
 function syncOperationDocumentToBitrix($db, $docId, $docType, $docNumber, $commentary, $lineRows) {
@@ -107,7 +109,7 @@ function syncOperationDocumentToBitrix($db, $docId, $docType, $docNumber, $comme
             continue;
         }
 
-        $pStmt = $db->prepare("SELECT b24_product_id, price_per_meter FROM products WHERE id = ? LIMIT 1");
+        $pStmt = $db->prepare("SELECT b24_product_id, price_per_meter, delivery_price FROM products WHERE id = ? LIMIT 1");
         $pStmt->execute(array($localProductId));
         $prod = $pStmt->fetch(PDO::FETCH_ASSOC);
         $b24ProductId = intval(isset($prod['b24_product_id']) ? $prod['b24_product_id'] : 0);
@@ -140,9 +142,14 @@ function syncOperationDocumentToBitrix($db, $docId, $docType, $docNumber, $comme
 
         $lineRollLength = floatval(isset($line['roll_length']) ? $line['roll_length'] : 0);
         $linePricePerRoll = floatval(isset($line['price_per_roll']) ? $line['price_per_roll'] : 0);
+        $lineDeliveryPerRoll = floatval(isset($line['delivery_price_per_roll']) ? $line['delivery_price_per_roll'] : 0);
         $pricePerMeter = 0.0;
-        if ($linePricePerRoll > 0 && $lineRollLength > 0) {
+        if ($lineDeliveryPerRoll > 0 && $lineRollLength > 0) {
+            $pricePerMeter = $lineDeliveryPerRoll / $lineRollLength;
+        } elseif ($linePricePerRoll > 0 && $lineRollLength > 0) {
             $pricePerMeter = $linePricePerRoll / $lineRollLength;
+        } elseif (floatval(isset($prod['delivery_price']) ? $prod['delivery_price'] : 0) > 0 && $lineRollLength > 0) {
+            $pricePerMeter = floatval($prod['delivery_price']) / $lineRollLength;
         } else {
             $pricePerMeter = floatval(isset($prod['price_per_meter']) ? $prod['price_per_meter'] : 0);
         }
@@ -226,18 +233,23 @@ function resolveB24SyncStatus($syncResult) {
     return 'error';
 }
 
-function ensureProductForReceipt($db, $productId, $productName, $rollLength, $pricePerRoll) {
-    $pricePerMeter = ($pricePerRoll > 0 && $rollLength > 0) ? ($pricePerRoll / $rollLength) : 0;
+function ensureProductForReceipt($db, $productId, $productName, $rollLength, $pricePerRoll, $deliveryPricePerRoll) {
+    $baseRollPrice = $deliveryPricePerRoll > 0 ? $deliveryPricePerRoll : $pricePerRoll;
+    $pricePerMeter = ($baseRollPrice > 0 && $rollLength > 0) ? ($baseRollPrice / $rollLength) : 0;
 
     if ($productId > 0) {
         $stmt = $db->prepare("SELECT * FROM products WHERE id = ? LIMIT 1");
         $stmt->execute(array($productId));
         $p = $stmt->fetch(PDO::FETCH_ASSOC);
         if ($p) {
-            if ($pricePerRoll > 0 || $rollLength > 0) {
-                $db->prepare("UPDATE products SET purchase_price = ?, roll_length = ?, price_per_meter = ? WHERE id = ?")
-                    ->execute(array($pricePerRoll, $rollLength, $pricePerMeter, $productId));
+            if ($pricePerRoll > 0 || $deliveryPricePerRoll > 0 || $rollLength > 0) {
+                $db->prepare("UPDATE products SET purchase_price = ?, delivery_price = ?, roll_length = ?, price_per_meter = ? WHERE id = ?")
+                    ->execute(array($pricePerRoll, $deliveryPricePerRoll, $rollLength, $pricePerMeter, $productId));
             }
+            $p['purchase_price'] = $pricePerRoll;
+            $p['delivery_price'] = $deliveryPricePerRoll;
+            $p['roll_length'] = $rollLength;
+            $p['price_per_meter'] = $pricePerMeter;
             return ensureProductInBitrix($db, $p, $pricePerMeter);
         }
     }
@@ -251,16 +263,20 @@ function ensureProductForReceipt($db, $productId, $productName, $rollLength, $pr
     $find->execute(array($name));
     $existing = $find->fetch(PDO::FETCH_ASSOC);
     if ($existing) {
-        $db->prepare("UPDATE products SET purchase_price = ?, roll_length = ?, price_per_meter = ? WHERE id = ?")
-            ->execute(array($pricePerRoll, $rollLength, $pricePerMeter, intval($existing['id'])));
+        $db->prepare("UPDATE products SET purchase_price = ?, delivery_price = ?, roll_length = ?, price_per_meter = ? WHERE id = ?")
+            ->execute(array($pricePerRoll, $deliveryPricePerRoll, $rollLength, $pricePerMeter, intval($existing['id'])));
+        $existing['purchase_price'] = $pricePerRoll;
+        $existing['delivery_price'] = $deliveryPricePerRoll;
+        $existing['roll_length'] = $rollLength;
+        $existing['price_per_meter'] = $pricePerMeter;
         return ensureProductInBitrix($db, $existing, $pricePerMeter);
     }
 
     $ins = $db->prepare("
-        INSERT INTO products (name, roll_length, purchase_price, price_per_meter)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO products (name, roll_length, purchase_price, delivery_price, price_per_meter)
+        VALUES (?, ?, ?, ?, ?)
     ");
-    $ins->execute(array($name, $rollLength, $pricePerRoll, $pricePerMeter));
+    $ins->execute(array($name, $rollLength, $pricePerRoll, $deliveryPricePerRoll, $pricePerMeter));
     $newId = intval($db->lastInsertId());
 
     $created = array('id' => $newId, 'name' => $name, 'b24_product_id' => 0);
@@ -406,7 +422,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 }
             } else {
                 $linesStmt = $db->prepare("
-                    SELECT product_id, qty_rolls, quantity_m, roll_length, price_per_roll
+                    SELECT product_id, qty_rolls, quantity_m, roll_length, price_per_roll, delivery_price_per_roll
                     FROM stock_operation_lines
                     WHERE doc_id = ?
                     ORDER BY id ASC
@@ -493,6 +509,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     $lineQtyRolls = isset($_POST['line_qty_rolls']) && is_array($_POST['line_qty_rolls']) ? $_POST['line_qty_rolls'] : array();
     $lineRollLength = isset($_POST['line_roll_length']) && is_array($_POST['line_roll_length']) ? $_POST['line_roll_length'] : array();
     $linePrice = isset($_POST['line_price_per_roll']) && is_array($_POST['line_price_per_roll']) ? $_POST['line_price_per_roll'] : array();
+    $lineDeliveryPrice = isset($_POST['line_delivery_price_per_roll']) && is_array($_POST['line_delivery_price_per_roll']) ? $_POST['line_delivery_price_per_roll'] : array();
 
     try {
         $db->beginTransaction();
@@ -505,8 +522,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
 
         $insLine = $db->prepare("
             INSERT INTO stock_operation_lines
-            (doc_id, product_id, product_name, qty_rolls, roll_length, quantity_m, price_per_roll, line_total)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (doc_id, product_id, product_name, qty_rolls, roll_length, quantity_m, price_per_roll, delivery_price_per_roll, line_total)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ");
 
         $totalAmount = 0.0;
@@ -516,6 +533,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             $qtyRolls = intval($lineQtyRolls[$i]);
             $rollLength = floatval(isset($lineRollLength[$i]) ? $lineRollLength[$i] : 0);
             $pricePerRoll = floatval(isset($linePrice[$i]) ? $linePrice[$i] : 0);
+            $deliveryPricePerRoll = floatval(isset($lineDeliveryPrice[$i]) ? $lineDeliveryPrice[$i] : 0);
             $productId = intval(isset($lineProductId[$i]) ? $lineProductId[$i] : 0);
             $productName = isset($lineProductName[$i]) ? trim($lineProductName[$i]) : '';
 
@@ -523,12 +541,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 continue;
             }
 
-            $product = ensureProductForReceipt($db, $productId, $productName, $rollLength, $pricePerRoll);
+            $product = ensureProductForReceipt($db, $productId, $productName, $rollLength, $pricePerRoll, $deliveryPricePerRoll);
             $localProductId = intval($product['id']);
             $localProductName = isset($product['name']) ? $product['name'] : $productName;
 
             $quantityM = $qtyRolls * $rollLength;
-            $lineTotal = $qtyRolls * $pricePerRoll;
+            $lineTotal = $qtyRolls * ($deliveryPricePerRoll > 0 ? $deliveryPricePerRoll : $pricePerRoll);
             $totalAmount += $lineTotal;
             $addedAny = true;
 
@@ -540,6 +558,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 $rollLength,
                 $quantityM,
                 $pricePerRoll,
+                $deliveryPricePerRoll,
                 $lineTotal
             ));
 
@@ -557,8 +576,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                     'movement_type' => 'receipt',
                     'quantity_m' => $rollLength,
                     'quantity_rolls' => 1,
-                    'price_per_unit' => $pricePerRoll,
-                    'total' => $pricePerRoll,
+                    'price_per_unit' => ($deliveryPricePerRoll > 0 ? $deliveryPricePerRoll : $pricePerRoll),
+                    'total' => ($deliveryPricePerRoll > 0 ? $deliveryPricePerRoll : $pricePerRoll),
                     'comment' => 'Оприходование через документ #' . $docId
                 ));
             }
@@ -571,7 +590,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         $db->prepare("UPDATE stock_operation_docs SET total_amount = ? WHERE id = ?")
             ->execute(array($totalAmount, $docId));
         $db->commit();
-        $syncResult = syncOperationDocumentToBitrix($db, $docId, 'receipt', $docNumber, $commentText, $db->query("SELECT product_id, qty_rolls, quantity_m, roll_length, price_per_roll FROM stock_operation_lines WHERE doc_id=" . intval($docId))->fetchAll(PDO::FETCH_ASSOC));
+        $syncResult = syncOperationDocumentToBitrix($db, $docId, 'receipt', $docNumber, $commentText, $db->query("SELECT product_id, qty_rolls, quantity_m, roll_length, price_per_roll, delivery_price_per_roll FROM stock_operation_lines WHERE doc_id=" . intval($docId))->fetchAll(PDO::FETCH_ASSOC));
         $syncStatus = resolveB24SyncStatus($syncResult);
         $db->prepare("UPDATE stock_operation_docs SET b24_document_id = ?, b24_sync_status = ?, b24_sync_response = ? WHERE id = ?")
             ->execute(array(
@@ -671,7 +690,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         }
 
         $db->commit();
-        $syncResult = syncOperationDocumentToBitrix($db, $docId, 'writeoff', $docNumber, $commentText, $db->query("SELECT product_id, qty_rolls, quantity_m, roll_length, price_per_roll FROM stock_operation_lines WHERE doc_id=" . intval($docId))->fetchAll(PDO::FETCH_ASSOC));
+        $syncResult = syncOperationDocumentToBitrix($db, $docId, 'writeoff', $docNumber, $commentText, $db->query("SELECT product_id, qty_rolls, quantity_m, roll_length, price_per_roll, delivery_price_per_roll FROM stock_operation_lines WHERE doc_id=" . intval($docId))->fetchAll(PDO::FETCH_ASSOC));
         $syncStatus = resolveB24SyncStatus($syncResult);
         $db->prepare("UPDATE stock_operation_docs SET b24_document_id = ?, b24_sync_status = ?, b24_sync_response = ? WHERE id = ?")
             ->execute(array(
@@ -702,7 +721,7 @@ $writeoffToken = ensureFormToken('create_writeoff');
 $deleteToken = ensureFormToken('delete_doc');
 $retryToken = ensureFormToken('retry_b24_sync');
 
-$products = $db->query("SELECT id, name, roll_length, purchase_price FROM products ORDER BY name ASC")->fetchAll(PDO::FETCH_ASSOC);
+$products = $db->query("SELECT id, name, roll_length, purchase_price, delivery_price FROM products ORDER BY name ASC")->fetchAll(PDO::FETCH_ASSOC);
 $stockProducts = $db->query("
     SELECT
         p.id,
@@ -771,6 +790,7 @@ require 'includes/header.php';
                         <th>Рулонов</th>
                         <th>Длина рулона (м)</th>
                         <th>Закупка за рулон</th>
+                        <th>С доставкой за рулон</th>
                         <th></th>
                     </tr>
                 </thead>
@@ -780,7 +800,7 @@ require 'includes/header.php';
                             <select name="line_product_id[]">
                                 <option value="0">-- Новый товар --</option>
                                 <?php foreach ($products as $p): ?>
-                                    <option value="<?= intval($p['id']) ?>" data-roll-length="<?= htmlspecialchars((string)$p['roll_length']) ?>" data-price="<?= htmlspecialchars((string)$p['purchase_price']) ?>">
+                                    <option value="<?= intval($p['id']) ?>" data-roll-length="<?= htmlspecialchars((string)$p['roll_length']) ?>" data-price="<?= htmlspecialchars((string)$p['purchase_price']) ?>" data-delivery-price="<?= htmlspecialchars((string)$p['delivery_price']) ?>">
                                         <?= htmlspecialchars($p['name']) ?>
                                     </option>
                                 <?php endforeach; ?>
@@ -790,6 +810,7 @@ require 'includes/header.php';
                         <td><input type="number" name="line_qty_rolls[]" min="1" value="1"></td>
                         <td><input type="number" name="line_roll_length[]" min="0.1" step="0.1" value="30"></td>
                         <td><input type="number" name="line_price_per_roll[]" min="0" step="0.01" value="0"></td>
+                        <td><input type="number" name="line_delivery_price_per_roll[]" min="0" step="0.01" value="0"></td>
                         <td><button type="button" class="btn btn-danger btn-sm remove-line">×</button></td>
                     </tr>
                 </tbody>
@@ -946,6 +967,7 @@ require 'includes/header.php';
         var select = row.querySelector('select[name="line_product_id[]"]');
         var lenInput = row.querySelector('input[name="line_roll_length[]"]');
         var priceInput = row.querySelector('input[name="line_price_per_roll[]"]');
+        var deliveryPriceInput = row.querySelector('input[name="line_delivery_price_per_roll[]"]');
         var removeBtn = row.querySelector('.remove-line');
 
         if (select) {
@@ -959,6 +981,9 @@ require 'includes/header.php';
                 }
                 if (priceInput && opt.getAttribute('data-price')) {
                     priceInput.value = opt.getAttribute('data-price');
+                }
+                if (deliveryPriceInput && opt.getAttribute('data-delivery-price')) {
+                    deliveryPriceInput.value = opt.getAttribute('data-delivery-price');
                 }
             });
         }
@@ -988,6 +1013,8 @@ require 'includes/header.php';
             } else if (inputs[i].name === 'line_roll_length[]') {
                 inputs[i].value = '30';
             } else if (inputs[i].name === 'line_price_per_roll[]') {
+                inputs[i].value = '0';
+            } else if (inputs[i].name === 'line_delivery_price_per_roll[]') {
                 inputs[i].value = '0';
             } else {
                 inputs[i].value = '';

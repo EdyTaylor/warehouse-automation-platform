@@ -17,6 +17,12 @@ function hasColumn($db, $table, $column) {
     }
 }
 
+function ensureColumnExists($db, $table, $column, $columnSql) {
+    if (!hasColumn($db, $table, $column)) {
+        $db->exec("ALTER TABLE `$table` ADD COLUMN {$columnSql}");
+    }
+}
+
 function getBrandFromProductName($name) {
     $name = trim((string)$name);
     if ($name === '') {
@@ -36,6 +42,18 @@ function normalizeNumber($value) {
     $value = str_replace(',', '.', $value);
     return $value === '' ? 0 : $value;
 }
+
+function calculateMeterPriceFromRoll($rollLength, $deliveryPrice, $fallbackMeterPrice) {
+    $rollLength = floatval(normalizeNumber($rollLength));
+    $deliveryPrice = floatval(normalizeNumber($deliveryPrice));
+    $fallbackMeterPrice = floatval(normalizeNumber($fallbackMeterPrice));
+    if ($rollLength > 0 && $deliveryPrice > 0) {
+        return $deliveryPrice / $rollLength;
+    }
+    return $fallbackMeterPrice;
+}
+
+ensureColumnExists($db, 'products', 'delivery_price', '`delivery_price` decimal(14,2) NOT NULL DEFAULT 0');
 
 function syncProductPriceToB24($db, $productId) {
     $stmt = $db->prepare("
@@ -141,6 +159,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if (!empty($_POST['id'])) {
+        $calculatedMeterPrice = calculateMeterPriceFromRoll(
+            isset($_POST['roll_length']) ? $_POST['roll_length'] : 0,
+            isset($_POST['delivery_price']) ? $_POST['delivery_price'] : 0,
+            isset($_POST['price_per_meter']) ? $_POST['price_per_meter'] : 0
+        );
         $stmt = $db->prepare("
             UPDATE products SET
                 name = ?,
@@ -158,7 +181,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $stmt->execute(array(
             $_POST['name'],
             $_POST['roll_length'],
-            normalizeNumber($_POST['price_per_meter']),
+            $calculatedMeterPrice,
             normalizeNumber($_POST['purchase_price']),
             normalizeNumber($_POST['delivery_price']),
             normalizeNumber($_POST['price_1_4']),
@@ -173,6 +196,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         header("Location: products.php?sync_msg=" . urlencode("Товар обновлен" . $syncTail));
         exit;
     } else {
+        $calculatedMeterPrice = calculateMeterPriceFromRoll(
+            isset($_POST['roll_length']) ? $_POST['roll_length'] : 0,
+            isset($_POST['delivery_price']) ? $_POST['delivery_price'] : 0,
+            isset($_POST['price_per_meter']) ? $_POST['price_per_meter'] : 0
+        );
         $stmt = $db->prepare("
             INSERT INTO products
             (name, roll_length, price_per_meter, purchase_price, delivery_price, price_1_4, price_5_9, price_10_19, price_20_plus)
@@ -182,7 +210,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $stmt->execute(array(
             $_POST['name'],
             $_POST['roll_length'],
-            normalizeNumber($_POST['price_per_meter']),
+            $calculatedMeterPrice,
             normalizeNumber($_POST['purchase_price']),
             normalizeNumber($_POST['delivery_price']),
             normalizeNumber($_POST['price_1_4']),
@@ -228,7 +256,7 @@ require 'includes/header.php';
 
     <input name="price_per_meter" placeholder="Цена за метр" value="<?php echo isset($editProduct['price_per_meter']) ? $editProduct['price_per_meter'] : ''; ?>"><br>
     <input name="purchase_price" placeholder="Себестоимость (KGS)" value="<?php echo isset($editProduct['purchase_price']) ? $editProduct['purchase_price'] : ''; ?>"><br>
-    <input name="delivery_price" placeholder="С доставкой" value="<?php echo isset($editProduct['delivery_price']) ? $editProduct['delivery_price'] : ''; ?>"><br><br>
+    <input name="delivery_price" placeholder="С доставкой за рулон (KGS)" value="<?php echo isset($editProduct['delivery_price']) ? $editProduct['delivery_price'] : ''; ?>"><br><br>
 
     <b>Цены:</b><br>
     <input name="price_1_4" placeholder="1-4" value="<?php echo isset($editProduct['price_1_4']) ? $editProduct['price_1_4'] : ''; ?>"><br>
