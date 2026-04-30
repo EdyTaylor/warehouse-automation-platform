@@ -356,6 +356,46 @@ function processPriceSyncChunk($db, $offset, $limit) {
     );
 }
 
+function fetchB24ProductSnapshot($b24ProductId) {
+    $b24ProductId = intval($b24ProductId);
+    if ($b24ProductId <= 0) {
+        return array('ok' => false, 'error' => 'invalid_b24_product_id');
+    }
+
+    $crmResp = sendToBitrix('crm.product.get', array('id' => $b24ProductId));
+    $catalogResp = sendToBitrix('catalog.product.get', array('id' => $b24ProductId));
+
+    $crmRow = null;
+    if (is_array($crmResp) && !isset($crmResp['error']) && isset($crmResp['result']) && is_array($crmResp['result'])) {
+        $crmRow = $crmResp['result'];
+    }
+    $catalogRow = null;
+    if (is_array($catalogResp) && !isset($catalogResp['error']) && isset($catalogResp['result']) && is_array($catalogResp['result'])) {
+        $catalogRow = $catalogResp['result'];
+    }
+
+    $price = null;
+    $purchasePrice = null;
+    if ($crmRow !== null && isset($crmRow['PRICE']) && $crmRow['PRICE'] !== '') {
+        $price = floatval($crmRow['PRICE']);
+    } elseif ($catalogRow !== null && isset($catalogRow['price']) && $catalogRow['price'] !== '') {
+        $price = floatval($catalogRow['price']);
+    }
+    if ($crmRow !== null && isset($crmRow['PURCHASING_PRICE']) && $crmRow['PURCHASING_PRICE'] !== '') {
+        $purchasePrice = floatval($crmRow['PURCHASING_PRICE']);
+    } elseif ($catalogRow !== null && isset($catalogRow['purchasingPrice']) && $catalogRow['purchasingPrice'] !== '') {
+        $purchasePrice = floatval($catalogRow['purchasingPrice']);
+    }
+
+    return array(
+        'ok' => ($crmRow !== null || $catalogRow !== null),
+        'price' => $price,
+        'purchase_price' => $purchasePrice,
+        'crm_raw' => $crmResp,
+        'catalog_raw' => $catalogResp
+    );
+}
+
 function runCreateMissingProductsInB24($db, $limit) {
     $limit = intval($limit);
     if ($limit <= 0) {
@@ -458,7 +498,31 @@ function syncProductPriceToB24($db, $productId) {
         $catalogOk = is_array($catalogResp) && !isset($catalogResp['error']);
     }
 
+    $verifyNeedsPrice = $retailPrice > 0;
+    $verifyNeedsPurchase = $purchasePrice > 0;
+    $verified = false;
+    $verifyError = '';
     if ($crmOk || $catalogOk) {
+        $snapshot = fetchB24ProductSnapshot($b24Id);
+        if ($snapshot['ok']) {
+            $priceMatches = !$verifyNeedsPrice;
+            $purchaseMatches = !$verifyNeedsPurchase;
+            if ($verifyNeedsPrice && $snapshot['price'] !== null) {
+                $priceMatches = abs(floatval($snapshot['price']) - $retailPrice) < 0.01;
+            }
+            if ($verifyNeedsPurchase && $snapshot['purchase_price'] !== null) {
+                $purchaseMatches = abs(floatval($snapshot['purchase_price']) - $purchasePrice) < 0.01;
+            }
+            $verified = ($priceMatches && $purchaseMatches);
+            if (!$verified) {
+                $verifyError = 'Проверка после обновления: в Б24 значения не совпали';
+            }
+        } else {
+            $verifyError = 'Не удалось прочитать товар в Б24 после обновления';
+        }
+    }
+
+    if (($crmOk || $catalogOk) && $verified) {
         updateProductSyncState($db, $productId, 'sent', null, $attemptAt);
         return array('ok' => true, 'message' => 'Обновлено в Б24');
     }
@@ -480,6 +544,9 @@ function syncProductPriceToB24($db, $productId) {
         }
     }
     $err = $crmErr . ' | ' . $catalogErr;
+    if ($verifyError !== '') {
+        $err .= ' | ' . $verifyError;
+    }
     updateProductSyncState($db, $productId, 'error', $err, $attemptAt);
     return array('ok' => false, 'message' => $err);
 }
