@@ -236,6 +236,10 @@ function ensureB24CompanyId($supplierName) {
 }
 
 function ensureDocumentSupplierForReceipt($b24DocId, $supplierName) {
+    $supplierName = trim((string)$supplierName);
+    if ($supplierName === '') {
+        $supplierName = 'Поставщик по умолчанию';
+    }
     $companyId = ensureB24CompanyId($supplierName);
     if ($companyId <= 0) {
         return false;
@@ -303,6 +307,99 @@ function ensureDocumentSupplierForReceipt($b24DocId, $supplierName) {
     }
 
     return $bound;
+}
+
+function extractBitrixErrorText($resp) {
+    if (!is_array($resp)) {
+        return '';
+    }
+    if (isset($resp['error_description'])) {
+        return trim((string)$resp['error_description']);
+    }
+    if (isset($resp['error'])) {
+        return trim((string)$resp['error']);
+    }
+    return '';
+}
+
+function forceCreateStockCloneProduct($db, $localProductId, $currentName, $pricePerMeter) {
+    $baseName = trim((string)$currentName);
+    if ($baseName === '') {
+        $baseName = 'Товар #' . intval($localProductId);
+    }
+    $cloneName = $baseName;
+    if (stripos($cloneName, '[stock]') === false) {
+        $cloneName .= ' [stock]';
+    }
+    $fields = array(
+        'NAME' => $cloneName,
+        'TYPE' => 1
+    );
+    if (floatval($pricePerMeter) > 0) {
+        $fields['PRICE'] = floatval($pricePerMeter);
+    }
+    $createResp = sendToBitrix('crm.product.add', array('fields' => $fields));
+    $newB24Id = 0;
+    if (is_array($createResp) && !isset($createResp['error']) && isset($createResp['result'])) {
+        $newB24Id = intval($createResp['result']);
+    }
+    if ($newB24Id > 0) {
+        $db->prepare("UPDATE products SET b24_product_id = ? WHERE id = ?")
+            ->execute(array($newB24Id, intval($localProductId)));
+    }
+    return $newB24Id;
+}
+
+function parseInvalidProductIdFromConductError($text) {
+    $src = trim((string)$text);
+    if ($src === '') {
+        return 0;
+    }
+    if (preg_match('/#\s*(\d+)/u', $src, $m)) {
+        return intval($m[1]);
+    }
+    return 0;
+}
+
+function replaceInvalidElementInB24Document($db, $b24DocId, $oldB24ProductId, $newB24ProductId, $docType) {
+    $rowsResp = sendToBitrix('catalog.document.element.list', array(
+        'filter' => array('docId' => intval($b24DocId)),
+        'select' => array('id', 'elementId', 'amount')
+    ));
+    $rows = parseBitrixListRows($rowsResp);
+    if (empty($rows)) {
+        return false;
+    }
+    $storeFrom = intval(getAppSetting($db, 'default_store_from_id', '1'));
+    $storeTo = intval(getAppSetting($db, 'default_store_to_id', '1'));
+    $currency = (string)getAppSetting($db, 'default_currency', 'KGS');
+    $replaced = false;
+    foreach ($rows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        $rowId = intval(isset($row['id']) ? $row['id'] : 0);
+        $elementId = intval(isset($row['elementId']) ? $row['elementId'] : (isset($row['ELEMENT_ID']) ? $row['ELEMENT_ID'] : 0));
+        $amount = floatval(isset($row['amount']) ? $row['amount'] : (isset($row['AMOUNT']) ? $row['AMOUNT'] : 0));
+        if ($rowId <= 0 || $elementId !== intval($oldB24ProductId)) {
+            continue;
+        }
+        sendToBitrix('catalog.document.element.delete', array('id' => $rowId));
+        $fields = array(
+            'docId' => intval($b24DocId),
+            'elementId' => intval($newB24ProductId),
+            'amount' => $amount
+        );
+        if ($docType === 'receipt') {
+            $fields['storeTo'] = $storeTo;
+        } else {
+            $fields['storeFrom'] = $storeFrom;
+        }
+        $fields['currency'] = $currency;
+        sendToBitrix('catalog.document.element.add', array('fields' => $fields));
+        $replaced = true;
+    }
+    return $replaced;
 }
 
 function getB24ProductType($b24ProductId) {
@@ -396,10 +493,41 @@ function waitUntilB24DocumentConducted($db, $b24DocId) {
 }
 
 function conductAndEnsurePosted($db, $b24DocId, $docType, $supplierName) {
+    if ((string)$docType === 'receipt' && trim((string)$supplierName) === '') {
+        $supplierName = 'Поставщик по умолчанию';
+    }
     if ((string)$docType === 'receipt') {
         ensureDocumentSupplierForReceipt($b24DocId, $supplierName);
     }
     $conductResp = sendToBitrix('catalog.document.conduct', array('id' => intval($b24DocId)));
+    $conductError = extractBitrixErrorText($conductResp);
+
+    if ($conductError !== '' && stripos($conductError, 'Не указан поставщик') !== false && (string)$docType === 'receipt') {
+        ensureDocumentSupplierForReceipt($b24DocId, $supplierName);
+        $conductResp = sendToBitrix('catalog.document.conduct', array('id' => intval($b24DocId)));
+        $conductError = extractBitrixErrorText($conductResp);
+    }
+
+    if ($conductError !== '' && stripos($conductError, 'Неверный тип товара') !== false) {
+        $invalidB24Id = parseInvalidProductIdFromConductError($conductError);
+        if ($invalidB24Id > 0) {
+            $prodStmt = $db->prepare("SELECT id, name, price_per_meter FROM products WHERE b24_product_id = ? LIMIT 1");
+            $prodStmt->execute(array($invalidB24Id));
+            $localProd = $prodStmt->fetch(PDO::FETCH_ASSOC);
+            if ($localProd) {
+                $newB24Id = forceCreateStockCloneProduct(
+                    $db,
+                    intval($localProd['id']),
+                    isset($localProd['name']) ? $localProd['name'] : '',
+                    floatval(isset($localProd['price_per_meter']) ? $localProd['price_per_meter'] : 0)
+                );
+                if ($newB24Id > 0) {
+                    replaceInvalidElementInB24Document($db, $b24DocId, $invalidB24Id, $newB24Id, $docType);
+                    $conductResp = sendToBitrix('catalog.document.conduct', array('id' => intval($b24DocId)));
+                }
+            }
+        }
+    }
     if (waitUntilB24DocumentConducted($db, $b24DocId)) {
         return array(
             'ok' => true,

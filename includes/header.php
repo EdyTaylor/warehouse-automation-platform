@@ -43,7 +43,7 @@ $current_page = basename($_SERVER['PHP_SELF']);
                 <a href="warehouse_orders.php" class="nav-link <?= $current_page == 'warehouse_orders.php' ? 'active' : '' ?>">🧰 Место кладовщика</a>
                 <a href="report_day.php" class="nav-link <?= in_array($current_page, ['report_day.php','report_month.php','report_all.php']) ? 'active' : '' ?>">📊 Отчеты</a>
                 <a href="sync_monitor.php" class="nav-link <?= $current_page == 'sync_monitor.php' ? 'active' : '' ?>">⚙️ Интеграция</a>
-                <button type="button" class="btn btn-light btn-sm js-theme-toggle" onclick="window.setUiTheme(document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark')">🌓 Тема</button>
+                <button type="button" class="btn btn-light btn-sm js-theme-toggle">🌓 Тема</button>
             </nav>
         </div>
     </header>

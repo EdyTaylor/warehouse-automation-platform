@@ -879,11 +879,11 @@ require 'includes/header.php';
                         <td class="sticky-col sticky-col-actions">
                             <div class="products-row-actions">
                                 <button type="button" class="btn btn-light btn-sm inline-edit-btn">Ред.</button>
-                                <button type="button" class="btn btn-success btn-sm inline-save-btn">Сохранить</button>
-                                <button type="button" class="btn btn-light btn-sm inline-cancel-btn">Отмена</button>
-                                <button type="button" class="btn btn-warning btn-sm inline-sync-btn">Отправить в B24</button>
-                                <a class="btn btn-light btn-sm" href="<?php echo buildProductsUrl(array('edit_id' => intval($p['id']))); ?>">Форма</a>
-                                <a class="btn btn-danger btn-sm" href="products.php?delete_id=<?php echo intval($p['id']); ?>" onclick="return confirm('Удалить товар #<?php echo intval($p['id']); ?>?');">Удалить</a>
+                                <button type="button" class="btn btn-success btn-sm inline-save-btn" title="Сохранить">Сохр.</button>
+                                <button type="button" class="btn btn-light btn-sm inline-cancel-btn" title="Отмена">Отм.</button>
+                                <button type="button" class="btn btn-warning btn-sm inline-sync-btn" title="Отправить в B24">B24</button>
+                                <a class="btn btn-light btn-sm" title="Открыть форму редактирования" href="<?php echo buildProductsUrl(array('edit_id' => intval($p['id']))); ?>">Форма</a>
+                                <a class="btn btn-danger btn-sm" title="Удалить товар" href="products.php?delete_id=<?php echo intval($p['id']); ?>" onclick="return confirm('Удалить товар #<?php echo intval($p['id']); ?>?');">Удал.</a>
                             </div>
                         </td>
                     </tr>

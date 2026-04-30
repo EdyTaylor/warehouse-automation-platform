@@ -681,13 +681,16 @@ body {
 }
 
 .products-table-wrap {
-    overflow-x: auto;
+    overflow: auto;
+    max-height: calc(100vh - 220px);
 }
 
 .products-table {
     font-size: 0.82rem;
     min-width: 1400px;
     table-layout: fixed;
+    border-collapse: separate;
+    border-spacing: 0;
 }
 
 .products-table th,
@@ -699,7 +702,7 @@ body {
 
 .products-table thead th {
     position: sticky;
-    top: 0;
+    top: 96px;
     z-index: 5;
 }
 
@@ -752,26 +755,30 @@ body {
 }
 
 .products-row-actions {
-    display: grid;
-    grid-template-columns: repeat(6, minmax(56px, 1fr));
+    display: flex !important;
+    flex-wrap: nowrap !important;
+    justify-content: flex-start;
     gap: 0.2rem;
-    min-width: 396px;
+    min-width: 330px;
     align-items: center;
 }
 
 .products-row-actions .btn {
-    min-width: 56px;
-    width: 100%;
-    padding: 0.14rem 0.2rem;
+    min-width: 52px;
+    max-width: 60px;
+    width: 56px;
+    padding: 0.14rem 0.16rem;
     font-size: 0.69rem;
     line-height: 1.05;
     white-space: nowrap;
     text-align: center;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .products-table .sticky-col-price {
     position: sticky;
-    right: 396px !important;
+    right: 330px !important;
     background: var(--card-background);
     z-index: 4;
 }
@@ -781,8 +788,8 @@ body {
     right: 0 !important;
     background: var(--card-background);
     z-index: 4;
-    width: 408px;
-    min-width: 408px;
+    width: 336px;
+    min-width: 336px;
 }
 
 .products-table thead .sticky-col-price,
@@ -811,21 +818,22 @@ body.products-compact .products-table .product-name-text {
 }
 
 body.products-compact .products-row-actions {
-    grid-template-columns: repeat(6, minmax(50px, 1fr));
-    min-width: 348px;
+    min-width: 288px;
 }
 
 body.products-compact .products-table .sticky-col-price {
-    right: 348px !important;
+    right: 288px !important;
 }
 
 body.products-compact .products-table .sticky-col-actions {
-    width: 360px;
-    min-width: 360px;
+    width: 294px;
+    min-width: 294px;
 }
 
 body.products-compact .products-row-actions .btn {
-    min-width: 50px;
+    min-width: 46px;
+    max-width: 54px;
+    width: 50px;
     padding: 0.12rem 0.16rem;
     font-size: 0.66rem;
 }

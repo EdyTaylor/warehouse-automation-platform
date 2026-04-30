@@ -22,13 +22,13 @@
                 try { localStorage.setItem('ui_theme', next); } catch (_e) {}
             };
 
-            var themeButtons = document.querySelectorAll('.js-theme-toggle');
-            for (var tb = 0; tb < themeButtons.length; tb++) {
-                themeButtons[tb].addEventListener('click', function () {
-                    var current = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
-                    window.setUiTheme(current === 'dark' ? 'light' : 'dark');
-                });
-            }
+            document.body.addEventListener('click', function (e) {
+                var btn = e.target.closest('.js-theme-toggle');
+                if (!btn) return;
+                e.preventDefault();
+                var current = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+                window.setUiTheme(current === 'dark' ? 'light' : 'dark');
+            });
 
             function ensureSyncModal() {
                 var existing = document.getElementById('sync-modal-overlay');
