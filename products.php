@@ -683,8 +683,18 @@ if (isset($_GET['sync_job']) && $_GET['sync_job'] === 'prices') {
         header("Location: products.php?sync_msg=" . urlencode("Отправить в Б24: обновлено {$okAcc}, ошибок {$errAcc}, всего {$total}"));
         exit;
     }
-
-    header("Location: products.php?sync_job=prices&sync_offset={$nextOffset}&sync_ok={$okAcc}&sync_err={$errAcc}");
+    $nextUrl = "products.php?sync_job=prices&sync_offset={$nextOffset}&sync_ok={$okAcc}&sync_err={$errAcc}";
+    $progressPercent = $total > 0 ? min(100, intval(round(($nextOffset / $total) * 100))) : 0;
+    header('Content-Type: text/html; charset=utf-8');
+    echo '<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>Синхронизация цен с Б24</title>';
+    echo '<meta name="viewport" content="width=device-width, initial-scale=1">';
+    echo '<style>body{font-family:Arial,sans-serif;background:#f4f6f8;margin:0;padding:24px}.box{max-width:720px;margin:0 auto;background:#fff;border:1px solid #d9e2ec;border-radius:10px;padding:20px}.bar{height:10px;background:#e2e8f0;border-radius:999px;overflow:hidden}.fill{height:100%;background:#2563eb;width:' . $progressPercent . '%}.muted{color:#64748b}</style>';
+    echo '</head><body><div class="box">';
+    echo '<h3 style="margin-top:0">Синхронизация цен с Б24...</h3>';
+    echo '<p class="muted">Обработано: <strong>' . intval($nextOffset) . '</strong> из <strong>' . intval($total) . '</strong>. Успешно: <strong>' . intval($okAcc) . '</strong>, ошибок: <strong>' . intval($errAcc) . '</strong>.</p>';
+    echo '<div class="bar"><div class="fill"></div></div>';
+    echo '<p class="muted" style="margin-bottom:0;margin-top:14px">Страница обновится автоматически. Не закрывайте вкладку.</p>';
+    echo '</div><script>setTimeout(function(){ window.location.href = ' . json_encode($nextUrl) . '; }, 120);</script></body></html>';
     exit;
 }
 
