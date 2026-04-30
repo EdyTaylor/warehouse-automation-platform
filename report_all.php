@@ -4,6 +4,23 @@ error_reporting(E_ALL);
 
 require 'db.php';
 $db = getDB();
+
+function ensureReportFinanceColumns($db) {
+    $cols = array(
+        'cost_fact' => "`cost_fact` decimal(14,2) NOT NULL DEFAULT 0",
+        'gross_profit' => "`gross_profit` decimal(14,2) NOT NULL DEFAULT 0",
+        'gross_margin_percent' => "`gross_margin_percent` decimal(8,2) NOT NULL DEFAULT 0"
+    );
+    foreach ($cols as $name => $sql) {
+        $stmt = $db->prepare("SHOW COLUMNS FROM `sales` LIKE ?");
+        $stmt->execute(array($name));
+        if (!$stmt->fetch(PDO::FETCH_ASSOC)) {
+            $db->exec("ALTER TABLE `sales` ADD COLUMN {$sql}");
+        }
+    }
+}
+
+ensureReportFinanceColumns($db);
 $page_title = 'Отчет за все время';
 require 'includes/header.php';
 ?>
