@@ -11,6 +11,49 @@ require_once __DIR__ . '/../../functions/app_settings.php';
 $db = getDB();
 $cfg = require __DIR__ . '/config.php';
 
+function b24ExtractListRows($resp) {
+    if (!is_array($resp) || isset($resp['error']) || !isset($resp['result'])) {
+        return array();
+    }
+    $result = $resp['result'];
+    if (isset($result['items']) && is_array($result['items'])) {
+        return $result['items'];
+    }
+    if (isset($result['storeProducts']) && is_array($result['storeProducts'])) {
+        return $result['storeProducts'];
+    }
+    if (is_array($result)) {
+        return $result;
+    }
+    return array();
+}
+
+function b24ResolveWorkingStoreId($preferredStoreId) {
+    $preferredStoreId = intval($preferredStoreId);
+    if ($preferredStoreId > 0) {
+        $probe = sendToBitrix('catalog.store.list', array(
+            'filter' => array('id' => $preferredStoreId),
+            'select' => array('id')
+        ));
+        $rows = b24ExtractListRows($probe);
+        if (!empty($rows)) {
+            return $preferredStoreId;
+        }
+    }
+
+    $list = sendToBitrix('catalog.store.list', array(
+        'select' => array('id')
+    ));
+    $rows = b24ExtractListRows($list);
+    if (!empty($rows[0]) && is_array($rows[0])) {
+        $fallbackId = intval(isset($rows[0]['id']) ? $rows[0]['id'] : (isset($rows[0]['ID']) ? $rows[0]['ID'] : 0));
+        if ($fallbackId > 0) {
+            return $fallbackId;
+        }
+    }
+    return $preferredStoreId > 0 ? $preferredStoreId : 1;
+}
+
 // By default this endpoint pushes available meters to Bitrix product field.
 $field = isset($_GET['field']) ? $_GET['field'] : $cfg['product_available_field'];
 $method = isset($_GET['method']) ? $_GET['method'] : $cfg['product_update_method'];
@@ -27,6 +70,7 @@ if ($storeId <= 0) {
 if ($storeId <= 0) {
     $storeId = 1;
 }
+$storeId = b24ResolveWorkingStoreId($storeId);
 $offset = isset($_GET['offset']) ? max(0, intval($_GET['offset'])) : 0;
 $defaultLimit = intval(getAppSetting($db, 'sync_batch_limit', '100'));
 if ($defaultLimit <= 0) {
@@ -122,11 +166,8 @@ foreach ($rows as $r) {
             ],
             'select' => ['id', 'amount', 'productId', 'storeId']
         ]);
-        if (is_array($listResp) && !isset($listResp['error']) && isset($listResp['result']) && is_array($listResp['result'])) {
-            $rowsStore = $listResp['result'];
-            if (isset($rowsStore['items']) && is_array($rowsStore['items'])) {
-                $rowsStore = $rowsStore['items'];
-            }
+        if (is_array($listResp) && !isset($listResp['error'])) {
+            $rowsStore = b24ExtractListRows($listResp);
             if (!empty($rowsStore[0]) && is_array($rowsStore[0])) {
                 $existingStoreProductId = intval(isset($rowsStore[0]['id']) ? $rowsStore[0]['id'] : 0);
             }
@@ -152,6 +193,25 @@ foreach ($rows as $r) {
         $item['bitrix_store_status'] = (is_array($storeResp) && !isset($storeResp['error'])) ? 'ok' : 'error';
         if (is_array($storeResp) && isset($storeResp['error'])) {
             $item['bitrix_store_error'] = isset($storeResp['error_description']) ? $storeResp['error_description'] : $storeResp['error'];
+            $fallbackStoreId = b24ResolveWorkingStoreId($storeId);
+            if ($fallbackStoreId > 0 && $fallbackStoreId !== $storeId) {
+                $retryResp = sendToBitrix('catalog.storeproduct.add', [
+                    'fields' => [
+                        'productId' => $b24ProductId,
+                        'storeId' => $fallbackStoreId,
+                        'amount' => $free
+                    ]
+                ]);
+                if (is_array($retryResp) && !isset($retryResp['error'])) {
+                    $item['bitrix_store_status'] = 'ok';
+                    $item['bitrix_store_retry_store_id'] = $fallbackStoreId;
+                    $item['bitrix_store_error'] = null;
+                } else {
+                    $item['bitrix_store_retry_error'] = is_array($retryResp) && isset($retryResp['error_description'])
+                        ? $retryResp['error_description']
+                        : 'retry_failed';
+                }
+            }
         }
     }
 

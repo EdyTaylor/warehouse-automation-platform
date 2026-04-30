@@ -25,6 +25,18 @@ function hasPickerColumns($db) {
     }
 }
 
+function ensurePickerFinanceSchema($db) {
+    try {
+        $stmt = $db->query("SHOW COLUMNS FROM products LIKE 'min_margin_percent'");
+        $exists = $stmt && $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$exists) {
+            $db->exec("ALTER TABLE products ADD COLUMN min_margin_percent decimal(8,2) NOT NULL DEFAULT 0");
+        }
+    } catch (Exception $e) {
+        // Keep picker page working even if schema update fails.
+    }
+}
+
 function releaseRequestReserve($db, $requestId) {
     $cutsStmt = $db->prepare("
         SELECT c.id, c.roll_id, c.meters
@@ -85,6 +97,7 @@ if (!hasPickerColumns($db)) {
     require __DIR__ . '/includes/footer.php';
     exit;
 }
+ensurePickerFinanceSchema($db);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = isset($_POST['action']) ? trim($_POST['action']) : '';
@@ -304,12 +317,55 @@ require __DIR__ . '/includes/header.php';
         $linesStmt->execute(array($requestId));
         $lines = $linesStmt->fetchAll(PDO::FETCH_ASSOC);
 
+        $lineProductIds = array();
+        foreach ($lines as $lineItem) {
+            $pid = intval(isset($lineItem['product_id']) ? $lineItem['product_id'] : 0);
+            if ($pid > 0) {
+                $lineProductIds[$pid] = $pid;
+            }
+        }
+
+        $productFinanceMap = array();
+        if (!empty($lineProductIds)) {
+            $idsSql = implode(',', array_map('intval', array_values($lineProductIds)));
+            $financeSql = "
+                SELECT
+                    p.id as product_id,
+                    p.min_margin_percent,
+                    COALESCE(AVG(CASE WHEN r.current_length > 0 THEN r.cost_per_meter END), 0) as avg_cost_per_meter
+                FROM products p
+                LEFT JOIN rolls r ON r.product_id = p.id
+                    AND r.status NOT IN ('sold','written_off','waste')
+                    AND r.current_length > 0
+                WHERE p.id IN ($idsSql)
+                GROUP BY p.id, p.min_margin_percent
+            ";
+            $financeRows = $db->query($financeSql)->fetchAll(PDO::FETCH_ASSOC);
+            foreach ($financeRows as $fr) {
+                $productFinanceMap[intval($fr['product_id'])] = array(
+                    'avg_cost_per_meter' => floatval(isset($fr['avg_cost_per_meter']) ? $fr['avg_cost_per_meter'] : 0),
+                    'min_margin_percent' => floatval(isset($fr['min_margin_percent']) ? $fr['min_margin_percent'] : 0)
+                );
+            }
+        }
+
         $problems = array();
         foreach ($lines as $line) {
             $need = floatval($line['quantity_m']);
             $allocated = floatval($line['allocated_m']);
             if ($allocated + 0.001 < $need) {
                 $problems[] = 'Недобор по товару "' . $line['product_name'] . '": нужно ' . round($need, 2) . ' м, собрано ' . round($allocated, 2) . ' м.';
+            }
+            $productId = intval(isset($line['product_id']) ? $line['product_id'] : 0);
+            $pricePerUnit = floatval(isset($line['price_per_unit']) ? $line['price_per_unit'] : 0);
+            $avgCost = isset($productFinanceMap[$productId]) ? floatval($productFinanceMap[$productId]['avg_cost_per_meter']) : 0;
+            $minMargin = isset($productFinanceMap[$productId]) ? floatval($productFinanceMap[$productId]['min_margin_percent']) : 0;
+            if ($pricePerUnit > 0 && $avgCost > 0) {
+                $marginPercent = (($pricePerUnit - $avgCost) / $pricePerUnit) * 100;
+                if ($marginPercent < $minMargin) {
+                    $problems[] = 'Маржа ниже порога по "' . $line['product_name'] . '": текущая '
+                        . round($marginPercent, 2) . '% при минимуме ' . round($minMargin, 2) . '%.';
+                }
             }
         }
 
@@ -344,16 +400,33 @@ require __DIR__ . '/includes/header.php';
                         <th>Нужно, м</th>
                         <th>Собрано, м</th>
                         <th>Цена</th>
+                        <th>Себес./м (ср.)</th>
+                        <th>Маржа</th>
                         <th>Статус строки</th>
                     </tr>
                 </thead>
                 <tbody>
                     <?php foreach ($lines as $line): ?>
+                        <?php
+                            $productId = intval(isset($line['product_id']) ? $line['product_id'] : 0);
+                            $linePrice = floatval(isset($line['price_per_unit']) ? $line['price_per_unit'] : 0);
+                            $avgCost = isset($productFinanceMap[$productId]) ? floatval($productFinanceMap[$productId]['avg_cost_per_meter']) : 0;
+                            $minMargin = isset($productFinanceMap[$productId]) ? floatval($productFinanceMap[$productId]['min_margin_percent']) : 0;
+                            $marginPercent = ($linePrice > 0 && $avgCost > 0) ? (($linePrice - $avgCost) / $linePrice) * 100 : 0;
+                            $marginWarn = ($linePrice > 0 && $avgCost > 0 && $marginPercent < $minMargin);
+                        ?>
                         <tr>
                             <td><?= h($line['product_name']) ?></td>
                             <td><?= round(floatval($line['quantity_m']), 2) ?></td>
                             <td><?= round(floatval($line['allocated_m']), 2) ?></td>
                             <td><?= round(floatval($line['price_per_unit']), 2) ?></td>
+                            <td><?= round($avgCost, 2) ?></td>
+                            <td>
+                                <?= round($marginPercent, 2) ?>%
+                                <?php if ($marginWarn): ?>
+                                    <span class="status-sold" style="margin-left:6px;">ниже порога <?= round($minMargin, 2) ?>%</span>
+                                <?php endif; ?>
+                            </td>
                             <td><?= h($line['status']) ?></td>
                         </tr>
                     <?php endforeach; ?>

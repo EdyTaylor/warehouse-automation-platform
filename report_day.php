@@ -26,7 +26,9 @@ $summaryStmt = $db->prepare("
     SELECT
         products.name,
         SUM(sales.quantity) as total_qty,
-        SUM(sales.total) as revenue
+        SUM(sales.total) as revenue,
+        SUM(COALESCE(sales.cost_fact, 0)) as cost_fact,
+        SUM(COALESCE(sales.gross_profit, 0)) as gross_profit
     FROM sales
     LEFT JOIN products ON products.id = sales.product_id
     WHERE sales.created_at BETWEEN ? AND ?
@@ -36,7 +38,10 @@ $summaryStmt->execute(array($fromStart, $toEnd));
 $data = $summaryStmt->fetchAll(PDO::FETCH_ASSOC);
 
 $totalStmt = $db->prepare("
-    SELECT SUM(total) as total_sum
+    SELECT
+        SUM(total) as total_sum,
+        SUM(COALESCE(cost_fact, 0)) as total_cost,
+        SUM(COALESCE(gross_profit, 0)) as total_profit
     FROM sales
     WHERE created_at BETWEEN ? AND ?
 ");
@@ -84,17 +89,36 @@ $details = $detailsStmt->fetchAll(PDO::FETCH_ASSOC);
                     <th>Товар</th>
                     <th>Количество</th>
                     <th>Выручка</th>
+                    <th>Себестоимость</th>
+                    <th>Валовая прибыль</th>
+                    <th>Маржа %</th>
                 </tr>
                 <?php foreach ($data as $row) { ?>
+                    <?php
+                        $rowRevenue = floatval(isset($row['revenue']) ? $row['revenue'] : 0);
+                        $rowProfit = floatval(isset($row['gross_profit']) ? $row['gross_profit'] : 0);
+                        $rowMargin = $rowRevenue > 0 ? ($rowProfit / $rowRevenue) * 100 : 0;
+                    ?>
                     <tr>
                         <td><?php echo htmlspecialchars(isset($row['name']) ? $row['name'] : ''); ?></td>
                         <td><?php echo isset($row['total_qty']) ? $row['total_qty'] : 0; ?></td>
-                        <td><?php echo isset($row['revenue']) ? $row['revenue'] : 0; ?></td>
+                        <td><?php echo number_format($rowRevenue, 2, '.', ' '); ?></td>
+                        <td><?php echo number_format(floatval(isset($row['cost_fact']) ? $row['cost_fact'] : 0), 2, '.', ' '); ?></td>
+                        <td><?php echo number_format($rowProfit, 2, '.', ' '); ?></td>
+                        <td><?php echo number_format($rowMargin, 2, '.', ' '); ?>%</td>
                     </tr>
                 <?php } ?>
             </table>
         <?php } ?>
-        <h3>Итого: <?php echo isset($total['total_sum']) ? $total['total_sum'] : 0; ?></h3>
+        <?php
+            $sumRevenue = floatval(isset($total['total_sum']) ? $total['total_sum'] : 0);
+            $sumCost = floatval(isset($total['total_cost']) ? $total['total_cost'] : 0);
+            $sumProfit = floatval(isset($total['total_profit']) ? $total['total_profit'] : 0);
+            $sumMargin = $sumRevenue > 0 ? ($sumProfit / $sumRevenue) * 100 : 0;
+        ?>
+        <h3>Итого выручка: <?php echo number_format($sumRevenue, 2, '.', ' '); ?></h3>
+        <h3>Итого себестоимость: <?php echo number_format($sumCost, 2, '.', ' '); ?></h3>
+        <h3>Итого валовая прибыль: <?php echo number_format($sumProfit, 2, '.', ' '); ?> (<?php echo number_format($sumMargin, 2, '.', ' '); ?>%)</h3>
     </div>
 
     <div class="card">
@@ -113,6 +137,9 @@ $details = $detailsStmt->fetchAll(PDO::FETCH_ASSOC);
                         <th>Количество</th>
                         <th>Цена</th>
                         <th>Сумма</th>
+                        <th>Себестоимость</th>
+                        <th>Прибыль</th>
+                        <th>Маржа %</th>
                         <th>Сделка</th>
                         <th>Менеджер</th>
                     </tr>
@@ -134,6 +161,9 @@ $details = $detailsStmt->fetchAll(PDO::FETCH_ASSOC);
                             <td><?php echo isset($d['quantity']) ? $d['quantity'] : 0; ?></td>
                             <td><?php echo isset($d['price_per_unit']) ? $d['price_per_unit'] : 0; ?></td>
                             <td><?php echo isset($d['total']) ? $d['total'] : 0; ?></td>
+                            <td><?php echo number_format(floatval(isset($d['cost_fact']) ? $d['cost_fact'] : 0), 2, '.', ' '); ?></td>
+                            <td><?php echo number_format(floatval(isset($d['gross_profit']) ? $d['gross_profit'] : 0), 2, '.', ' '); ?></td>
+                            <td><?php echo number_format(floatval(isset($d['gross_margin_percent']) ? $d['gross_margin_percent'] : 0), 2, '.', ' '); ?>%</td>
                             <td>
                                 <?php if (!empty($d['deal_id'])) { ?>
                                     <a href="<?php echo htmlspecialchars(isset($d['deal_url']) ? $d['deal_url'] : '#'); ?>" target="_blank">

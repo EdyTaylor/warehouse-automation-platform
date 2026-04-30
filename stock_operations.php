@@ -62,6 +62,11 @@ function ensureStockOperationTables($db) {
     ensureColumnExists($db, 'stock_operation_lines', 'delivery_price_per_roll_usd', '`delivery_price_per_roll_usd` decimal(14,2) NOT NULL DEFAULT 0');
     ensureColumnExists($db, 'stock_operation_lines', 'usd_to_kgs_rate', '`usd_to_kgs_rate` decimal(12,4) NOT NULL DEFAULT 90');
     ensureColumnExists($db, 'products', 'delivery_price', '`delivery_price` decimal(14,2) NOT NULL DEFAULT 0');
+    ensureColumnExists($db, 'rolls', 'receipt_doc_id', '`receipt_doc_id` int DEFAULT NULL');
+    ensureColumnExists($db, 'rolls', 'cost_per_meter', '`cost_per_meter` decimal(14,4) NOT NULL DEFAULT 0');
+    ensureColumnExists($db, 'sales', 'cost_fact', '`cost_fact` decimal(14,2) NOT NULL DEFAULT 0');
+    ensureColumnExists($db, 'sales', 'gross_profit', '`gross_profit` decimal(14,2) NOT NULL DEFAULT 0');
+    ensureColumnExists($db, 'sales', 'gross_margin_percent', '`gross_margin_percent` decimal(8,2) NOT NULL DEFAULT 0');
 }
 
 function getUsdToKgsRate($db) {
@@ -1159,6 +1164,61 @@ function consumeWriteoffMeters($db, $productId, $meters) {
     return $taken;
 }
 
+function consumeWriteoffFromRoll($db, $rollId, $meters) {
+    $rollId = intval($rollId);
+    $need = floatval($meters);
+    if ($rollId <= 0 || $need <= 0) {
+        throw new Exception('Некорректный рулон или метраж списания.');
+    }
+
+    $stmt = $db->prepare("
+        SELECT r.id, r.product_id, r.current_length, r.status, r.reserved, p.name as product_name
+        FROM rolls r
+        JOIN products p ON p.id = r.product_id
+        WHERE r.id = ?
+        LIMIT 1
+    ");
+    $stmt->execute(array($rollId));
+    $roll = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$roll) {
+        throw new Exception('Рулон не найден (ID ' . $rollId . ').');
+    }
+
+    if (intval($roll['reserved']) === 1) {
+        throw new Exception('Рулон #' . $rollId . ' зарезервирован и недоступен для списания.');
+    }
+    if (in_array((string)$roll['status'], array('sold', 'written_off', 'waste'), true)) {
+        throw new Exception('Рулон #' . $rollId . ' недоступен по статусу.');
+    }
+
+    $available = floatval($roll['current_length']);
+    if ($available <= 0) {
+        throw new Exception('Рулон #' . $rollId . ' не имеет доступного остатка.');
+    }
+    if ($need > $available + 0.0001) {
+        throw new Exception('Для рулона #' . $rollId . ' доступно только ' . round($available, 2) . ' м.');
+    }
+
+    $newLen = $available - $need;
+    if ($newLen < 0) {
+        $newLen = 0;
+    }
+    $newStatus = $newLen <= 0 ? 'written_off' : 'cut';
+
+    $db->prepare("
+        UPDATE rolls
+        SET current_length = ?, status = ?
+        WHERE id = ?
+    ")->execute(array($newLen, $newStatus, $rollId));
+
+    return array(
+        'roll_id' => $rollId,
+        'product_id' => intval($roll['product_id']),
+        'product_name' => (string)$roll['product_name'],
+        'meters' => $need
+    );
+}
+
 $successMsg = '';
 $errorMsg = '';
 ensureStockOperationTables($db);
@@ -1361,11 +1421,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             ));
 
             for ($r = 0; $r < $qtyRolls; $r++) {
+                $effectiveRollPrice = ($deliveryPricePerRoll > 0 ? $deliveryPricePerRoll : $pricePerRoll);
+                $costPerMeter = $rollLength > 0 ? ($effectiveRollPrice / $rollLength) : 0;
                 $insRoll = $db->prepare("
-                    INSERT INTO rolls (product_id, original_length, current_length, min_full_length, status)
-                    VALUES (?, ?, ?, ?, 'active')
+                    INSERT INTO rolls (product_id, original_length, current_length, min_full_length, status, receipt_doc_id, cost_per_meter)
+                    VALUES (?, ?, ?, ?, 'active', ?, ?)
                 ");
-                $insRoll->execute(array($localProductId, $rollLength, $rollLength, $minFull));
+                $insRoll->execute(array($localProductId, $rollLength, $rollLength, $minFull, $docId, $costPerMeter));
                 $rollId = intval($db->lastInsertId());
 
                 logAndSyncMovement($db, array(
@@ -1422,7 +1484,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     } else {
     $docNumber = trim(isset($_POST['writeoff_doc_number']) ? $_POST['writeoff_doc_number'] : '');
     $commentText = trim(isset($_POST['writeoff_comment_text']) ? $_POST['writeoff_comment_text'] : '');
-    $lineProductId = isset($_POST['writeoff_product_id']) && is_array($_POST['writeoff_product_id']) ? $_POST['writeoff_product_id'] : array();
+    $lineRollId = isset($_POST['writeoff_roll_id']) && is_array($_POST['writeoff_roll_id']) ? $_POST['writeoff_roll_id'] : array();
     $lineMeters = isset($_POST['writeoff_meters']) && is_array($_POST['writeoff_meters']) ? $_POST['writeoff_meters'] : array();
     $lineReason = isset($_POST['writeoff_reason']) && is_array($_POST['writeoff_reason']) ? $_POST['writeoff_reason'] : array();
 
@@ -1442,44 +1504,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         ");
 
         $addedAny = false;
-        for ($i = 0; $i < count($lineProductId); $i++) {
-            $productId = intval(isset($lineProductId[$i]) ? $lineProductId[$i] : 0);
+        for ($i = 0; $i < count($lineRollId); $i++) {
+            $rollId = intval(isset($lineRollId[$i]) ? $lineRollId[$i] : 0);
             $meters = floatval(isset($lineMeters[$i]) ? $lineMeters[$i] : 0);
             $reason = isset($lineReason[$i]) ? trim($lineReason[$i]) : '';
-            if ($productId <= 0 || $meters <= 0) {
+            if ($rollId <= 0 || $meters <= 0) {
                 continue;
             }
 
-            $pStmt = $db->prepare("SELECT id, name FROM products WHERE id = ? LIMIT 1");
-            $pStmt->execute(array($productId));
-            $product = $pStmt->fetch(PDO::FETCH_ASSOC);
-            if (!$product) {
-                throw new Exception('Товар для списания не найден (ID ' . $productId . ').');
-            }
+            $piece = consumeWriteoffFromRoll($db, $rollId, $meters);
+            $productId = intval($piece['product_id']);
+            $productName = (string)$piece['product_name'];
 
-            $taken = consumeWriteoffMeters($db, $productId, $meters);
-            foreach ($taken as $piece) {
-                logAndSyncMovement($db, array(
-                    'product_id' => $productId,
-                    'roll_id' => intval($piece['roll_id']),
-                    'movement_type' => 'writeoff',
-                    'quantity_m' => floatval($piece['meters']),
-                    'quantity_rolls' => 0,
-                    'price_per_unit' => 0,
-                    'total' => 0,
-                    'comment' => 'Списание через документ #' . $docId . ($reason !== '' ? ' | ' . $reason : '')
-                ));
-            }
+            logAndSyncMovement($db, array(
+                'product_id' => $productId,
+                'roll_id' => intval($piece['roll_id']),
+                'movement_type' => 'writeoff',
+                'quantity_m' => floatval($piece['meters']),
+                'quantity_rolls' => 0,
+                'price_per_unit' => 0,
+                'total' => 0,
+                'comment' => 'Списание через документ #' . $docId . ($reason !== '' ? ' | ' . $reason : '')
+            ));
 
             $db->prepare("
-                INSERT INTO sales (product_id, type, quantity, price_per_unit, total, deal_id, deal_url)
-                VALUES (?, 'writeoff', ?, 0, 0, NULL, NULL)
+                INSERT INTO sales (product_id, type, quantity, price_per_unit, total, deal_id, deal_url, cost_fact, gross_profit, gross_margin_percent)
+                VALUES (?, 'writeoff', ?, 0, 0, NULL, NULL, 0, 0, 0)
             ")->execute(array($productId, $meters));
 
             $insLine->execute(array(
                 $docId,
                 $productId,
-                $product['name'],
+                $productName,
                 $meters
             ));
             $addedAny = true;
@@ -1538,6 +1594,20 @@ $stockProducts = $db->query("
     GROUP BY p.id, p.name
     HAVING SUM(r.current_length) > 0
     ORDER BY p.name ASC
+")->fetchAll(PDO::FETCH_ASSOC);
+$stockRolls = $db->query("
+    SELECT
+        r.id,
+        r.product_id,
+        p.name as product_name,
+        r.current_length,
+        r.status
+    FROM rolls r
+    JOIN products p ON p.id = r.product_id
+    WHERE r.status NOT IN ('sold', 'written_off', 'waste')
+      AND r.current_length > 0
+      AND r.reserved = 0
+    ORDER BY p.name ASC, r.current_length ASC, r.id ASC
 ")->fetchAll(PDO::FETCH_ASSOC);
 $recentDocs = $db->query("
     SELECT id, operation_type, doc_number, supplier, total_amount, status, created_at, b24_document_id, b24_sync_status, b24_sync_response
@@ -1654,7 +1724,7 @@ require 'includes/header.php';
             <table class="table" id="writeoff-lines">
                 <thead>
                     <tr>
-                        <th>Товар</th>
+                        <th>Рулон</th>
                         <th>К списанию (м)</th>
                         <th>Причина</th>
                         <th></th>
@@ -1663,11 +1733,16 @@ require 'includes/header.php';
                 <tbody>
                     <tr>
                         <td>
-                            <select name="writeoff_product_id[]">
-                                <option value="0">-- Выберите товар --</option>
-                                <?php foreach ($stockProducts as $p): ?>
-                                    <option value="<?= intval($p['id']) ?>">
-                                        <?= htmlspecialchars($p['name']) ?> (доступно: <?= number_format(floatval($p['free_meters']), 2, '.', ' ') ?> м)
+                            <input type="text" class="writeoff-roll-search" placeholder="Поиск: товар / рулон / метраж">
+                            <select name="writeoff_roll_id[]" class="writeoff-roll-select">
+                                <option value="0">-- Выберите рулон --</option>
+                                <?php foreach ($stockRolls as $roll): ?>
+                                    <option
+                                        value="<?= intval($roll['id']) ?>"
+                                        data-length="<?= htmlspecialchars(number_format(floatval($roll['current_length']), 2, '.', '')) ?>"
+                                        data-label="<?= htmlspecialchars(strtolower((string)$roll['product_name'] . ' #' . intval($roll['id']) . ' ' . number_format(floatval($roll['current_length']), 2, '.', ' ') . ' м')) ?>"
+                                    >
+                                        #<?= intval($roll['id']) ?> | <?= htmlspecialchars($roll['product_name']) ?> | остаток: <?= number_format(floatval($roll['current_length']), 2, '.', ' ') ?> м
                                     </option>
                                 <?php endforeach; ?>
                             </select>
@@ -1879,6 +1954,7 @@ require 'includes/header.php';
             select.value = '0';
         }
         bindRow(newRow);
+        bindSearch(newRow);
         tableBody.appendChild(newRow);
     });
 })();
@@ -1910,9 +1986,13 @@ require 'includes/header.php';
             return;
         }
         var newRow = lastRow.cloneNode(true);
-        var select = newRow.querySelector('select[name="writeoff_product_id[]"]');
+        var select = newRow.querySelector('select[name="writeoff_roll_id[]"]');
         if (select) {
             select.value = '0';
+            var optionList = select.querySelectorAll('option');
+            for (var j = 0; j < optionList.length; j++) {
+                optionList[j].hidden = false;
+            }
         }
         var inputs = newRow.querySelectorAll('input');
         for (var i = 0; i < inputs.length; i++) {
@@ -1925,6 +2005,48 @@ require 'includes/header.php';
         bindRow(newRow);
         tableBody.appendChild(newRow);
     });
+
+    var bindSearch = function (row) {
+        var searchInput = row.querySelector('.writeoff-roll-search');
+        var select = row.querySelector('.writeoff-roll-select');
+        var metersInput = row.querySelector('input[name="writeoff_meters[]"]');
+        if (!searchInput || !select) {
+            return;
+        }
+
+        searchInput.addEventListener('input', function () {
+            var term = (searchInput.value || '').toLowerCase().trim();
+            var options = select.querySelectorAll('option');
+            for (var i = 0; i < options.length; i++) {
+                var opt = options[i];
+                if (opt.value === '0') {
+                    opt.hidden = false;
+                    continue;
+                }
+                var label = (opt.getAttribute('data-label') || '').toLowerCase();
+                opt.hidden = term !== '' && label.indexOf(term) === -1;
+            }
+        });
+
+        select.addEventListener('change', function () {
+            var selected = select.options[select.selectedIndex];
+            if (!selected || !metersInput) {
+                return;
+            }
+            var lengthValue = parseFloat(selected.getAttribute('data-length') || '0');
+            if (lengthValue > 0) {
+                metersInput.max = String(lengthValue);
+                if (parseFloat(metersInput.value || '0') > lengthValue) {
+                    metersInput.value = String(lengthValue);
+                }
+            }
+        });
+    };
+
+    var allRows = tableBody.querySelectorAll('tr');
+    for (var r = 0; r < allRows.length; r++) {
+        bindSearch(allRows[r]);
+    }
 })();
 
 (function () {

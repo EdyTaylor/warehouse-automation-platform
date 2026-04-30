@@ -173,6 +173,43 @@ try {
     $rollsCount = 0;
 }
 
+$monthFrom = date('Y-m-01 00:00:00');
+$monthTo = date('Y-m-t 23:59:59');
+$financeSummary = array('revenue' => 0, 'cost' => 0, 'profit' => 0);
+$financeByProduct = array();
+try {
+    $financeStmt = $db->prepare("
+        SELECT
+            SUM(total) as revenue,
+            SUM(COALESCE(cost_fact,0)) as cost,
+            SUM(COALESCE(gross_profit,0)) as profit
+        FROM sales
+        WHERE created_at BETWEEN ? AND ?
+    ");
+    $financeStmt->execute(array($monthFrom, $monthTo));
+    $financeSummary = $financeStmt->fetch(PDO::FETCH_ASSOC);
+
+    $financeProductStmt = $db->prepare("
+        SELECT
+            p.name,
+            SUM(s.total) as revenue,
+            SUM(COALESCE(s.cost_fact,0)) as cost,
+            SUM(COALESCE(s.gross_profit,0)) as profit,
+            SUM(s.quantity) as qty
+        FROM sales s
+        LEFT JOIN products p ON p.id = s.product_id
+        WHERE s.created_at BETWEEN ? AND ?
+        GROUP BY s.product_id, p.name
+        ORDER BY profit DESC
+        LIMIT 15
+    ");
+    $financeProductStmt->execute(array($monthFrom, $monthTo));
+    $financeByProduct = $financeProductStmt->fetchAll(PDO::FETCH_ASSOC);
+} catch (Exception $e) {
+    $financeSummary = array('revenue' => 0, 'cost' => 0, 'profit' => 0);
+    $financeByProduct = array();
+}
+
 $productsForReceipt = $db->query("SELECT id, name, roll_length, purchase_price FROM products ORDER BY name ASC")->fetchAll(PDO::FETCH_ASSOC);
 $usdRateValue = floatval(getAppSetting($db, 'usd_rate', '500'));
  
@@ -204,6 +241,70 @@ require 'includes/header.php';
                     <div class="stat-number">✅</div>
                     <div>Система работает</div>
                 </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>💼 Дашборд руководителя (текущий месяц)</h3>
+            <?php
+                $sumRevenue = floatval(isset($financeSummary['revenue']) ? $financeSummary['revenue'] : 0);
+                $sumCost = floatval(isset($financeSummary['cost']) ? $financeSummary['cost'] : 0);
+                $sumProfit = floatval(isset($financeSummary['profit']) ? $financeSummary['profit'] : 0);
+                $sumMargin = $sumRevenue > 0 ? ($sumProfit / $sumRevenue) * 100 : 0;
+            ?>
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-number"><?= number_format($sumRevenue, 0, '.', ' ') ?></div>
+                    <div>Выручка, KGS</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number"><?= number_format($sumCost, 0, '.', ' ') ?></div>
+                    <div>Себестоимость, KGS</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number"><?= number_format($sumProfit, 0, '.', ' ') ?></div>
+                    <div>Валовая прибыль, KGS</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number"><?= number_format($sumMargin, 2, '.', ' ') ?>%</div>
+                    <div>Маржа</div>
+                </div>
+            </div>
+
+            <h4>Топ товаров по прибыли (таблица)</h4>
+            <?php if (empty($financeByProduct)): ?>
+                <p>Пока нет продаж за текущий месяц.</p>
+            <?php else: ?>
+                <table class="table">
+                    <tr>
+                        <th>Товар</th>
+                        <th>Кол-во</th>
+                        <th>Выручка</th>
+                        <th>Себестоимость</th>
+                        <th>Прибыль</th>
+                        <th>Маржа %</th>
+                    </tr>
+                    <?php foreach ($financeByProduct as $fp): ?>
+                        <?php
+                            $pRevenue = floatval(isset($fp['revenue']) ? $fp['revenue'] : 0);
+                            $pProfit = floatval(isset($fp['profit']) ? $fp['profit'] : 0);
+                            $pMargin = $pRevenue > 0 ? ($pProfit / $pRevenue) * 100 : 0;
+                        ?>
+                        <tr>
+                            <td><?= htmlspecialchars(isset($fp['name']) ? $fp['name'] : '') ?></td>
+                            <td><?= number_format(floatval(isset($fp['qty']) ? $fp['qty'] : 0), 2, '.', ' ') ?></td>
+                            <td><?= number_format($pRevenue, 2, '.', ' ') ?></td>
+                            <td><?= number_format(floatval(isset($fp['cost']) ? $fp['cost'] : 0), 2, '.', ' ') ?></td>
+                            <td><?= number_format($pProfit, 2, '.', ' ') ?></td>
+                            <td><?= number_format($pMargin, 2, '.', ' ') ?>%</td>
+                        </tr>
+                    <?php endforeach; ?>
+                </table>
+            <?php endif; ?>
+            <div style="display:flex;gap:10px;flex-wrap:wrap;">
+                <a href="report_day.php" class="btn btn-light">Отчет за период</a>
+                <a href="report_month.php" class="btn btn-light">Отчет за месяц</a>
+                <a href="report_all.php" class="btn btn-light">Отчет за всё время</a>
             </div>
         </div>
 

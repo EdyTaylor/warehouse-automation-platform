@@ -10,6 +10,47 @@ function getBitrixStockConfig() {
     return $config;
 }
 
+function b24ExtractListRowsLocal($resp) {
+    if (!is_array($resp) || isset($resp['error']) || !isset($resp['result'])) {
+        return array();
+    }
+    $result = $resp['result'];
+    if (isset($result['items']) && is_array($result['items'])) {
+        return $result['items'];
+    }
+    if (isset($result['storeProducts']) && is_array($result['storeProducts'])) {
+        return $result['storeProducts'];
+    }
+    if (is_array($result)) {
+        return $result;
+    }
+    return array();
+}
+
+function b24ResolveWorkingStoreIdLocal($preferredStoreId) {
+    $preferredStoreId = intval($preferredStoreId);
+    if ($preferredStoreId > 0) {
+        $probe = sendToBitrix('catalog.store.list', [
+            'filter' => ['id' => $preferredStoreId],
+            'select' => ['id']
+        ]);
+        $rows = b24ExtractListRowsLocal($probe);
+        if (!empty($rows)) {
+            return $preferredStoreId;
+        }
+    }
+
+    $resp = sendToBitrix('catalog.store.list', ['select' => ['id']]);
+    $rows = b24ExtractListRowsLocal($resp);
+    if (!empty($rows[0]) && is_array($rows[0])) {
+        $id = intval(isset($rows[0]['id']) ? $rows[0]['id'] : (isset($rows[0]['ID']) ? $rows[0]['ID'] : 0));
+        if ($id > 0) {
+            return $id;
+        }
+    }
+    return $preferredStoreId > 0 ? $preferredStoreId : 1;
+}
+
 function getFreeMetersByProduct($db, $productId) {
     $stmt = $db->prepare("
         SELECT COALESCE(SUM(
@@ -114,6 +155,7 @@ function syncProductAvailableToBitrix($db, $productId) {
             $storeId = $storeFrom > 0 ? $storeFrom : ($storeTo > 0 ? $storeTo : 1);
         }
     }
+    $storeId = b24ResolveWorkingStoreIdLocal($storeId);
 
     $payload = [
         'id' => $b24ProductId,
@@ -135,11 +177,8 @@ function syncProductAvailableToBitrix($db, $productId) {
             ],
             'select' => ['id', 'amount', 'productId', 'storeId']
         ]);
-        if (is_array($listResp) && !isset($listResp['error']) && isset($listResp['result']) && is_array($listResp['result'])) {
-            $rows = $listResp['result'];
-            if (isset($rows['items']) && is_array($rows['items'])) {
-                $rows = $rows['items'];
-            }
+        if (is_array($listResp) && !isset($listResp['error'])) {
+            $rows = b24ExtractListRowsLocal($listResp);
             if (!empty($rows[0]) && is_array($rows[0])) {
                 $existingStoreProductId = intval(isset($rows[0]['id']) ? $rows[0]['id'] : 0);
             }
