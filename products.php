@@ -469,7 +469,7 @@ function fetchB24RetailPrice($b24ProductId) {
         return array('ok' => false, 'price' => null, 'raw' => $resp);
     }
 
-    $rows = $resp['result'];
+    $rows = array_values($resp['result']);
     if (empty($rows)) {
         return array('ok' => true, 'price' => null, 'raw' => $resp);
     }
@@ -483,7 +483,12 @@ function fetchB24RetailPrice($b24ProductId) {
         }
     }
     if ($selected === null) {
-        $selected = $rows[0];
+        $firstRow = reset($rows);
+        if (is_array($firstRow)) {
+            $selected = $firstRow;
+        } else {
+            return array('ok' => false, 'price' => null, 'raw' => $resp);
+        }
     }
 
     $price = null;
