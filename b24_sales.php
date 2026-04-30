@@ -5,6 +5,7 @@ header('Content-Type: text/html; charset=utf-8');
 
 require __DIR__ . '/db.php';
 require_once __DIR__ . '/functions/stock_movements.php';
+require_once __DIR__ . '/functions/app_settings.php';
 require_once __DIR__ . '/api/bitrix/send.php';
 
 $db = getDB();
@@ -51,6 +52,99 @@ function ensureDealRowsSyncSchema($db) {
             KEY idx_b24_integration_errors_request (request_id, created_at)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     ");
+}
+
+function ensureSyncConflictSchema($db) {
+    $db->exec("
+        CREATE TABLE IF NOT EXISTS b24_sync_conflicts (
+            id int NOT NULL AUTO_INCREMENT,
+            conflict_type varchar(50) NOT NULL,
+            b24_product_id int DEFAULT NULL,
+            local_product_id int DEFAULT NULL,
+            local_value decimal(14,2) DEFAULT NULL,
+            b24_value decimal(14,2) DEFAULT NULL,
+            details text,
+            status varchar(20) NOT NULL DEFAULT 'new',
+            created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            KEY idx_conflict_status (status, created_at),
+            KEY idx_conflict_product (b24_product_id, local_product_id, status)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ");
+}
+
+function resolveConflictStatus($db, $conflictId, $status, $detailsSuffix) {
+    $db->prepare("
+        UPDATE b24_sync_conflicts
+        SET status = ?, details = CONCAT(COALESCE(details,''), ?), updated_at = NOW()
+        WHERE id = ?
+    ")->execute([$status, $detailsSuffix, $conflictId]);
+}
+
+function addMetersToLocalStock($db, $productId, $meters, $comment) {
+    $productStmt = $db->prepare("SELECT id, roll_length, purchase_price FROM products WHERE id = ? LIMIT 1");
+    $productStmt->execute([$productId]);
+    $product = $productStmt->fetch(PDO::FETCH_ASSOC);
+    if (!$product) {
+        throw new Exception('Товар для пополнения склада не найден.');
+    }
+
+    $rollLength = floatval(isset($product['roll_length']) ? $product['roll_length'] : 0);
+    $purchasePrice = floatval(isset($product['purchase_price']) ? $product['purchase_price'] : 0);
+    if ($rollLength <= 0) {
+        throw new Exception('У товара не задана длина рулона.');
+    }
+
+    $toAdd = max(0, floatval($meters));
+    if ($toAdd <= 0) {
+        return 0;
+    }
+
+    $minFull = 0.5;
+    $addedMeters = 0.0;
+    $fullRolls = intval(floor($toAdd / $rollLength));
+    $remainder = round($toAdd - ($fullRolls * $rollLength), 2);
+
+    for ($i = 0; $i < $fullRolls; $i++) {
+        $db->prepare("
+            INSERT INTO rolls (product_id, original_length, current_length, min_full_length, status)
+            VALUES (?, ?, ?, ?, 'active')
+        ")->execute([$productId, $rollLength, $rollLength, $minFull]);
+        $rollId = intval($db->lastInsertId());
+        logAndSyncMovement($db, [
+            'product_id' => $productId,
+            'roll_id' => $rollId,
+            'movement_type' => 'receipt',
+            'quantity_m' => $rollLength,
+            'quantity_rolls' => 1,
+            'price_per_unit' => $purchasePrice,
+            'total' => $purchasePrice,
+            'comment' => $comment
+        ]);
+        $addedMeters += $rollLength;
+    }
+
+    if ($remainder > 0.01) {
+        $db->prepare("
+            INSERT INTO rolls (product_id, original_length, current_length, min_full_length, status)
+            VALUES (?, ?, ?, ?, 'cut')
+        ")->execute([$productId, $rollLength, $remainder, $minFull]);
+        $rollId = intval($db->lastInsertId());
+        logAndSyncMovement($db, [
+            'product_id' => $productId,
+            'roll_id' => $rollId,
+            'movement_type' => 'receipt',
+            'quantity_m' => $remainder,
+            'quantity_rolls' => 1,
+            'price_per_unit' => $purchasePrice,
+            'total' => 0,
+            'comment' => $comment . ' (частичный рулон)'
+        ]);
+        $addedMeters += $remainder;
+    }
+
+    return round($addedMeters, 2);
 }
 
 function logDealRowsSyncError($db, $requestId, $dealId, $stage, $response, $payload) {
@@ -309,9 +403,68 @@ try {
     exit;
 }
 ensureDealRowsSyncSchema($db);
+ensureSyncConflictSchema($db);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = isset($_POST['action']) ? $_POST['action'] : '';
+
+    if ($action === 'resolve_stock_conflict') {
+        $conflictId = intval(isset($_POST['conflict_id']) ? $_POST['conflict_id'] : 0);
+        $mode = isset($_POST['mode']) ? trim($_POST['mode']) : '';
+        if ($conflictId <= 0) {
+            $error = 'Некорректный конфликт.';
+        } else {
+            $confStmt = $db->prepare("
+                SELECT *
+                FROM b24_sync_conflicts
+                WHERE id = ? AND status = 'new'
+                LIMIT 1
+            ");
+            $confStmt->execute([$conflictId]);
+            $conflict = $confStmt->fetch(PDO::FETCH_ASSOC);
+            if (!$conflict) {
+                $error = 'Конфликт не найден или уже обработан.';
+            } else {
+                try {
+                    if ($mode === 'push_local_to_b24') {
+                        $localProductId = intval(isset($conflict['local_product_id']) ? $conflict['local_product_id'] : 0);
+                        if ($localProductId <= 0) {
+                            throw new Exception('Нет локального товара для синка.');
+                        }
+                        syncProductAvailableToBitrix($db, $localProductId);
+                        resolveConflictStatus($db, $conflictId, 'resolved', ' | Решение: Б24 выровнен по складу');
+                        $message = 'Расхождение обработано: Б24 выровнен по остатку склада.';
+                    } elseif ($mode === 'accept_b24_to_local') {
+                        $localProductId = intval(isset($conflict['local_product_id']) ? $conflict['local_product_id'] : 0);
+                        $localValue = floatval(isset($conflict['local_value']) ? $conflict['local_value'] : 0);
+                        $b24Value = floatval(isset($conflict['b24_value']) ? $conflict['b24_value'] : 0);
+                        $delta = round($b24Value - $localValue, 2);
+                        if ($localProductId <= 0) {
+                            throw new Exception('Нет локального товара для пополнения.');
+                        }
+                        if ($delta <= 0.01) {
+                            throw new Exception('Для принятия Б24 нужен положительный дельта-остаток.');
+                        }
+                        $db->beginTransaction();
+                        $added = addMetersToLocalStock($db, $localProductId, $delta, 'Принятие остатка из Б24 по конфликту #' . $conflictId);
+                        resolveConflictStatus($db, $conflictId, 'resolved', ' | Решение: склад пополнен из Б24, добавлено ' . $added . ' м');
+                        $db->commit();
+                        $message = 'Расхождение обработано: добавлено на склад ' . $added . ' м.';
+                    } elseif ($mode === 'dismiss') {
+                        resolveConflictStatus($db, $conflictId, 'dismissed', ' | Решение: закрыто вручную без изменений');
+                        $message = 'Расхождение закрыто вручную.';
+                    } else {
+                        throw new Exception('Неизвестный режим обработки конфликта.');
+                    }
+                } catch (Exception $e) {
+                    if ($db->inTransaction()) {
+                        $db->rollBack();
+                    }
+                    $error = $e->getMessage();
+                }
+            }
+        }
+    }
 
     if ($action === 'retry_deal_rows_sync') {
         $requestId = intval(isset($_POST['request_id']) ? $_POST['request_id'] : 0);
@@ -626,6 +779,7 @@ $requests = $requestsStmt->fetchAll(PDO::FETCH_ASSOC);
 
 $lines = [];
 $lineProductOptions = [];
+$syncConflicts = [];
 if ($requestId > 0) {
     $stmt = $db->prepare("
         SELECT l.*,
@@ -643,6 +797,20 @@ if ($requestId > 0) {
         }
     }
 }
+
+try {
+    $syncConflicts = $db->query("
+        SELECT c.*,
+               p.name as local_product_name
+        FROM b24_sync_conflicts c
+        LEFT JOIN products p ON p.id = c.local_product_id
+        WHERE c.status = 'new'
+        ORDER BY c.id DESC
+        LIMIT 100
+    ")->fetchAll(PDO::FETCH_ASSOC);
+} catch (Exception $e) {
+    $syncConflicts = [];
+}
 ?>
 
 <main class="container">
@@ -654,6 +822,61 @@ if ($requestId > 0) {
 
 <?php if ($message): ?><div class="alert alert-success"><?= h($message) ?></div><?php endif; ?>
 <?php if ($error): ?><div class="alert alert-danger"><?= h($error) ?></div><?php endif; ?>
+
+<h3>Расхождения склад ↔ Б24</h3>
+<p class="text-muted">
+    Автоматически не чистим. Для каждого расхождения выберите действие:
+    выровнять Б24 по складу (истина — склад) или принять данные Б24 и добавить на склад.
+</p>
+<table border="1" cellpadding="6" cellspacing="0" style="margin-bottom:15px;">
+    <tr>
+        <th>ID</th>
+        <th>Тип</th>
+        <th>Товар</th>
+        <th>Локально</th>
+        <th>В Б24</th>
+        <th>Что делаем</th>
+    </tr>
+    <?php foreach ($syncConflicts as $c): ?>
+    <?php
+        $localVal = floatval(isset($c['local_value']) ? $c['local_value'] : 0);
+        $b24Val = floatval(isset($c['b24_value']) ? $c['b24_value'] : 0);
+        $canAcceptB24 = ($b24Val - $localVal) > 0.01;
+    ?>
+    <tr>
+        <td><?= (int)$c['id'] ?></td>
+        <td><?= h($c['conflict_type']) ?></td>
+        <td>
+            <?= h(isset($c['local_product_name']) ? $c['local_product_name'] : ('ID ' . (int)$c['local_product_id'])) ?><br>
+            <small>local: <?= (int)$c['local_product_id'] ?>, b24: <?= (int)$c['b24_product_id'] ?></small>
+        </td>
+        <td><?= h($c['local_value']) ?></td>
+        <td><?= h($c['b24_value']) ?></td>
+        <td>
+            <form method="POST" style="display:inline;">
+                <input type="hidden" name="action" value="resolve_stock_conflict">
+                <input type="hidden" name="conflict_id" value="<?= (int)$c['id'] ?>">
+                <input type="hidden" name="mode" value="push_local_to_b24">
+                <button type="submit">Выровнять Б24 по складу</button>
+            </form>
+            <?php if ($canAcceptB24): ?>
+                <form method="POST" style="display:inline;">
+                    <input type="hidden" name="action" value="resolve_stock_conflict">
+                    <input type="hidden" name="conflict_id" value="<?= (int)$c['id'] ?>">
+                    <input type="hidden" name="mode" value="accept_b24_to_local">
+                    <button type="submit">Добавить на склад (принять Б24)</button>
+                </form>
+            <?php endif; ?>
+            <form method="POST" style="display:inline;">
+                <input type="hidden" name="action" value="resolve_stock_conflict">
+                <input type="hidden" name="conflict_id" value="<?= (int)$c['id'] ?>">
+                <input type="hidden" name="mode" value="dismiss">
+                <button type="submit">Закрыть без изменений</button>
+            </form>
+        </td>
+    </tr>
+    <?php endforeach; ?>
+</table>
 
 <form method="GET" style="margin: 10px 0;">
     <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end;">

@@ -103,6 +103,17 @@ function syncProductAvailableToBitrix($db, $productId) {
     $freeMeters = getFreeMetersByProduct($db, $productId);
     $method = $config['product_update_method'];
     $field = $config['product_available_field'];
+    $storeId = 1;
+    if (function_exists('getAppSetting')) {
+        $preferredStoreId = intval(getAppSetting($db, 'stock_sync_store_id', '0'));
+        if ($preferredStoreId > 0) {
+            $storeId = $preferredStoreId;
+        } else {
+            $storeFrom = intval(getAppSetting($db, 'default_store_from_id', '1'));
+            $storeTo = intval(getAppSetting($db, 'default_store_to_id', '1'));
+            $storeId = $storeFrom > 0 ? $storeFrom : ($storeTo > 0 ? $storeTo : 1);
+        }
+    }
 
     $payload = [
         'id' => $b24ProductId,
@@ -111,7 +122,53 @@ function syncProductAvailableToBitrix($db, $productId) {
         ]
     ];
 
-    return sendToBitrix($method, $payload);
+    $fieldResp = sendToBitrix($method, $payload);
+
+    // Also sync actual store availability in B24 warehouse остатки.
+    $storeResp = null;
+    if ($storeId > 0) {
+        $existingStoreProductId = 0;
+        $listResp = sendToBitrix('catalog.storeproduct.list', [
+            'filter' => [
+                'productId' => $b24ProductId,
+                'storeId' => $storeId
+            ],
+            'select' => ['id', 'amount', 'productId', 'storeId']
+        ]);
+        if (is_array($listResp) && !isset($listResp['error']) && isset($listResp['result']) && is_array($listResp['result'])) {
+            $rows = $listResp['result'];
+            if (isset($rows['items']) && is_array($rows['items'])) {
+                $rows = $rows['items'];
+            }
+            if (!empty($rows[0]) && is_array($rows[0])) {
+                $existingStoreProductId = intval(isset($rows[0]['id']) ? $rows[0]['id'] : 0);
+            }
+        }
+
+        if ($existingStoreProductId > 0) {
+            $storeResp = sendToBitrix('catalog.storeproduct.update', [
+                'id' => $existingStoreProductId,
+                'fields' => [
+                    'amount' => $freeMeters
+                ]
+            ]);
+        } else {
+            $storeResp = sendToBitrix('catalog.storeproduct.add', [
+                'fields' => [
+                    'productId' => $b24ProductId,
+                    'storeId' => $storeId,
+                    'amount' => $freeMeters
+                ]
+            ]);
+        }
+    }
+
+    return [
+        'field_sync' => $fieldResp,
+        'store_sync' => $storeResp,
+        'store_id' => $storeId,
+        'free_meters' => $freeMeters
+    ];
 }
 
 function logStockMovement($db, $data) {
