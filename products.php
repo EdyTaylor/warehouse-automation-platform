@@ -291,6 +291,71 @@ function runB24SyncForProductIds($db, $productIds) {
     return array('ok' => $ok, 'err' => $err, 'total' => count($ids));
 }
 
+function processPriceSyncChunk($db, $offset, $limit) {
+    $offset = max(0, intval($offset));
+    $limit = intval($limit);
+    if ($limit <= 0) {
+        $limit = 20;
+    }
+    if ($limit > 200) {
+        $limit = 200;
+    }
+
+    $totalRow = $db->query("
+        SELECT COUNT(*) AS cnt
+        FROM products
+        WHERE b24_product_id IS NOT NULL
+          AND b24_product_id <> 0
+    ")->fetch(PDO::FETCH_ASSOC);
+    $total = $totalRow ? intval($totalRow['cnt']) : 0;
+
+    if ($offset >= $total) {
+        return array(
+            'total' => $total,
+            'processed' => 0,
+            'ok' => 0,
+            'err' => 0,
+            'next_offset' => $offset,
+            'done' => true
+        );
+    }
+
+    $rows = $db->query("
+        SELECT id
+        FROM products
+        WHERE b24_product_id IS NOT NULL
+          AND b24_product_id <> 0
+        ORDER BY id ASC
+        LIMIT " . intval($limit) . " OFFSET " . intval($offset))->fetchAll(PDO::FETCH_ASSOC);
+
+    $ok = 0;
+    $err = 0;
+    foreach ($rows as $row) {
+        $productId = intval(isset($row['id']) ? $row['id'] : 0);
+        if ($productId <= 0) {
+            $err++;
+            continue;
+        }
+        $res = syncProductPriceToB24($db, $productId);
+        if (isset($res['ok']) && $res['ok']) {
+            $ok++;
+        } else {
+            $err++;
+        }
+    }
+
+    $processed = count($rows);
+    $nextOffset = $offset + $processed;
+    return array(
+        'total' => $total,
+        'processed' => $processed,
+        'ok' => $ok,
+        'err' => $err,
+        'next_offset' => $nextOffset,
+        'done' => ($nextOffset >= $total || $processed === 0)
+    );
+}
+
 function runCreateMissingProductsInB24($db, $limit) {
     $limit = intval($limit);
     if ($limit <= 0) {
@@ -405,10 +470,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = isset($_POST['action']) ? $_POST['action'] : 'save';
 
     if ($action === 'sync_to_b24') {
-        $rows = $db->query("SELECT id FROM products WHERE b24_product_id IS NOT NULL AND b24_product_id <> 0")->fetchAll(PDO::FETCH_ASSOC);
-        $ids = array_map(function($r) { return intval($r['id']); }, $rows);
-        $stats = runB24SyncForProductIds($db, $ids);
-        header("Location: products.php?sync_msg=" . urlencode("Отправить в Б24: обновлено {$stats['ok']}, ошибок {$stats['err']}, всего {$stats['total']}"));
+        header("Location: products.php?sync_job=prices&sync_offset=0&sync_ok=0&sync_err=0");
         exit;
     }
 
@@ -599,6 +661,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         header("Location: products.php?sync_msg=" . urlencode("Товар сохранен локально" . $historyTail));
         exit;
     }
+}
+
+if (isset($_GET['sync_job']) && $_GET['sync_job'] === 'prices') {
+    @set_time_limit(30);
+    $offset = isset($_GET['sync_offset']) ? intval($_GET['sync_offset']) : 0;
+    $okAcc = isset($_GET['sync_ok']) ? intval($_GET['sync_ok']) : 0;
+    $errAcc = isset($_GET['sync_err']) ? intval($_GET['sync_err']) : 0;
+    $limit = getB24SyncBatchSize($db);
+    if ($limit < 10) {
+        $limit = 10;
+    }
+
+    $chunk = processPriceSyncChunk($db, $offset, $limit);
+    $okAcc += intval(isset($chunk['ok']) ? $chunk['ok'] : 0);
+    $errAcc += intval(isset($chunk['err']) ? $chunk['err'] : 0);
+    $nextOffset = intval(isset($chunk['next_offset']) ? $chunk['next_offset'] : $offset);
+    $total = intval(isset($chunk['total']) ? $chunk['total'] : 0);
+
+    if (!empty($chunk['done'])) {
+        header("Location: products.php?sync_msg=" . urlencode("Отправить в Б24: обновлено {$okAcc}, ошибок {$errAcc}, всего {$total}"));
+        exit;
+    }
+
+    header("Location: products.php?sync_job=prices&sync_offset={$nextOffset}&sync_ok={$okAcc}&sync_err={$errAcc}");
+    exit;
 }
 
 $hasCatalogId = hasColumn($db, 'products', 'catalog_id');
