@@ -683,15 +683,15 @@ body {
 }
 
 .products-table-wrap {
-    overflow-x: auto;
-    overflow-y: visible;
+    overflow: auto;
+    max-height: calc(100vh - 240px);
     scrollbar-width: auto;
     scrollbar-color: #94a3b8 transparent;
 }
 
 .products-table {
     font-size: 0.82rem;
-    min-width: 1220px;
+    min-width: 1160px;
     table-layout: fixed;
     border-collapse: separate;
     border-spacing: 0;
@@ -706,7 +706,7 @@ body {
 
 .products-table thead th {
     position: sticky;
-    top: 88px;
+    top: 0;
     z-index: 11;
     box-shadow: 0 1px 0 rgba(0, 0, 0, 0.08);
 }
@@ -719,14 +719,14 @@ body {
 }
 
 .products-table .product-name-cell {
-    width: 180px;
-    min-width: 180px;
-    max-width: 180px;
+    width: 170px;
+    min-width: 170px;
+    max-width: 170px;
 }
 
 .products-table .product-name-text {
     display: inline-block;
-    max-width: 168px;
+    max-width: 158px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -782,7 +782,7 @@ body {
 
 .products-table .sticky-col-price {
     position: sticky;
-    right: 156px !important;
+    right: 144px !important;
     background: var(--card-background);
     z-index: 4;
 }
@@ -792,14 +792,40 @@ body {
     right: 0 !important;
     background: var(--card-background);
     z-index: 4;
-    width: 156px;
-    min-width: 156px;
+    width: 144px;
+    min-width: 144px;
 }
 
 .products-table thead .sticky-col-price,
 .products-table thead .sticky-col-actions {
     background: var(--light-color);
     z-index: 12;
+}
+
+.products-table th:nth-child(1),
+.products-table td:nth-child(1) {
+    width: 32px;
+    min-width: 32px;
+}
+
+.products-table th:nth-child(2),
+.products-table td:nth-child(2) {
+    width: 54px;
+    min-width: 54px;
+}
+
+.products-table th:nth-child(3),
+.products-table td:nth-child(3) {
+    width: 170px;
+    min-width: 170px;
+}
+
+.products-table th:nth-child(4),
+.products-table td:nth-child(4),
+.products-table th:nth-child(5),
+.products-table td:nth-child(5) {
+    width: 64px;
+    min-width: 64px;
 }
 
 .products-table th:nth-child(6),
@@ -854,16 +880,16 @@ body.products-compact .products-table .product-name-text {
 }
 
 body.products-compact .products-row-actions {
-    min-width: 138px;
+    min-width: 126px;
 }
 
 body.products-compact .products-table .sticky-col-price {
-    right: 138px !important;
+    right: 126px !important;
 }
 
 body.products-compact .products-table .sticky-col-actions {
-    width: 138px;
-    min-width: 138px;
+    width: 126px;
+    min-width: 126px;
 }
 
 body.products-compact .products-row-actions .btn {
