@@ -6,6 +6,7 @@ header('Content-Type: text/html; charset=utf-8');
 require 'db.php';
 $db = getDB();
 require_once __DIR__ . '/api/bitrix/send.php';
+require_once __DIR__ . '/functions/stock_movements.php';
 require_once __DIR__ . '/functions/pricing.php';
 require_once __DIR__ . '/functions/app_settings.php';
 
@@ -290,6 +291,48 @@ function runB24SyncForProductIds($db, $productIds) {
     return array('ok' => $ok, 'err' => $err, 'total' => count($ids));
 }
 
+function runCreateMissingProductsInB24($db, $limit) {
+    $limit = intval($limit);
+    if ($limit <= 0) {
+        $limit = 200;
+    }
+    if ($limit > 5000) {
+        $limit = 5000;
+    }
+
+    $rows = $db->query("
+        SELECT id
+        FROM products
+        WHERE b24_product_id IS NULL OR b24_product_id = 0
+        ORDER BY id ASC
+        LIMIT " . $limit)->fetchAll(PDO::FETCH_ASSOC);
+
+    $created = 0;
+    $alreadyLinked = 0;
+    $errors = 0;
+
+    foreach ($rows as $row) {
+        $productId = intval(isset($row['id']) ? $row['id'] : 0);
+        if ($productId <= 0) {
+            $errors++;
+            continue;
+        }
+        $newB24Id = ensureProductSyncedWithBitrix($db, $productId);
+        if ($newB24Id > 0) {
+            $created++;
+        } else {
+            $errors++;
+        }
+    }
+
+    return array(
+        'total' => count($rows),
+        'created' => $created,
+        'already_linked' => $alreadyLinked,
+        'errors' => $errors
+    );
+}
+
 function syncProductPriceToB24($db, $productId) {
     $stmt = $db->prepare("
         SELECT id, name, b24_product_id, price_per_meter
@@ -366,6 +409,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $ids = array_map(function($r) { return intval($r['id']); }, $rows);
         $stats = runB24SyncForProductIds($db, $ids);
         header("Location: products.php?sync_msg=" . urlencode("Отправить в Б24: обновлено {$stats['ok']}, ошибок {$stats['err']}, всего {$stats['total']}"));
+        exit;
+    }
+
+    if ($action === 'sync_create_missing_b24') {
+        $stats = runCreateMissingProductsInB24($db, 2000);
+        header("Location: products.php?sync_msg=" . urlencode("Создание в Б24: создано {$stats['created']}, ошибок {$stats['errors']}, обработано {$stats['total']}"));
         exit;
     }
 
@@ -734,6 +783,10 @@ require 'includes/header.php';
             <form method="POST">
                 <input type="hidden" name="action" value="sync_to_b24">
                 <button class="btn btn-warning btn-sm" type="submit">Отправить все цены в Б24</button>
+            </form>
+            <form method="POST">
+                <input type="hidden" name="action" value="sync_create_missing_b24">
+                <button class="btn btn-secondary btn-sm" type="submit">Создать отсутствующие товары в Б24</button>
             </form>
             <form method="POST" id="bulk-sync-form">
                 <button class="btn btn-light btn-sm" type="submit" name="action" value="sync_selected">Отправить выбранные</button>
