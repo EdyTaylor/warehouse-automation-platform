@@ -919,3 +919,48 @@ body.products-compact .products-row-actions .btn {
     cursor: default;
     pointer-events: none;
 }
+
+.warehouse-filter-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 0.8rem;
+}
+
+.warehouse-filter-item {
+    margin-bottom: 0.5rem;
+}
+
+.warehouse-filter-item-wide {
+    grid-column: 1 / -1;
+}
+
+.warehouse-filter-inline {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    padding: 0.35rem 0.5rem;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--card-background);
+}
+
+.warehouse-filter-check {
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+    font-size: 0.9rem;
+}
+
+.warehouse-filter-threshold {
+    width: 86px;
+    padding: 0.25rem 0.4rem;
+}
+
+.warehouse-filter-actions {
+    margin-top: 0.6rem;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}

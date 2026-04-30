@@ -646,7 +646,11 @@ if ($requestId > 0) {
 ?>
 
 <main class="container">
-<h2>Продажи из Б24 (ручная реализация)</h2>
+<h2>Технический раздел Б24 (интеграция)</h2>
+<p class="text-muted">
+    Этот экран предназначен для сервисной работы: повтор синка строк сделки, ручные корректировки резервов и диагностика ошибок.
+    Для ежедневной работы кладовщика используйте <a href="warehouse_orders.php">Место кладовщика</a>.
+</p>
 
 <?php if ($message): ?><div class="alert alert-success"><?= h($message) ?></div><?php endif; ?>
 <?php if ($error): ?><div class="alert alert-danger"><?= h($error) ?></div><?php endif; ?>

@@ -5,6 +5,7 @@ header('Content-Type: text/html; charset=utf-8');
 
 require __DIR__ . '/db.php';
 require_once __DIR__ . '/api/bitrix/send.php';
+require_once __DIR__ . '/functions/deal_rows_sync_service.php';
 
 $db = getDB();
 $message = '';
@@ -181,6 +182,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $db->rollBack();
                     $error = $e->getMessage();
                 }
+            } elseif ($action === 'retry_deal_rows_sync') {
+                $syncResult = pickerSyncDealRowsForRequest($db, $requestId, true);
+                if (!empty($syncResult['ok'])) {
+                    $message = 'Синк строк сделки с Б24 выполнен. Deal #' . intval($syncResult['b24_deal_id']);
+                } else {
+                    $stage = isset($syncResult['stage']) ? (string)$syncResult['stage'] : 'unknown';
+                    $error = 'Ошибка синка строк сделки (' . $stage . ').';
+                }
             } else {
                 $error = 'Неизвестное действие.';
             }
@@ -227,6 +236,17 @@ require __DIR__ . '/includes/header.php';
 <main class="container">
     <h2>🧰 Рабочее место кладовщика</h2>
     <p class="text-muted">Очередь заказов из Б24 с карточками подбора и подтверждением отправки.</p>
+    <div class="card">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+            <a href="warehouse.php" class="btn btn-light btn-sm">Открыть склад</a>
+            <a href="stock_operations.php" class="btn btn-light btn-sm">Складские операции</a>
+            <a href="sell.php" class="btn btn-light btn-sm">Продажи из Б24 (отчет)</a>
+            <a href="b24_sales.php" class="btn btn-light btn-sm">Тех.раздел Б24</a>
+        </div>
+        <p class="text-muted" style="margin-top:8px;">
+            Основная работа кладовщика выполняется здесь. Тех.раздел Б24 нужен только для ручной отладки синка и редких сервисных операций.
+        </p>
+    </div>
 
     <?php if ($message !== ''): ?>
         <div class="alert alert-success"><?= h($message) ?></div>
@@ -308,6 +328,11 @@ require __DIR__ . '/includes/header.php';
                 </div>
                 <div>
                     <span class="<?= $statusClass ?>">Статус: <?= h($request['picker_status']) ?></span>
+                    <?php if (isset($request['deal_rows_sync_status'])): ?>
+                        <span class="status-cut" style="margin-left:6px;">
+                            Синк строк: <?= h((string)$request['deal_rows_sync_status']) ?>
+                        </span>
+                    <?php endif; ?>
                 </div>
             </div>
 
@@ -356,6 +381,7 @@ require __DIR__ . '/includes/header.php';
                 </div>
                 <div style="display:flex; gap:8px; flex-wrap:wrap;">
                     <button class="btn btn-light" type="submit" name="action" value="save_pick">Сохранить подбор</button>
+                    <button class="btn btn-warning" type="submit" name="action" value="retry_deal_rows_sync">Повторить синк строк сделки</button>
                     <button class="btn btn-success" type="submit" name="action" value="confirm_ship" onclick="return confirm('Подтвердить и отправить в Б24?');">Подтвердить и отправить в Б24</button>
                     <button class="btn btn-danger" type="submit" name="action" value="cancel_reserve" onclick="return confirm('Снять резерв и отменить заявку?');">Отменить резерв</button>
                 </div>

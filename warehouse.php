@@ -447,10 +447,10 @@ require 'includes/header.php';
         </div>
 
         <div class="card">
-            <h2>Фильтры списка</h2>
+            <h2>Фильтры склада</h2>
             <form method="GET">
-                <div class="form-row">
-                    <div class="form-group">
+                <div class="warehouse-filter-grid">
+                    <div class="form-group warehouse-filter-item">
                         <label>Товар</label>
                         <select name="product_id">
                             <option value="0">Все товары</option>
@@ -461,8 +461,8 @@ require 'includes/header.php';
                             <?php endforeach; ?>
                         </select>
                     </div>
-                    <div class="form-group">
-                        <label>Статус</label>
+                    <div class="form-group warehouse-filter-item">
+                        <label>Статус рулона</label>
                         <select name="status">
                             <option value="">Все</option>
                             <?php foreach (array('active','cut','scrap','sold','written_off','waste') as $st): ?>
@@ -470,7 +470,7 @@ require 'includes/header.php';
                             <?php endforeach; ?>
                         </select>
                     </div>
-                    <div class="form-group">
+                    <div class="form-group warehouse-filter-item">
                         <label>Режим списка</label>
                         <select name="view">
                             <option value="active" <?= $viewMode === 'active' ? 'selected' : '' ?>>Актуальные</option>
@@ -478,33 +478,33 @@ require 'includes/header.php';
                             <option value="all" <?= $viewMode === 'all' ? 'selected' : '' ?>>Все</option>
                         </select>
                     </div>
-                    <div class="form-group">
+                    <div class="form-group warehouse-filter-item warehouse-filter-item-wide">
                         <label>Быстрые фильтры</label>
-                        <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
-                            <label style="display:flex; gap:4px; align-items:center;">
+                        <div class="warehouse-filter-inline">
+                            <label class="warehouse-filter-check">
                                 <input type="checkbox" name="only_scrap" value="1" <?= $onlyScrap ? 'checked' : '' ?>>
                                 Только обрезки
                             </label>
-                            <label style="display:flex; gap:4px; align-items:center;">
+                            <label class="warehouse-filter-check">
                                 Остаток меньше
-                                <input type="number" name="low_stock_below" min="0" step="0.1" value="<?= htmlspecialchars((string)$lowStockThreshold) ?>" style="width:90px;">
+                                <input type="number" name="low_stock_below" min="0" step="0.1" value="<?= htmlspecialchars((string)$lowStockThreshold) ?>" class="warehouse-filter-threshold">
                                 м
                             </label>
-                            <label style="display:flex; gap:4px; align-items:center;">
+                            <label class="warehouse-filter-check">
                                 <input type="checkbox" name="without_name" value="1" <?= $withoutNameOnly ? 'checked' : '' ?>>
                                 Без имени товара
                             </label>
                         </div>
                     </div>
-                    <div class="form-group">
-                        <label>Поиск (ID/название)</label>
+                    <div class="form-group warehouse-filter-item">
+                        <label>Поиск (ID / название)</label>
                         <input type="text" name="q" value="<?= htmlspecialchars($filterSearch) ?>">
                     </div>
-                    <div class="form-group">
-                        <label>&nbsp;</label>
-                        <button type="submit" class="btn btn-light">Применить</button>
-                        <a href="warehouse.php" class="btn btn-light">Сброс</a>
-                    </div>
+                </div>
+                <div class="warehouse-filter-actions">
+                    <button type="submit" class="btn btn-primary">Применить фильтры</button>
+                    <a href="warehouse.php" class="btn btn-light">Сбросить</a>
+                    <span class="text-muted">Показываем: <?= count($rolls) ?> рулонов</span>
                 </div>
             </form>
         </div>

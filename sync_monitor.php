@@ -109,6 +109,16 @@ try {
     </div>
 
     <div class="card">
+        <h3>Технический раздел Б24</h3>
+        <p class="text-muted">
+            Этот раздел нужен для сервисных операций интеграции: ручной резерв/подтверждение строк сделки,
+            повтор синка product rows и диагностика ошибок Б24. Для ежедневной работы кладовщика используйте
+            вкладку <strong>Место кладовщика</strong>.
+        </p>
+        <a class="btn btn-light" href="b24_sales.php">Открыть тех.раздел Б24</a>
+    </div>
+
+    <div class="card">
         <h3>Настройки интеграции</h3>
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
             <button type="button" class="btn btn-light btn-sm js-theme-toggle">🌓 Переключить тему</button>

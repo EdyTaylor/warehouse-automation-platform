@@ -207,43 +207,43 @@ require 'includes/header.php';
             </div>
         </div>
 
-        <div class="card">
-            <h3>🧾 Складские операции</h3>
-            <p>Оприходование, списание и реализация перенесены в отдельную вкладку для удобной работы в одном месте.</p>
-            <a href="stock_operations.php" class="btn btn-success">Открыть складские операции</a>
-        </div>
-
         <!-- Основные действия -->
         <div class="card">
             <h3>⚡ Основные действия</h3>
             <div class="actions-grid">
                 <div class="action-card">
-                    <h4>🏪 Управление складом</h4>
-                    <p>Остатки, статусы рулонов и синхронизация</p>
-                    <a href="warehouse.php" class="btn btn-success">Открыть</a>
+                    <h4>🧰 Место кладовщика</h4>
+                    <p>Очередь заказов из Б24, резерв и отгрузка</p>
+                    <a href="warehouse_orders.php" class="btn btn-success">Открыть</a>
                 </div>
 
                 <div class="action-card">
                     <h4>🧾 Складские операции</h4>
-                    <p>Приход, списание и реализация в едином интерфейсе</p>
+                    <p>Приход, списание и реализация в одном месте</p>
                     <a href="stock_operations.php" class="btn">Открыть</a>
                 </div>
                 
                 <div class="action-card">
-                    <h4>📦 Товары</h4>
-                    <p>Управление товарами и ценами</p>
+                    <h4>🏬 Склад</h4>
+                    <p>Просмотр текущих рулонов и фильтрация остатков</p>
+                    <a href="warehouse.php" class="btn">Открыть</a>
+                </div>
+
+                <div class="action-card">
+                    <h4>📦 Каталог товаров</h4>
+                    <p>Управление товарами, ценами и синком в Б24</p>
                     <a href="products.php" class="btn">Открыть</a>
                 </div>
                 
                 <div class="action-card">
-                    <h4>💰 Продажи</h4>
-                    <p>Продажа рулонов и метров</p>
+                    <h4>💰 Продажи из Б24</h4>
+                    <p>Фактические продажи по сделкам Б24</p>
                     <a href="sell.php" class="btn">Открыть</a>
                 </div>
                 
                 <div class="action-card">
-                    <h4>🔄 Продажи Б24</h4>
-                    <p>Обработка заказов из Битрикс24</p>
+                    <h4>🔄 Б24 (ручные операции)</h4>
+                    <p>Ручной резерв, подтверждение и повтор синка</p>
                     <a href="b24_sales.php" class="btn">Открыть</a>
                 </div>
             </div>
