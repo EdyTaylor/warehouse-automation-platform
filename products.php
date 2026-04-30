@@ -794,7 +794,6 @@ require 'includes/header.php';
                     <th class="sticky-col sticky-col-select"><input type="checkbox" id="select-all-rows"></th>
                     <th class="sticky-col sticky-col-id">ID</th>
                     <th class="sticky-col sticky-col-name">Название</th>
-                    <?php if ($hasCatalogId): ?><th>Каталог</th><?php endif; ?>
                     <th>B24</th>
                     <th>Метраж</th>
                     <th>Себест.</th>
@@ -809,7 +808,7 @@ require 'includes/header.php';
             </thead>
             <tbody>
                 <?php if (empty($products)): ?>
-                    <tr><td colspan="<?php echo $hasCatalogId ? '14' : '13'; ?>" class="text-center text-muted">Ничего не найдено по текущим фильтрам.</td></tr>
+                    <tr><td colspan="13" class="text-center text-muted">Ничего не найдено по текущим фильтрам.</td></tr>
                 <?php endif; ?>
                 <?php foreach ($products as $p): ?>
                     <?php
@@ -826,7 +825,6 @@ require 'includes/header.php';
                             <span class="product-name-text" title="<?php echo htmlspecialchars(isset($p['name']) ? $p['name'] : '', ENT_QUOTES, 'UTF-8'); ?>"><?php echo htmlspecialchars(isset($p['name']) ? $p['name'] : ''); ?></span>
                             <div class="inline-row-error"></div>
                         </td>
-                        <?php if ($hasCatalogId): ?><td><?php echo htmlspecialchars($catalogLabel); ?></td><?php endif; ?>
                         <td><?php echo $b24Id > 0 ? $b24Id : '—'; ?></td>
                         <td>
                             <span class="cell-view"><?php echo htmlspecialchars((string)$p['roll_length']); ?></span>
