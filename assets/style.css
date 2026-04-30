@@ -38,6 +38,14 @@ html[data-theme="dark"] {
     --table-hover-bg: #1b2638;
 }
 
+html[data-theme="dark"] a {
+    color: #93c5fd;
+}
+
+html[data-theme="dark"] a:hover {
+    color: #bfdbfe;
+}
+
 /* Базовые стили */
 * {
     box-sizing: border-box;
@@ -215,6 +223,15 @@ body {
     background: #e67e22;
 }
 
+.btn-secondary {
+    background: #6366f1;
+    color: #ffffff;
+}
+
+.btn-secondary:hover {
+    background: #4f46e5;
+}
+
 .btn-danger {
     background: var(--danger-color);
     color: white;
@@ -231,6 +248,44 @@ body {
 
 .btn-light:hover {
     background: #d5dbdd;
+}
+
+html[data-theme="dark"] .btn-primary {
+    background: #2563eb;
+    color: #f8fafc;
+}
+
+html[data-theme="dark"] .btn-primary:hover {
+    background: #1d4ed8;
+}
+
+html[data-theme="dark"] .btn-warning {
+    background: #d97706;
+    color: #fff7ed;
+}
+
+html[data-theme="dark"] .btn-warning:hover {
+    background: #b45309;
+}
+
+html[data-theme="dark"] .btn-light {
+    background: #1e293b;
+    color: #e2e8f0;
+    border: 1px solid #334155;
+}
+
+html[data-theme="dark"] .btn-light:hover {
+    background: #334155;
+    color: #f8fafc;
+}
+
+html[data-theme="dark"] .btn-secondary {
+    background: #7c3aed;
+    color: #f5f3ff;
+}
+
+html[data-theme="dark"] .btn-secondary:hover {
+    background: #6d28d9;
 }
 
 .btn-outline {
@@ -475,6 +530,43 @@ body {
     box-shadow: var(--shadow);
     transition: var(--transition);
     border: 1px solid var(--border-color);
+}
+
+html[data-theme="dark"] .action-card {
+    background: #0f172a;
+    border: 1px solid #334155;
+}
+
+html[data-theme="dark"] .action-card h4 {
+    color: #e2e8f0;
+}
+
+html[data-theme="dark"] .action-card p {
+    color: #94a3b8;
+}
+
+html[data-theme="dark"] .alert-success {
+    background: rgba(22, 163, 74, 0.18);
+    color: #dcfce7;
+    border-left-color: #22c55e;
+}
+
+html[data-theme="dark"] .alert-warning {
+    background: rgba(245, 158, 11, 0.2);
+    color: #fef3c7;
+    border-left-color: #f59e0b;
+}
+
+html[data-theme="dark"] .alert-danger {
+    background: rgba(239, 68, 68, 0.2);
+    color: #fecaca;
+    border-left-color: #ef4444;
+}
+
+html[data-theme="dark"] .alert-info {
+    background: rgba(59, 130, 246, 0.2);
+    color: #dbeafe;
+    border-left-color: #3b82f6;
 }
 
 .action-card:hover {
