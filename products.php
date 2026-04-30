@@ -780,17 +780,17 @@ require 'includes/header.php';
         </form>
 
         <div class="products-bulk-tools">
-            <form method="POST">
+            <form method="POST" class="js-sync-action-form">
                 <input type="hidden" name="action" value="sync_to_b24">
-                <button class="btn btn-warning btn-sm" type="submit">Отправить все цены в Б24</button>
+                <button class="btn btn-warning btn-sm" type="submit" data-loading-text="Отправка...">Отправить все цены в Б24</button>
             </form>
-            <form method="POST">
+            <form method="POST" class="js-sync-action-form">
                 <input type="hidden" name="action" value="sync_create_missing_b24">
-                <button class="btn btn-secondary btn-sm" type="submit">Создать отсутствующие товары в Б24</button>
+                <button class="btn btn-secondary btn-sm" type="submit" data-loading-text="Создание...">Создать отсутствующие товары в Б24</button>
             </form>
-            <form method="POST" id="bulk-sync-form">
-                <button class="btn btn-light btn-sm" type="submit" name="action" value="sync_selected">Отправить выбранные</button>
-                <button class="btn btn-light btn-sm" type="submit" name="action" value="retry_sync_errors">Повторить ошибки отправки</button>
+            <form method="POST" id="bulk-sync-form" class="js-sync-action-form">
+                <button class="btn btn-light btn-sm" type="submit" name="action" value="sync_selected" data-loading-text="Отправка...">Отправить выбранные</button>
+                <button class="btn btn-light btn-sm" type="submit" name="action" value="retry_sync_errors" data-loading-text="Повтор...">Повторить ошибки отправки</button>
             </form>
             <span class="text-muted">Найдено: <?php echo $totalRows; ?></span>
         </div>
@@ -958,6 +958,38 @@ require 'includes/header.php';
 
 <script>
 (function () {
+    var syncMsg = <?php echo json_encode($syncMsg, JSON_UNESCAPED_UNICODE); ?>;
+    if (syncMsg) {
+        window.setTimeout(function () {
+            alert(syncMsg);
+        }, 50);
+    }
+
+    function lockSubmitButton(form, submitter) {
+        var btn = submitter;
+        if (!btn) {
+            btn = form.querySelector('button[type="submit"]');
+        }
+        if (!btn) {
+            return;
+        }
+        var loadingText = btn.getAttribute('data-loading-text');
+        if (loadingText) {
+            btn.textContent = loadingText;
+        }
+        btn.disabled = true;
+    }
+
+    var syncForms = document.querySelectorAll('.js-sync-action-form');
+    for (var sf = 0; sf < syncForms.length; sf++) {
+        (function (form) {
+            form.addEventListener('submit', function (event) {
+                var submitter = event.submitter ? event.submitter : null;
+                lockSubmitButton(form, submitter);
+            });
+        })(syncForms[sf]);
+    }
+
     function postForm(payload) {
         var form = document.createElement('form');
         form.method = 'POST';
