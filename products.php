@@ -740,7 +740,6 @@ require 'includes/header.php';
                 <button class="btn btn-light btn-sm" type="submit" name="action" value="retry_sync_errors">Повторить ошибки отправки</button>
             </form>
             <span class="text-muted">Найдено: <?php echo $totalRows; ?></span>
-            <button type="button" class="btn btn-light btn-sm" id="products-compact-toggle">Компактный вид: вкл</button>
         </div>
     </div>
 
@@ -764,21 +763,6 @@ require 'includes/header.php';
         </form>
     </details>
 
-    <div class="card">
-        <h3>Превью итоговой цены</h3>
-        <table class="table">
-            <tr><th>Рулонов</th><th>Цена</th><th>Целевой tier</th><th>Источник</th><th>Режим</th></tr>
-            <?php foreach ($previewRows as $preview): ?>
-                <tr>
-                    <td><?php echo intval($preview['qty']); ?></td>
-                    <td><?php echo round(floatval($preview['price']), 2); ?></td>
-                    <td><?php echo htmlspecialchars($preview['targetTier']); ?></td>
-                    <td><?php echo htmlspecialchars($preview['sourceTier']); ?></td>
-                    <td><?php echo !empty($preview['fallbackUsed']) ? 'fallback' : 'tier'; ?></td>
-                </tr>
-            <?php endforeach; ?>
-        </table>
-    </div>
     <?php if ($editProduct): ?>
     <div class="card">
         <h3>История цен (последние 10)</h3>
@@ -1043,31 +1027,6 @@ require 'includes/header.php';
         });
     }
 
-    var compactBtn = document.getElementById('products-compact-toggle');
-    if (compactBtn) {
-        var applyCompact = function (enabled) {
-            if (enabled) {
-                document.body.classList.add('products-compact');
-                compactBtn.textContent = 'Компактный вид: вкл';
-            } else {
-                document.body.classList.remove('products-compact');
-                compactBtn.textContent = 'Компактный вид: выкл';
-            }
-        };
-        var compactEnabled = true;
-        try {
-            var stored = localStorage.getItem('products_compact_mode');
-            if (stored === '0') {
-                compactEnabled = false;
-            }
-        } catch (_e) {}
-        applyCompact(compactEnabled);
-        compactBtn.addEventListener('click', function () {
-            compactEnabled = !compactEnabled;
-            applyCompact(compactEnabled);
-            try { localStorage.setItem('products_compact_mode', compactEnabled ? '1' : '0'); } catch (_e) {}
-        });
-    }
 })();
 </script>
 
