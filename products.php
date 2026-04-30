@@ -416,26 +416,70 @@ function syncProductPriceToB24($db, $productId) {
         return array('ok' => false, 'message' => 'Нет b24_product_id');
     }
 
-    $fields = array('NAME' => $product['name']);
-    if (floatval($product['price_per_meter']) > 0) {
-        $fields['PRICE'] = floatval($product['price_per_meter']);
+    $b24Id = intval($product['b24_product_id']);
+    $retailPrice = floatval(isset($product['price_per_meter']) ? $product['price_per_meter'] : 0);
+    $purchasePrice = floatval(isset($product['purchase_price']) ? $product['purchase_price'] : 0);
+    $currencyId = strtoupper(trim((string)getAppSetting($db, 'default_currency', 'KGS')));
+    if ($currencyId === '') {
+        $currencyId = 'KGS';
     }
 
-    $resp = sendToBitrix('crm.product.update', array(
-        'id' => intval($product['b24_product_id']),
-        'fields' => $fields
-    ));
+    $crmFields = array('NAME' => $product['name']);
+    if ($retailPrice > 0) {
+        $crmFields['PRICE'] = $retailPrice;
+        $crmFields['CURRENCY_ID'] = $currencyId;
+    }
+    if ($purchasePrice > 0) {
+        $crmFields['PURCHASING_PRICE'] = $purchasePrice;
+    }
 
-    if (is_array($resp) && !isset($resp['error'])) {
+    $crmResp = sendToBitrix('crm.product.update', array(
+        'id' => $b24Id,
+        'fields' => $crmFields
+    ));
+    $crmOk = is_array($crmResp) && !isset($crmResp['error']);
+
+    $catalogOk = false;
+    $catalogResp = null;
+    $catalogFields = array();
+    if ($retailPrice > 0) {
+        $catalogFields['price'] = $retailPrice;
+        $catalogFields['currencyId'] = $currencyId;
+    }
+    if ($purchasePrice > 0) {
+        $catalogFields['purchasingPrice'] = $purchasePrice;
+        $catalogFields['purchasingCurrency'] = $currencyId;
+    }
+    if (!empty($catalogFields)) {
+        $catalogResp = sendToBitrix('catalog.product.update', array(
+            'id' => $b24Id,
+            'fields' => $catalogFields
+        ));
+        $catalogOk = is_array($catalogResp) && !isset($catalogResp['error']);
+    }
+
+    if ($crmOk || $catalogOk) {
         updateProductSyncState($db, $productId, 'sent', null, $attemptAt);
         return array('ok' => true, 'message' => 'Обновлено в Б24');
     }
-    $err = 'Ошибка обновления в Б24';
-    if (is_array($resp) && isset($resp['error_description'])) {
-        $err = $resp['error_description'];
-    } elseif (is_array($resp) && isset($resp['error'])) {
-        $err = $resp['error'];
+
+    $crmErr = 'crm.product.update failed';
+    if (is_array($crmResp)) {
+        if (isset($crmResp['error_description']) && $crmResp['error_description'] !== '') {
+            $crmErr = $crmResp['error_description'];
+        } elseif (isset($crmResp['error']) && $crmResp['error'] !== '') {
+            $crmErr = $crmResp['error'];
+        }
     }
+    $catalogErr = 'catalog.product.update skipped/failed';
+    if (is_array($catalogResp)) {
+        if (isset($catalogResp['error_description']) && $catalogResp['error_description'] !== '') {
+            $catalogErr = $catalogResp['error_description'];
+        } elseif (isset($catalogResp['error']) && $catalogResp['error'] !== '') {
+            $catalogErr = $catalogResp['error'];
+        }
+    }
+    $err = $crmErr . ' | ' . $catalogErr;
     updateProductSyncState($db, $productId, 'error', $err, $attemptAt);
     return array('ok' => false, 'message' => $err);
 }
