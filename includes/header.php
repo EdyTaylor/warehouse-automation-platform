@@ -40,7 +40,8 @@ $current_page = basename($_SERVER['PHP_SELF']);
                 <a href="stock_operations.php" class="nav-link <?= $current_page == 'stock_operations.php' ? 'active' : '' ?>">🧾 Операции</a>
                 <a href="products.php" class="nav-link <?= $current_page == 'products.php' ? 'active' : '' ?>">📦 Товары</a>
                 <a href="sell.php" class="nav-link <?= $current_page == 'sell.php' ? 'active' : '' ?>">💰 Продажи</a>
-                <a href="report_day.php" class="nav-link <?= in_array($current_page, ['report_day.php','report_month.php','report_all.php']) ? 'active' : '' ?>">📊 Отчеты</a>
+                <a href="manager_dashboard.php" class="nav-link <?= $current_page == 'manager_dashboard.php' ? 'active' : '' ?>">📈 Руководитель <span class="nav-chip nav-chip-analytics">аналитика</span></a>
+                <a href="report_day.php" class="nav-link <?= in_array($current_page, ['report_day.php','report_month.php','report_all.php']) ? 'active' : '' ?>">📊 Опер. отчеты <span class="nav-chip nav-chip-ops">учет</span></a>
                 <a href="sync_monitor.php" class="nav-link <?= $current_page == 'sync_monitor.php' ? 'active' : '' ?>">⚙️ Интеграция</a>
                 <button type="button" class="btn btn-light btn-sm js-theme-toggle">🌓 Тема</button>
             </nav>

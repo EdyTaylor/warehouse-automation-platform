@@ -113,6 +113,29 @@ body {
     transform: translateY(-1px);
 }
 
+.nav-chip {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    font-size: 0.64rem;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+    vertical-align: middle;
+}
+
+.nav-chip-analytics {
+    background: rgba(39, 174, 96, 0.22);
+    color: #d6ffe6;
+    border: 1px solid rgba(39, 174, 96, 0.55);
+}
+
+.nav-chip-ops {
+    background: rgba(52, 152, 219, 0.22);
+    color: #d9edff;
+    border: 1px solid rgba(52, 152, 219, 0.55);
+}
+
 /* Карточки */
 .card {
     background: var(--card-background);

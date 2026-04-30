@@ -79,6 +79,13 @@ $details = $detailsStmt->fetchAll(PDO::FETCH_ASSOC);
 <main class="container">
     <h2>📊 Отчеты</h2>
     <div class="card">
+        <p class="text-muted">
+            Это <strong>операционный отчет</strong>: детальные строки продаж, суммы и проверка данных.
+            Для управленческих KPI, динамики и топов по бизнесу используйте
+            <a href="manager_dashboard.php">вкладку «Руководитель»</a>.
+        </p>
+    </div>
+    <div class="card">
         <h3>Период</h3>
         <form method="GET" class="form-row">
             <div class="form-group">
