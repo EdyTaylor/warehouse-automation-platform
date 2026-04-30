@@ -396,6 +396,106 @@ function fetchB24ProductSnapshot($b24ProductId) {
     );
 }
 
+function upsertB24RetailPrice($b24ProductId, $retailPrice, $currencyId) {
+    $b24ProductId = intval($b24ProductId);
+    $retailPrice = floatval($retailPrice);
+    $currencyId = strtoupper(trim((string)$currencyId));
+    if ($b24ProductId <= 0 || $retailPrice <= 0 || $currencyId === '') {
+        return array('ok' => false, 'error' => 'invalid_args');
+    }
+
+    $listResp = sendToBitrix('catalog.price.list', array(
+        'filter' => array('productId' => $b24ProductId)
+    ));
+
+    $rows = array();
+    if (is_array($listResp) && !isset($listResp['error']) && isset($listResp['result']) && is_array($listResp['result'])) {
+        $rows = $listResp['result'];
+    }
+
+    $priceId = 0;
+    $groupId = 0;
+    if (!empty($rows)) {
+        foreach ($rows as $row) {
+            $rowGroup = intval(isset($row['catalogGroupId']) ? $row['catalogGroupId'] : (isset($row['CATALOG_GROUP_ID']) ? $row['CATALOG_GROUP_ID'] : 0));
+            if ($rowGroup > 0) {
+                $groupId = $rowGroup;
+            }
+            $priceId = intval(isset($row['id']) ? $row['id'] : (isset($row['ID']) ? $row['ID'] : 0));
+            if ($rowGroup === 1 && $priceId > 0) {
+                $groupId = 1;
+                break;
+            }
+        }
+    }
+    if ($groupId <= 0) {
+        $groupId = 1;
+    }
+
+    if ($priceId > 0) {
+        $resp = sendToBitrix('catalog.price.update', array(
+            'id' => $priceId,
+            'fields' => array(
+                'price' => $retailPrice,
+                'currency' => $currencyId
+            )
+        ));
+        $ok = is_array($resp) && !isset($resp['error']);
+        return array('ok' => $ok, 'response' => $resp);
+    }
+
+    $resp = sendToBitrix('catalog.price.add', array(
+        'fields' => array(
+            'productId' => $b24ProductId,
+            'catalogGroupId' => $groupId,
+            'price' => $retailPrice,
+            'currency' => $currencyId
+        )
+    ));
+    $ok = is_array($resp) && !isset($resp['error']);
+    return array('ok' => $ok, 'response' => $resp);
+}
+
+function fetchB24RetailPrice($b24ProductId) {
+    $b24ProductId = intval($b24ProductId);
+    if ($b24ProductId <= 0) {
+        return array('ok' => false, 'price' => null, 'error' => 'invalid_b24_product_id');
+    }
+
+    $resp = sendToBitrix('catalog.price.list', array(
+        'filter' => array('productId' => $b24ProductId)
+    ));
+    if (!is_array($resp) || isset($resp['error']) || !isset($resp['result']) || !is_array($resp['result'])) {
+        return array('ok' => false, 'price' => null, 'raw' => $resp);
+    }
+
+    $rows = $resp['result'];
+    if (empty($rows)) {
+        return array('ok' => true, 'price' => null, 'raw' => $resp);
+    }
+
+    $selected = null;
+    foreach ($rows as $row) {
+        $groupId = intval(isset($row['catalogGroupId']) ? $row['catalogGroupId'] : (isset($row['CATALOG_GROUP_ID']) ? $row['CATALOG_GROUP_ID'] : 0));
+        if ($groupId === 1) {
+            $selected = $row;
+            break;
+        }
+    }
+    if ($selected === null) {
+        $selected = $rows[0];
+    }
+
+    $price = null;
+    if (isset($selected['price']) && $selected['price'] !== '') {
+        $price = floatval($selected['price']);
+    } elseif (isset($selected['PRICE']) && $selected['PRICE'] !== '') {
+        $price = floatval($selected['PRICE']);
+    }
+
+    return array('ok' => true, 'price' => $price, 'raw' => $resp);
+}
+
 function runCreateMissingProductsInB24($db, $limit) {
     $limit = intval($limit);
     if ($limit <= 0) {
@@ -497,18 +597,25 @@ function syncProductPriceToB24($db, $productId) {
         ));
         $catalogOk = is_array($catalogResp) && !isset($catalogResp['error']);
     }
+    $priceUpsertOk = false;
+    $priceUpsertResp = null;
+    if ($retailPrice > 0) {
+        $priceUpsertResp = upsertB24RetailPrice($b24Id, $retailPrice, $currencyId);
+        $priceUpsertOk = isset($priceUpsertResp['ok']) && $priceUpsertResp['ok'];
+    }
 
     $verifyNeedsPrice = $retailPrice > 0;
     $verifyNeedsPurchase = $purchasePrice > 0;
     $verified = false;
     $verifyError = '';
-    if ($crmOk || $catalogOk) {
+    if ($crmOk || $catalogOk || $priceUpsertOk) {
         $snapshot = fetchB24ProductSnapshot($b24Id);
+        $priceSnapshot = $verifyNeedsPrice ? fetchB24RetailPrice($b24Id) : array('ok' => true, 'price' => null);
         if ($snapshot['ok']) {
             $priceMatches = !$verifyNeedsPrice;
             $purchaseMatches = !$verifyNeedsPurchase;
-            if ($verifyNeedsPrice && $snapshot['price'] !== null) {
-                $priceMatches = abs(floatval($snapshot['price']) - $retailPrice) < 0.01;
+            if ($verifyNeedsPrice && isset($priceSnapshot['ok']) && $priceSnapshot['ok'] && $priceSnapshot['price'] !== null) {
+                $priceMatches = abs(floatval($priceSnapshot['price']) - $retailPrice) < 0.01;
             }
             if ($verifyNeedsPurchase && $snapshot['purchase_price'] !== null) {
                 $purchaseMatches = abs(floatval($snapshot['purchase_price']) - $purchasePrice) < 0.01;
@@ -522,7 +629,7 @@ function syncProductPriceToB24($db, $productId) {
         }
     }
 
-    if (($crmOk || $catalogOk) && $verified) {
+    if (($crmOk || $catalogOk || $priceUpsertOk) && $verified) {
         updateProductSyncState($db, $productId, 'sent', null, $attemptAt);
         return array('ok' => true, 'message' => 'Обновлено в Б24');
     }
@@ -543,7 +650,16 @@ function syncProductPriceToB24($db, $productId) {
             $catalogErr = $catalogResp['error'];
         }
     }
-    $err = $crmErr . ' | ' . $catalogErr;
+    $priceErr = 'catalog.price upsert skipped/failed';
+    if (is_array($priceUpsertResp) && isset($priceUpsertResp['response']) && is_array($priceUpsertResp['response'])) {
+        $respRow = $priceUpsertResp['response'];
+        if (isset($respRow['error_description']) && $respRow['error_description'] !== '') {
+            $priceErr = $respRow['error_description'];
+        } elseif (isset($respRow['error']) && $respRow['error'] !== '') {
+            $priceErr = $respRow['error'];
+        }
+    }
+    $err = $crmErr . ' | ' . $catalogErr . ' | ' . $priceErr;
     if ($verifyError !== '') {
         $err .= ' | ' . $verifyError;
     }
