@@ -12,6 +12,8 @@ require 'includes/header.php';
 $webhookRows = [];
 $movementErrors = [];
 $movementPending = [];
+$syncConflicts = [];
+$cycleLastRun = '';
 $successMsg = '';
 $errorMsg = '';
 
@@ -25,6 +27,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         $docDelayMs = max(0, min(5000, intval(isset($_POST['b24_doc_delay_ms']) ? $_POST['b24_doc_delay_ms'] : 700)));
         $conductChecks = max(1, min(20, intval(isset($_POST['b24_conduct_check_attempts']) ? $_POST['b24_conduct_check_attempts'] : 5)));
         $usdToKgsRate = floatval(isset($_POST['usd_to_kgs_rate']) ? $_POST['usd_to_kgs_rate'] : 90);
+        $stockSyncStoreId = max(1, intval(isset($_POST['stock_sync_store_id']) ? $_POST['stock_sync_store_id'] : 1));
+        $syncCycleChunk = max(5, min(100, intval(isset($_POST['sync_cycle_chunk']) ? $_POST['sync_cycle_chunk'] : 30)));
         if ($usdToKgsRate <= 0) {
             $usdToKgsRate = 90;
         }
@@ -39,6 +43,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         setAppSetting($db, 'b24_doc_delay_ms', (string)$docDelayMs);
         setAppSetting($db, 'b24_conduct_check_attempts', (string)$conductChecks);
         setAppSetting($db, 'usd_to_kgs_rate', (string)$usdToKgsRate);
+        setAppSetting($db, 'stock_sync_store_id', (string)$stockSyncStoreId);
+        setAppSetting($db, 'sync_cycle_chunk', (string)$syncCycleChunk);
         $successMsg = 'Настройки интеграции сохранены.';
     } catch (Exception $e) {
         $errorMsg = 'Не удалось сохранить настройки: ' . $e->getMessage();
@@ -53,8 +59,12 @@ $integrationSettings = array(
     'sync_batch_limit' => getAppSetting($db, 'sync_batch_limit', '100'),
     'b24_doc_delay_ms' => getAppSetting($db, 'b24_doc_delay_ms', '700'),
     'b24_conduct_check_attempts' => getAppSetting($db, 'b24_conduct_check_attempts', '5'),
-    'usd_to_kgs_rate' => getAppSetting($db, 'usd_to_kgs_rate', '90')
+    'usd_to_kgs_rate' => getAppSetting($db, 'usd_to_kgs_rate', '90'),
+    'stock_sync_store_id' => getAppSetting($db, 'stock_sync_store_id', '1'),
+    'sync_cycle_chunk' => getAppSetting($db, 'sync_cycle_chunk', '30')
 );
+
+$cycleLastRun = (string)getAppSetting($db, 'sync_cycle_last_run_json', '');
 
 try {
     $webhookRows = $db->query("
@@ -86,6 +96,18 @@ try {
     $movementErrors = [];
     $movementPending = [];
 }
+
+try {
+    $syncConflicts = $db->query("
+        SELECT id, conflict_type, b24_product_id, local_product_id, local_value, b24_value, details, created_at
+        FROM b24_sync_conflicts
+        WHERE status = 'new'
+        ORDER BY id DESC
+        LIMIT 50
+    ")->fetchAll(PDO::FETCH_ASSOC);
+} catch (Exception $e) {
+    $syncConflicts = [];
+}
 ?>
 
 <main class="container">
@@ -105,6 +127,7 @@ try {
             <a class="btn btn-primary b24-sync-link" href="api/bitrix/import_products.php">📦 Импортировать товары из Б24</a>
             <a class="btn btn-primary b24-sync-link" href="api/bitrix/sync_stock.php?push=1">🏪 Синхронизировать остатки</a>
             <a class="btn btn-secondary b24-sync-link" href="api/sync_prices.php?action=to_b24">💰 Синхронизировать цены</a>
+            <a class="btn btn-secondary b24-sync-link" href="api/bitrix/sync_cycle.php?chunk=<?= (int)$integrationSettings['sync_cycle_chunk'] ?>">🔁 Запустить 1 цикл автосинка</a>
         </div>
     </div>
 
@@ -158,9 +181,31 @@ try {
                     <label>Курс USD → KGS (для прихода)</label>
                     <input class="input" type="number" min="0.01" step="0.01" name="usd_to_kgs_rate" value="<?= htmlspecialchars((string)$integrationSettings['usd_to_kgs_rate']) ?>">
                 </div>
+                <div class="form-group">
+                    <label>ID склада Б24 для синка остатков</label>
+                    <input class="input" type="number" min="1" name="stock_sync_store_id" value="<?= (int)$integrationSettings['stock_sync_store_id'] ?>">
+                </div>
+                <div class="form-group">
+                    <label>Размер шага автосинка (5-100)</label>
+                    <input class="input" type="number" min="5" max="100" name="sync_cycle_chunk" value="<?= (int)$integrationSettings['sync_cycle_chunk'] ?>">
+                </div>
             </div>
             <button class="btn btn-success" type="submit">Сохранить настройки</button>
         </form>
+    </div>
+
+    <div class="card">
+        <h3>Автосинхронизация и контроль расхождений</h3>
+        <p class="text-muted">
+            Рекомендуется запускать <code>api/bitrix/sync_cycle.php?chunk=<?= (int)$integrationSettings['sync_cycle_chunk'] ?></code> по cron каждые 2-5 минут.
+            Цикл постепенно отправляет остатки/цены в Б24 и периодически проверяет изменения в Б24 на расхождения.
+        </p>
+        <?php if ($cycleLastRun !== ''): ?>
+            <p><strong>Последний результат цикла:</strong></p>
+            <pre style="white-space:pre-wrap;"><?= htmlspecialchars($cycleLastRun) ?></pre>
+        <?php else: ?>
+            <p class="text-muted">Цикл еще не запускался.</p>
+        <?php endif; ?>
     </div>
 
     <div class="card">
@@ -207,6 +252,26 @@ try {
                     <td><?= (int)$row['deal_id'] ?></td>
                     <td><?= htmlspecialchars($row['bitrix_status']) ?></td>
                     <td><?= htmlspecialchars($row['created_at']) ?></td>
+                </tr>
+            <?php endforeach; ?>
+        </table>
+    </div>
+
+    <div class="card">
+        <h3>Найденные расхождения с Б24</h3>
+        <p class="text-muted">Если здесь есть строки, нужно проверить товар и понять, где фактическая истина (приложение или Б24).</p>
+        <table class="table">
+            <tr><th>ID</th><th>Тип</th><th>B24 товар</th><th>Локальный товар</th><th>Локально</th><th>В Б24</th><th>Комментарий</th><th>Время</th></tr>
+            <?php foreach ($syncConflicts as $row): ?>
+                <tr>
+                    <td><?= (int)$row['id'] ?></td>
+                    <td><?= htmlspecialchars((string)$row['conflict_type']) ?></td>
+                    <td><?= (int)$row['b24_product_id'] ?></td>
+                    <td><?= (int)$row['local_product_id'] ?></td>
+                    <td><?= htmlspecialchars((string)$row['local_value']) ?></td>
+                    <td><?= htmlspecialchars((string)$row['b24_value']) ?></td>
+                    <td><?= htmlspecialchars((string)$row['details']) ?></td>
+                    <td><?= htmlspecialchars((string)$row['created_at']) ?></td>
                 </tr>
             <?php endforeach; ?>
         </table>
