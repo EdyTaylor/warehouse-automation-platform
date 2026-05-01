@@ -224,6 +224,8 @@ try {
             Каждая строка — один POST от исходящего вебхука Б24 на <code>api/webhook.php</code>.
             Повторная доставка того же события помечается как <strong>duplicate_delivery_skipped</strong> (видно здесь же).
             Размер: <code>?limit=120</code> в адресной строке (до 500).
+            Колонка <strong>Товар B24</strong> отражает ID товара из тела события (чаще только у <code>ONCRMPRODUCT*</code>). Для <code>ONCRMDEAL*</code>
+            там обычно «—»: позиции сделки загружаются отдельно по REST, а результат виден в <strong>Итог обработки</strong>.
         </p>
         <?php if (empty($webhookRows)): ?>
             <div class="alert alert-warning">

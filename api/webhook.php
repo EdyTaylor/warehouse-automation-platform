@@ -240,7 +240,7 @@ function handleNewDeal($db, $data) {
             : array('status' => 'deal_processed', 'deal_id' => $dealId, 'request_id' => isset($result['request_id']) ? $result['request_id'] : null)
         );
     } else {
-        webhookLogFinish($db, 'no_products', $dealId, null);
+        webhookFinishNoProducts($db, $dealId);
         echo json_encode(['status' => 'no_products', 'deal_id' => $dealId]);
     }
 }
@@ -288,7 +288,7 @@ function handleDealUpdate($db, $data) {
             'stage_id' => isset($dealCtx['STAGE_ID']) ? $dealCtx['STAGE_ID'] : null,
         ]);
     } else {
-        webhookLogFinish($db, 'no_products', $dealId, null);
+        webhookFinishNoProducts($db, $dealId);
         echo json_encode(['status' => 'no_products', 'deal_id' => $dealId]);
     }
 
@@ -531,36 +531,138 @@ function applyDealPaidOrReserveMark($db, $dealId, $dealData) {
     }
 }
 
+/**
+ * Извлекает массив строк товаров из ответа crm.deal.productrows.get (разные форматы портала).
+ */
+function bitrixUnwrapDealProductRows($resp) {
+    if (!is_array($resp) || isset($resp['error']) || !array_key_exists('result', $resp)) {
+        return null;
+    }
+    $r = $resp['result'];
+    if (!is_array($r)) {
+        return array();
+    }
+    if (isset($r['productRows']) && is_array($r['productRows'])) {
+        return $r['productRows'];
+    }
+    if (isset($r[0]) && is_array($r[0])) {
+        return $r;
+    }
+    if (isset($r['PRODUCT_ID']) || isset($r['productId']) || isset($r['PRODUCT_NAME']) || isset($r['ID'])) {
+        return array($r);
+    }
+    if (empty($r)) {
+        return array();
+    }
+    $vals = array_values($r);
+    if (!empty($vals) && isset($vals[0]) && is_array($vals[0])
+        && (isset($vals[0]['PRODUCT_ID']) || isset($vals[0]['PRODUCT_NAME']))) {
+        return $vals;
+    }
+    return $r;
+}
+
 function getDealProducts($db, $dealId) {
     require_once __DIR__ . '/bitrix/send.php';
+
+    $GLOBALS['webhook_debug_productrows'] = '';
 
     // method_urls в config опционально подменяет URL; если пуст — sendToBitrix сам строит .../crm.deal.productrows.get.json
     $payload = array('id' => $dealId);
     $resp = sendToBitrix('crm.deal.productrows.get', $payload);
-    
-    if (!is_array($resp) || isset($resp['error'])) {
-        return [];
+
+    if (!is_array($resp)) {
+        $GLOBALS['webhook_debug_productrows'] = 'productrows_resp_not_array';
+        return array();
     }
-    
+    if (isset($resp['error'])) {
+        $GLOBALS['webhook_debug_productrows'] = isset($resp['error_description'])
+            ? (string)$resp['error_description']
+            : (isset($resp['error']) ? (string)$resp['error'] : 'productrows_error');
+        return array();
+    }
+
+    $rows = bitrixUnwrapDealProductRows($resp);
+    if ($rows === null) {
+        $GLOBALS['webhook_debug_productrows'] = 'productrows_bad_result_shape';
+        return array();
+    }
+
     $products = array();
-    $rows = isset($resp['result']) && is_array($resp['result']) ? $resp['result'] : array();
     foreach ($rows as $item) {
-        $productId = intval(isset($item['PRODUCT_ID']) ? $item['PRODUCT_ID'] : 0);
-        $quantity = floatval(isset($item['QUANTITY']) ? $item['QUANTITY'] : 0);
-        $price = floatval(isset($item['PRICE']) ? $item['PRICE'] : 0);
-        $name = isset($item['PRODUCT_NAME']) ? $item['PRODUCT_NAME'] : '';
-        
-        if ($productId > 0 && $quantity > 0) {
-            $products[] = array(
-                'id' => $productId,
-                'name' => $name,
-                'quantity' => $quantity,
-                'price' => $price
-            );
+        if (!is_array($item)) {
+            continue;
         }
+        $productId = 0;
+        if (isset($item['PRODUCT_ID']) && $item['PRODUCT_ID'] !== '' && $item['PRODUCT_ID'] !== null) {
+            $productId = intval($item['PRODUCT_ID']);
+        } elseif (isset($item['productId'])) {
+            $productId = intval($item['productId']);
+        }
+
+        $price = 0.0;
+        if (isset($item['PRICE']) && $item['PRICE'] !== '' && $item['PRICE'] !== null) {
+            $price = floatval(str_replace(',', '.', (string)$item['PRICE']));
+        } elseif (isset($item['price']) && $item['price'] !== '' && $item['price'] !== null) {
+            $price = floatval(str_replace(',', '.', (string)$item['price']));
+        }
+
+        $quantity = 0.0;
+        if (isset($item['QUANTITY']) && $item['QUANTITY'] !== '' && $item['QUANTITY'] !== null) {
+            $quantity = floatval(str_replace(',', '.', (string)$item['QUANTITY']));
+        } elseif (isset($item['quantity']) && $item['quantity'] !== '' && $item['quantity'] !== null) {
+            $quantity = floatval(str_replace(',', '.', (string)$item['quantity']));
+        }
+        if ($quantity <= 0 && $price > 0) {
+            // У некоторых «услуг» в карточке количество пустое, но есть цена — считаем 1 условную позицию.
+            $quantity = 1.0;
+        }
+
+        $name = '';
+        if (isset($item['PRODUCT_NAME'])) {
+            $name = (string)$item['PRODUCT_NAME'];
+        } elseif (isset($item['productName'])) {
+            $name = (string)$item['productName'];
+        }
+
+        if ($quantity <= 0) {
+            continue;
+        }
+
+        if ($productId <= 0) {
+            $GLOBALS['webhook_debug_productrows'] = trim($GLOBALS['webhook_debug_productrows'] . ' row_without_product_id');
+            continue;
+        }
+
+        $products[] = array(
+            'id' => $productId,
+            'name' => $name,
+            'quantity' => $quantity,
+            'price' => $price
+        );
     }
-    
+
+    if (empty($products) && $GLOBALS['webhook_debug_productrows'] === '') {
+        $GLOBALS['webhook_debug_productrows'] = 'productrows_empty_list';
+    }
+
     return $products;
+}
+
+function webhookFinishNoProducts($db, $dealId) {
+    $suffix = '';
+    if (!empty($GLOBALS['webhook_debug_productrows'])) {
+        $s = preg_replace('/\s+/', ' ', (string)$GLOBALS['webhook_debug_productrows']);
+        if (strlen($s) > 90) {
+            $s = substr($s, 0, 90);
+        }
+        $suffix = ':' . $s;
+    }
+    $tag = 'no_products' . $suffix;
+    if (strlen($tag) > 155) {
+        $tag = substr($tag, 0, 155);
+    }
+    webhookLogFinish($db, $tag, $dealId, null);
 }
 
 function getDealDetails($dealId) {
