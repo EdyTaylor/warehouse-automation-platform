@@ -110,7 +110,7 @@ require_once __DIR__ . '/../functions/integration_sync_control.php';
 if (integrationAllSyncPaused($db)) {
     echo json_encode(array(
         'status' => 'integration_sync_paused',
-        'hint' => 'Включите синхронизацию на странице «Настройки» (sync_monitor.php, режим разработчика — блок паузы), чтобы обрабатывать события Б24.',
+        'hint' => 'Включите синхронизацию: sync_monitor_developers.php (блок паузы) или вкладка </> «Разработчикам», чтобы обрабатывать события Б24.',
     ));
     exit;
 }

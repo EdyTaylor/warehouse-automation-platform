@@ -30,23 +30,6 @@
                 window.setUiTheme(current === 'dark' ? 'light' : 'dark');
             });
 
-            var devToggleBtn = document.getElementById('friendcrm-dev-toggle');
-            if (devToggleBtn && typeof window.setFriendcrmDevTools === 'function') {
-                window.setFriendcrmDevTools(document.documentElement.getAttribute('data-dev-tools') === '1');
-                devToggleBtn.addEventListener('click', function () {
-                    var on = document.documentElement.getAttribute('data-dev-tools') === '1';
-                    window.setFriendcrmDevTools(!on);
-                    try {
-                        if (!on && window.location && String(window.location.pathname).indexOf('sync_monitor.php') !== -1) {
-                            var anchor = document.getElementById('friendcrm-dev-blocks');
-                            if (anchor && typeof anchor.scrollIntoView === 'function') {
-                                anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                            }
-                        }
-                    } catch (_sc) {}
-                });
-            }
-
             function ensureSyncModal() {
                 var existing = document.getElementById('sync-modal-overlay');
                 if (existing) return existing;
