@@ -75,6 +75,12 @@ if (!is_array($data)) {
     exit;
 }
 
+$dnIn = isset($data['doc_number']) ? trim((string)$data['doc_number']) : '';
+if ($dnIn === '') {
+    // Повтор того же тела POST после 504 → тот же номер → идемпотентность в stock_operations_core
+    $data['doc_number'] = 'AUTOAPI-' . substr(hash('sha256', $raw), 0, 40);
+}
+
 $params = array(
     'doc_number' => isset($data['doc_number']) ? $data['doc_number'] : '',
     'supplier' => isset($data['supplier']) ? $data['supplier'] : '',
@@ -92,6 +98,7 @@ $response = array(
     'doc_id' => isset($result['doc_id']) ? $result['doc_id'] : null,
     'b24_document_id' => isset($result['b24_document_id']) ? $result['b24_document_id'] : null,
     'sync_status' => isset($result['sync_status']) ? $result['sync_status'] : null,
+    'duplicate_receipt_skip' => !empty($result['duplicate_receipt_skip']),
     'usd_to_kgs_rate' => isset($result['usd_to_kgs_rate']) ? $result['usd_to_kgs_rate'] : null,
     'total_amount_kgs' => isset($result['total_amount_kgs']) ? $result['total_amount_kgs'] : null,
     'success_message' => isset($result['success_message']) ? $result['success_message'] : '',

@@ -1214,6 +1214,48 @@ function consumeWriteoffFromRoll($db, $rollId, $meters) {
 }
 
 /**
+ * Совпадающий doc_number после 504-повтора не должен плодить второй документ.
+ *
+ * @param string $docNumber trimmed
+ * @return string MYSQL user lock name или '' если номер не задан
+ */
+function stockReceiptBuildAdvisoryLockName($docNumber) {
+    $s = trim((string)$docNumber);
+    if ($s === '') {
+        return '';
+    }
+    return 'fcrm_rp_' . substr(hash('sha1', $s), 0, 40);
+}
+
+/**
+ * @param string $lockName из stockReceiptBuildAdvisoryLockName
+ * @return bool
+ */
+function stockReceiptMysqlGetLock(PDO $db, $lockName) {
+    if ($lockName === '') {
+        return true;
+    }
+    $st = $db->prepare('SELECT GET_LOCK(?, 55)');
+    $st->execute(array($lockName));
+    $rw = $st->fetch(PDO::FETCH_NUM);
+    return $rw !== false && intval($rw[0]) === 1;
+}
+
+/**
+ * @param string $lockName
+ */
+function stockReceiptMysqlReleaseLock(PDO $db, $lockName) {
+    if ($lockName === '') {
+        return;
+    }
+    try {
+        $st = $db->prepare('SELECT RELEASE_LOCK(?)');
+        $st->execute(array($lockName));
+    } catch (Exception $eRl) {
+    }
+}
+
+/**
  * Создаёт приход локально (документ, рулоны, движения) и синхронизирует складской документ в Б24
  * (тип «приход», строки с amount=метры, закупочная цена за метр в KGS и валютой из настроек).
  *
@@ -1234,7 +1276,8 @@ function consumeWriteoffFromRoll($db, $rollId, $meters) {
  *   local_only (bool) — если true: один локальный документ + рулоны + движения, без документа Б24 и без
  *     syncProductAvailable/logAndSyncMovement по Б24 (быстрее, без 504 на больших партиях).
  *
- * Возвращает массив: ok, doc_id, b24_document_id, sync_status, success_message, error_message, sync_result, usd_to_kgs_rate, total_amount_kgs, receipt_currency
+ * Возвращает массив: ok, doc_id, b24_document_id, sync_status, success_message, error_message, sync_result,
+ * duplicate_receipt_skip (bool, если уже был приход с этим doc_number), usd_to_kgs_rate, total_amount_kgs, receipt_currency
  */
 function stockOperationsProcessCreateReceiptPayload($db, array $params) {
     @ini_set('max_execution_time', '0');
@@ -1263,6 +1306,7 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
         'success_message' => '',
         'error_message' => '',
         'sync_result' => null,
+        'duplicate_receipt_skip' => false,
         'usd_to_kgs_rate' => $usdToKgsRate,
         'total_amount_kgs' => null,
         'receipt_currency' => $receiptCurrency
@@ -1287,6 +1331,41 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
             return $outBase;
         }
     }
+
+    $advisoryLockName = stockReceiptBuildAdvisoryLockName($docNumber);
+    try {
+        if ($advisoryLockName !== '') {
+            if (!stockReceiptMysqlGetLock($db, $advisoryLockName)) {
+                $outBase['error_message'] = 'Приход с этим номером документа уже выполняется другим запросом (или блокировка не получена за 55 с). Подождите и не дублируйте отправку.';
+                return $outBase;
+            }
+
+            $exStmt = $db->prepare('
+                SELECT id, COALESCE(b24_document_id, 0) AS b24d,
+                       COALESCE(b24_sync_status, \'\') AS st
+                FROM stock_operation_docs
+                WHERE operation_type = \'receipt\' AND doc_number = ?
+                ORDER BY id ASC
+                LIMIT 1
+            ');
+            $exStmt->execute(array($docNumber));
+            $existingReceipt = $exStmt->fetch(PDO::FETCH_ASSOC);
+            if (is_array($existingReceipt)) {
+                $extId = intval(isset($existingReceipt['id']) ? $existingReceipt['id'] : 0);
+                $extB24 = intval(isset($existingReceipt['b24d']) ? $existingReceipt['b24d'] : 0);
+                $extSt = isset($existingReceipt['st']) ? (string)$existingReceipt['st'] : '';
+                $outBase['ok'] = true;
+                $outBase['doc_id'] = $extId;
+                $outBase['duplicate_receipt_skip'] = true;
+                $outBase['sync_status'] = $extSt !== '' ? $extSt : null;
+                $outBase['b24_document_id'] = $extB24 > 0 ? $extB24 : null;
+                $outBase['total_amount_kgs'] = null;
+                $outBase['success_message'] = 'Повторный запрос игнорирован: приход с номером «'
+                    . $docNumber . '» уже есть (документ #' . $extId . '). Дубликаты не созданы.';
+                $outBase['error_message'] = '';
+                return $outBase;
+            }
+        }
 
     $isoTweakedForReceipt = false;
     try {
@@ -1535,5 +1614,8 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
         if ($isoTweakedForReceipt) {
             @$db->exec('SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE-READ');
         }
+    }
+    } finally {
+        stockReceiptMysqlReleaseLock($db, $advisoryLockName);
     }
 }

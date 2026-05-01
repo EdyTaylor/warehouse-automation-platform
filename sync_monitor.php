@@ -178,6 +178,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     }
                     $errorMsg = 'Некорректный JSON' . ($jem !== '' ? (': ' . $jem) : '') . '.';
                 } else {
+                    $dnRec = isset($dataRec['doc_number']) ? trim((string)$dataRec['doc_number']) : '';
+                    if ($dnRec === '') {
+                        $dataRec['doc_number'] = 'AUTOGUI-' . substr(hash('sha256', $jsonRaw), 0, 40);
+                    }
                     $paramsRec = array(
                         'doc_number' => isset($dataRec['doc_number']) ? $dataRec['doc_number'] : '',
                         'supplier' => isset($dataRec['supplier']) ? $dataRec['supplier'] : '',

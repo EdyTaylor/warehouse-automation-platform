@@ -76,7 +76,7 @@ $usdRate = getUsdToKgsRate($db);
 $docNumber = isset($payload['doc_number']) ? trim((string)$payload['doc_number']) : '';
 
 if ($docNumber === '') {
-    $docNumber = 'PR-BULK-' . date('Ymd-His');
+    $docNumber = 'PR-AUTO-' . substr(hash('sha256', $raw), 0, 40);
     $payload['doc_number'] = $docNumber;
 }
 
