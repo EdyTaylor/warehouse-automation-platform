@@ -169,6 +169,101 @@ function pauseBeforeConduct($db) {
     }
 }
 
+/** Пауза между добавлением строк складского документа Б24 — снижает ERROR_DOCUMENT_STATUS / «document not found» при пакетной записи. */
+function pauseBetweenB24DocumentLineAdds($db) {
+    $delayMs = intval(getAppSetting($db, 'b24_doc_line_delay_ms', '250'));
+    if ($delayMs < 0) {
+        $delayMs = 0;
+    }
+    if ($delayMs > 2000) {
+        $delayMs = 2000;
+    }
+    if ($delayMs > 0) {
+        usleep($delayMs * 1000);
+    }
+}
+
+function bitrixDocumentElementAddLooksTransient($resp) {
+    if (!is_array($resp) || !isset($resp['error'])) {
+        return false;
+    }
+    $code = (string)$resp['error'];
+    if ($code === 'ERROR_DOCUMENT_STATUS') {
+        return true;
+    }
+    $desc = isset($resp['error_description']) ? (string)$resp['error_description'] : '';
+    if ($desc !== '') {
+        $d = function_exists('mb_strtolower') ? mb_strtolower($desc, 'UTF-8') : strtolower($desc);
+        if (strpos($d, 'not found') !== false) {
+            return true;
+        }
+        if (strpos($d, 'document') !== false && strpos($d, 'status') !== false) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Одна строка документа: element.add → при ошибке без цен — при ERROR_DOCUMENT_STATUS одна повторная попытка после паузы.
+ *
+ * @param PDO $db
+ * @param array $elementFields
+ * @return array ok(bool), resp|lineResp,fallbackResp,fallbackFields
+ */
+function bitrixAppendDocumentLineWithPricingFallbackAndRetry($db, array $elementFields) {
+    $runAttempt = function (array $fields) {
+        $lineResp = sendToBitrix('catalog.document.element.add', array('fields' => $fields));
+        if (is_array($lineResp) && !isset($lineResp['error'])) {
+            return array('ok' => true, 'resp' => $lineResp);
+        }
+        $fallbackFields = $fields;
+        unset(
+            $fallbackFields['price'],
+            $fallbackFields['purchasingPrice'],
+            $fallbackFields['currency'],
+            $fallbackFields['purchasingCurrency'],
+            $fallbackFields['PRICE'],
+            $fallbackFields['PURCHASING_PRICE'],
+            $fallbackFields['PURCHASING_CURRENCY']
+        );
+        $fallbackResp = sendToBitrix('catalog.document.element.add', array('fields' => $fallbackFields));
+        if (is_array($fallbackResp) && !isset($fallbackResp['error'])) {
+            return array('ok' => true, 'resp' => $fallbackResp, 'used_pricing_fallback' => true);
+        }
+        return array(
+            'ok' => false,
+            'lineResp' => $lineResp,
+            'fallbackResp' => $fallbackResp,
+            'fallbackFields' => $fallbackFields
+        );
+    };
+
+    $first = $runAttempt($elementFields);
+    if (!empty($first['ok'])) {
+        return $first;
+    }
+    $transient = bitrixDocumentElementAddLooksTransient($first['lineResp'])
+        || bitrixDocumentElementAddLooksTransient($first['fallbackResp']);
+    if ($transient) {
+        $delayMs = intval(getAppSetting($db, 'b24_doc_line_retry_delay_ms', '500'));
+        if ($delayMs < 200) {
+            $delayMs = 200;
+        }
+        if ($delayMs > 3000) {
+            $delayMs = 3000;
+        }
+        usleep($delayMs * 1000);
+        $second = $runAttempt($elementFields);
+        if (!empty($second['ok'])) {
+            $second['retried_after_transient'] = true;
+            return $second;
+        }
+        return $second;
+    }
+    return $first;
+}
+
 function parseBitrixListRows($resp) {
     if (!is_array($resp) || isset($resp['error']) || !isset($resp['result'])) {
         return array();
@@ -601,6 +696,11 @@ function syncOperationDocumentToBitrix($db, $docId, $docType, $docNumber, $comme
         return array('ok' => false, 'stage' => 'document.add', 'response' => $docResp);
     }
 
+    // Поставщик до строк: на части порталов без контрагента document.element.add падает с ERROR_DOCUMENT_STATUS.
+    if ($docType === 'receipt') {
+        ensureDocumentSupplierForReceipt($b24DocId, $supplierName);
+    }
+
     $lineResponses = array();
     foreach ($lineRows as $line) {
         $localProductId = intval(isset($line['product_id']) ? $line['product_id'] : 0);
@@ -683,36 +783,38 @@ function syncOperationDocumentToBitrix($db, $docId, $docType, $docNumber, $comme
             $elementFields['PURCHASING_CURRENCY'] = $currency;
         }
 
-        $lineResp = sendToBitrix('catalog.document.element.add', array('fields' => $elementFields));
-        if (is_array($lineResp) && isset($lineResp['error'])) {
-            $fallbackFields = $elementFields;
-            unset($fallbackFields['price'], $fallbackFields['purchasingPrice'], $fallbackFields['currency']);
-            $fallbackResp = sendToBitrix('catalog.document.element.add', array('fields' => $fallbackFields));
+        $addResult = bitrixAppendDocumentLineWithPricingFallbackAndRetry($db, $elementFields);
+        if (empty($addResult['ok'])) {
             $lineResponses[] = array(
                 'product_id' => $localProductId,
                 'b24_product_id' => $b24ProductId,
                 'amount' => $amount,
-                'response' => $lineResp,
-                'fallback_response' => $fallbackResp
+                'response' => isset($addResult['lineResp']) ? $addResult['lineResp'] : null,
+                'fallback_response' => isset($addResult['fallbackResp']) ? $addResult['fallbackResp'] : null
             );
-            if (!is_array($fallbackResp) || isset($fallbackResp['error'])) {
-                return array(
-                    'ok' => false,
-                    'stage' => 'document.element.add',
-                    'b24_document_id' => $b24DocId,
-                    'line_responses' => $lineResponses,
-                    'response' => $fallbackResp
-                );
-            }
-            continue;
+            return array(
+                'ok' => false,
+                'stage' => 'document.element.add',
+                'b24_document_id' => $b24DocId,
+                'line_responses' => $lineResponses,
+                'response' => isset($addResult['fallbackResp']) ? $addResult['fallbackResp'] : (isset($addResult['lineResp']) ? $addResult['lineResp'] : null)
+            );
         }
 
-        $lineResponses[] = array(
+        $oneLine = array(
             'product_id' => $localProductId,
             'b24_product_id' => $b24ProductId,
             'amount' => $amount,
-            'response' => $lineResp
+            'response' => $addResult['resp']
         );
+        if (!empty($addResult['used_pricing_fallback'])) {
+            $oneLine['used_pricing_fallback'] = true;
+        }
+        if (!empty($addResult['retried_after_transient'])) {
+            $oneLine['retried_after_transient'] = true;
+        }
+        $lineResponses[] = $oneLine;
+        pauseBetweenB24DocumentLineAdds($db);
     }
 
     $docTotal = calculateDocumentTotalFromLines($lineRows);
@@ -795,6 +897,10 @@ function addLinesAndConductExistingB24Document($db, $b24DocId, $docType, $lineRo
     $storeFrom = intval(getAppSetting($db, 'default_store_from_id', '1'));
     $storeTo = intval(getAppSetting($db, 'default_store_to_id', '1'));
     $currency = (string)getAppSetting($db, 'default_currency', 'KGS');
+
+    if ($docType === 'receipt') {
+        ensureDocumentSupplierForReceipt(intval($b24DocId), $supplierName);
+    }
 
     $lineResponses = array();
     $existingElements = fetchB24DocumentElementsMap($b24DocId);
@@ -885,45 +991,51 @@ function addLinesAndConductExistingB24Document($db, $b24DocId, $docType, $lineRo
             $elementFields['PURCHASING_CURRENCY'] = $currency;
         }
 
-        $lineResp = sendToBitrix('catalog.document.element.add', array('fields' => $elementFields));
-        if (is_array($lineResp) && isset($lineResp['error'])) {
-            // Compatibility fallback: some portals reject pricing fields for element.add.
-            $fallbackFields = $elementFields;
-            unset($fallbackFields['price'], $fallbackFields['purchasingPrice'], $fallbackFields['currency']);
-            $fallbackResp = sendToBitrix('catalog.document.element.add', array('fields' => $fallbackFields));
+        $addResult = bitrixAppendDocumentLineWithPricingFallbackAndRetry($db, $elementFields);
+        if (empty($addResult['ok'])) {
             $lineResponses[] = array(
                 'product_id' => $localProductId,
                 'b24_product_id' => $b24ProductId,
                 'amount' => $amount,
-                'response' => $lineResp,
-                'fallback_response' => $fallbackResp
+                'response' => isset($addResult['lineResp']) ? $addResult['lineResp'] : null,
+                'fallback_response' => isset($addResult['fallbackResp']) ? $addResult['fallbackResp'] : null
             );
-            if (!is_array($fallbackResp) || isset($fallbackResp['error'])) {
-                $fallbackError = isset($fallbackResp['error_description']) ? (string)$fallbackResp['error_description'] : (isset($fallbackResp['error']) ? (string)$fallbackResp['error'] : '');
-                if ($fallbackError !== '' && (stripos($fallbackError, 'already') !== false || stripos($fallbackError, 'уже') !== false || stripos($fallbackError, 'duplicate') !== false || stripos($fallbackError, 'дублик') !== false)) {
-                    continue;
+            $msg = '';
+            if (isset($addResult['fallbackResp']) && is_array($addResult['fallbackResp'])) {
+                $msg = isset($addResult['fallbackResp']['error_description']) ? (string)$addResult['fallbackResp']['error_description'] : '';
+                if ($msg === '') {
+                    $msg = isset($addResult['fallbackResp']['error']) ? (string)$addResult['fallbackResp']['error'] : '';
                 }
-                return array(
-                    'ok' => false,
-                    'stage' => 'document.element.add',
-                    'b24_document_id' => intval($b24DocId),
-                    'line_responses' => $lineResponses,
-                    'response' => $fallbackResp
-                );
             }
-            continue;
+            if ($msg === '' && isset($addResult['lineResp']) && is_array($addResult['lineResp'])) {
+                $msg = isset($addResult['lineResp']['error_description']) ? (string)$addResult['lineResp']['error_description'] : '';
+                if ($msg === '') {
+                    $msg = isset($addResult['lineResp']['error']) ? (string)$addResult['lineResp']['error'] : '';
+                }
+            }
+            if ($msg !== '' && (stripos($msg, 'already') !== false || stripos($msg, 'уже') !== false || stripos($msg, 'duplicate') !== false || stripos($msg, 'дублик') !== false)) {
+                continue;
+            }
+            return array(
+                'ok' => false,
+                'stage' => 'document.element.add',
+                'b24_document_id' => intval($b24DocId),
+                'line_responses' => $lineResponses,
+                'response' => isset($addResult['fallbackResp']) ? $addResult['fallbackResp'] : (isset($addResult['lineResp']) ? $addResult['lineResp'] : null)
+            );
         }
 
         $lineResponses[] = array(
             'product_id' => $localProductId,
             'b24_product_id' => $b24ProductId,
             'amount' => $amount,
-            'response' => $lineResp
+            'response' => $addResult['resp']
         );
         if (!isset($existingElements[$b24ProductId])) {
             $existingElements[$b24ProductId] = 0.0;
         }
         $existingElements[$b24ProductId] += $amount;
+        pauseBetweenB24DocumentLineAdds($db);
     }
 
     $docTotal = calculateDocumentTotalFromLines($lineRows);
