@@ -6,14 +6,17 @@ require '../db.php';
 $db = getDB();
 
 $data = json_decode(file_get_contents("php://input"), true);
+if (!is_array($data)) {
+    $data = array();
+}
 
 // 🔥 данные
-$product_id = $data['product_id'] ?? 0;
-$quantity   = $data['quantity'] ?? 0;
-$price      = $data['price'] ?? 0;
-$type       = $data['type'] ?? 'sale';
-$deal_id    = $data['deal_id'] ?? null;
-$deal_url   = $data['deal_url'] ?? null;
+$product_id = isset($data['product_id']) ? $data['product_id'] : 0;
+$quantity   = isset($data['quantity']) ? $data['quantity'] : 0;
+$price      = isset($data['price']) ? $data['price'] : 0;
+$type       = isset($data['type']) ? $data['type'] : 'sale';
+$deal_id    = isset($data['deal_id']) ? $data['deal_id'] : null;
+$deal_url   = isset($data['deal_url']) ? $data['deal_url'] : null;
 
 // 🔥 расчет
 $total = $quantity * $price;

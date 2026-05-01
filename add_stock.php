@@ -7,7 +7,7 @@ require 'db.php';
 $db = getDB();
 require_once __DIR__ . '/functions/stock_movements.php';
 
-$productId = intval($_GET['product_id'] ?? 0);
+$productId = intval(isset($_GET['product_id']) ? $_GET['product_id'] : 0);
 
 // Получаем информацию о товаре
 $stmt = $db->prepare("SELECT * FROM products WHERE id = ?");
@@ -20,9 +20,9 @@ if (!$product) {
 
 // Обработка формы
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $quantity = intval($_POST['quantity'] ?? 0);
-    $minFull = floatval($_POST['min_full'] ?? 0);
-    $purchasePrice = floatval($_POST['purchase_price'] ?? 0);
+    $quantity = intval(isset($_POST['quantity']) ? $_POST['quantity'] : 0);
+    $minFull = floatval(isset($_POST['min_full']) ? $_POST['min_full'] : 0);
+    $purchasePrice = floatval(isset($_POST['purchase_price']) ? $_POST['purchase_price'] : 0);
     
     if ($quantity > 0) {
         $db->beginTransaction();
