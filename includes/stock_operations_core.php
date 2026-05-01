@@ -1,5 +1,8 @@
-<?php
+﻿<?php
 /** Shared: stock tables, Bitrix document sync, receipt product helpers. */
+
+require_once __DIR__ . '/../functions/stock_movements.php';
+
 function ensureColumnExists($db, $tableName, $columnName, $columnSql) {
     $stmt = $db->prepare("SHOW COLUMNS FROM `{$tableName}` LIKE ?");
     $stmt->execute(array($columnName));
