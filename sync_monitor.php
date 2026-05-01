@@ -74,6 +74,7 @@ try {
     $wk = $db->query('
         SELECT id, event,
                COALESCE(handler_outcome, \'\') AS handler_outcome,
+               COALESCE(handler_detail, \'\') AS handler_detail,
                entity_deal_id, entity_product_id,
                CHAR_LENGTH(data) AS data_chars,
                LEFT(data, 1500) AS data_preview,
@@ -268,9 +269,20 @@ try {
                     <td><?= $wid ?></td>
                     <td><code><?= htmlspecialchars((string)$row['event']) ?></code></td>
                     <td>
-                        <?= htmlspecialchars((string)$row['handler_outcome']) !== ''
-                            ? '<code>' . htmlspecialchars((string)$row['handler_outcome']) . '</code>'
-                            : '<span class="text-muted">—</span>'
+                        <?php
+                        $hoc = (string)$row['handler_outcome'];
+                        $hdl = isset($row['handler_detail']) ? trim((string)$row['handler_detail']) : '';
+                        if ($hoc !== '') {
+                            echo '<code>' . htmlspecialchars($hoc) . '</code>';
+                            if ($hdl !== '') {
+                                echo '<details style="margin-top:6px;max-width:100%;"><summary style="cursor:pointer;font-size:12px;color:var(--muted,#6c757d);">Детали ошибки / пояснение</summary>'
+                                    . '<div style="margin-top:6px;max-width:100%;overflow-x:auto;"><pre style="margin:0;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font-size:11px;padding:8px;background:var(--bs-body-bg,#f1f3f5);border-radius:4px;border:1px solid rgba(127,127,127,0.25);">'
+                                    . htmlspecialchars($hdl)
+                                    . '</pre></div></details>';
+                            }
+                        } else {
+                            echo '<span class="text-muted">—</span>';
+                        }
                         ?>
                     </td>
                     <td><?= isset($row['entity_deal_id']) && intval($row['entity_deal_id']) > 0 ? intval($row['entity_deal_id']) : '—' ?></td>

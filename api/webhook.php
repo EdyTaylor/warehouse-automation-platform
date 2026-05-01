@@ -247,7 +247,7 @@ function handleNewDeal($db, $data) {
         ];
         $result = queueDealForWarehouse($db, $dealData);
         if (isset($result['error'])) {
-            webhookLogFinish($db, 'queue_error', $dealId, $logProductId);
+            webhookLogFinish($db, 'queue_error', $dealId, $logProductId, isset($result['error']) ? $result['error'] : null);
         } else {
             webhookLogFinish($db, 'deal_processed', $dealId, $logProductId);
         }
@@ -289,7 +289,7 @@ function handleDealUpdate($db, $data) {
             'products' => $products
         ]);
         if (isset($result['error'])) {
-            webhookLogFinish($db, 'queue_error', $dealId, $logProductIdDeal);
+            webhookLogFinish($db, 'queue_error', $dealId, $logProductIdDeal, isset($result['error']) ? $result['error'] : null);
         } else {
             webhookLogFinish($db, 'deal_updated', $dealId, $logProductIdDeal);
         }

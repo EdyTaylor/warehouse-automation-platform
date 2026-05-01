@@ -23,6 +23,7 @@ try {
     $out['webhook_log_rows'] = (int)$db->query('SELECT COUNT(*) FROM webhook_log')->fetchColumn();
     $st = $db->query('
         SELECT id, event, COALESCE(handler_outcome, \'\') AS handler_outcome,
+               COALESCE(handler_detail, \'\') AS handler_detail,
                entity_deal_id, entity_product_id, created_at
         FROM webhook_log ORDER BY id DESC LIMIT 5
     ');

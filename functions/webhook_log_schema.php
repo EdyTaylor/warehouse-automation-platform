@@ -33,6 +33,9 @@ function webhookLogEnsureSchema(PDO $db) {
     if (!$chk($db, 'entity_product_id')) {
         $db->exec('ALTER TABLE webhook_log ADD COLUMN entity_product_id int DEFAULT NULL AFTER entity_deal_id');
     }
+    if (!$chk($db, 'handler_detail')) {
+        $db->exec('ALTER TABLE webhook_log ADD COLUMN handler_detail text DEFAULT NULL AFTER handler_outcome');
+    }
     try {
         $db->exec('ALTER TABLE webhook_log MODIFY data MEDIUMTEXT NOT NULL');
     } catch (Exception $e) {
@@ -90,6 +93,21 @@ function webhookLogInsertIncoming(PDO $db, $eventName, array $data, $dealId = nu
     return intval($db->lastInsertId());
 }
 
+/** Текст для handler_detail: одна строка, ограничение длины. */
+function webhookLogNormalizeDetail($detail) {
+    if ($detail === null) {
+        return null;
+    }
+    $s = preg_replace('/\s+/', ' ', trim((string)$detail));
+    if ($s === '') {
+        return null;
+    }
+    if (strlen($s) > 65000) {
+        $s = substr($s, 0, 65000) . '…';
+    }
+    return $s;
+}
+
 /**
  * Если обработчик падает с фаталом до webhookLogOutcome, записываем код вместо пустого итога.
  */
@@ -125,30 +143,33 @@ function webhookFatalOutcomeOnShutdown() {
     if (!($db instanceof PDO)) {
         return;
     }
-    $msg = isset($err['message']) ? (string)$err['message'] : 'fatal';
-    $msg = preg_replace('/\s+/', ' ', $msg);
-    if (strlen($msg) > 100) {
-        $msg = substr($msg, 0, 100);
+    $fullMsg = isset($err['message']) ? (string)$err['message'] : 'fatal';
+    $msgOneLine = preg_replace('/\s+/', ' ', $fullMsg);
+    if (strlen($msgOneLine) > 100) {
+        $msgOneLine = substr($msgOneLine, 0, 100);
     }
-    $tag = 'fatal_shutdown:' . $msg;
+    $tag = 'fatal_shutdown:' . $msgOneLine;
     if (strlen($tag) > 155) {
         $tag = substr($tag, 0, 155);
     }
     try {
-        $st = $db->prepare('UPDATE webhook_log SET handler_outcome = ? WHERE id = ? AND (handler_outcome IS NULL OR handler_outcome = \'\')');
-        $st->execute(array($tag, $lid));
+        $st = $db->prepare('UPDATE webhook_log SET handler_outcome = ?, handler_detail = ? WHERE id = ? AND (handler_outcome IS NULL OR handler_outcome = \'\')');
+        $st->execute(array($tag, webhookLogNormalizeDetail($fullMsg), $lid));
     } catch (Exception $e) {
         // ignore
     }
 }
 
-function webhookLogFinish(PDO $db, $outcome, $dealId = null, $productId = null) {
+function webhookLogFinish(PDO $db, $outcome, $dealId = null, $productId = null, $detail = null) {
     $lid = isset($GLOBALS['webhook_log_id']) ? intval($GLOBALS['webhook_log_id']) : 0;
     if ($lid <= 0 || $outcome === null || $outcome === '') {
         return;
     }
     $parts = array('handler_outcome = ?');
     $bind = array($outcome);
+    $detailNorm = webhookLogNormalizeDetail($detail);
+    $parts[] = 'handler_detail = ?';
+    $bind[] = $detailNorm;
     if ($dealId !== null && $dealId > 0) {
         $parts[] = 'entity_deal_id = ?';
         $bind[] = intval($dealId);
