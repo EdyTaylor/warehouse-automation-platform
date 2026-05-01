@@ -1288,8 +1288,16 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
         }
     }
 
+    $isoTweakedForReceipt = false;
     try {
+        // Чтобы другой запрос (сохранение паузы / «прервать приход») увиделся внутри длинной транзакции
+        @$db->exec('SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED');
+        $isoTweakedForReceipt = true;
+
+        $receiptAbortEpoch = integrationGetStockAbortEpoch($db);
         $db->beginTransaction();
+        integrationAssertReceiptAbortEpochUnchanged($db, $receiptAbortEpoch);
+
         $insDoc = $db->prepare("
             INSERT INTO stock_operation_docs (operation_type, doc_number, supplier, comment_text, total_amount, status)
             VALUES ('receipt', ?, ?, ?, 0, 'posted')
@@ -1310,6 +1318,8 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
             if (!is_array($row)) {
                 continue;
             }
+            integrationAssertReceiptAbortEpochUnchanged($db, $receiptAbortEpoch);
+
             $qtyRolls = intval(isset($row['qty_rolls']) ? $row['qty_rolls'] : (isset($row['qtyRolls']) ? $row['qtyRolls'] : 0));
             $rollLength = floatval(isset($row['roll_length']) ? $row['roll_length'] : (isset($row['rollLength']) ? $row['rollLength'] : 0));
             $inputPricePerRoll = floatval(isset($row['purchase_per_roll'])
@@ -1387,6 +1397,10 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
             ));
 
             for ($r = 0; $r < $qtyRolls; $r++) {
+                if ($r === 0 || ($r % 10) === 0) {
+                    integrationAssertReceiptAbortEpochUnchanged($db, $receiptAbortEpoch);
+                }
+
                 $effectiveRollPrice = ($deliveryPricePerRoll > 0 ? $deliveryPricePerRoll : $pricePerRoll);
                 $costPerMeter = $rollLength > 0 ? ($effectiveRollPrice / $rollLength) : 0;
                 $insRoll = $db->prepare("
@@ -1496,5 +1510,9 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
         }
         $outBase['error_message'] = $e->getMessage();
         return $outBase;
+    } finally {
+        if ($isoTweakedForReceipt) {
+            @$db->exec('SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE-READ');
+        }
     }
 }

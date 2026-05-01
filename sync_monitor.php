@@ -45,11 +45,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $allowLocalRec = isset($_POST['integration_allow_local_receipt_during_pause']) ? '1' : '0';
             setAppSetting($db, integrationAllSyncPausedSettingsKey(), $on);
             setAppSetting($db, integrationAllowLocalReceiptDuringPauseSettingsKey(), $allowLocalRec);
+            integrationBumpStockAbortEpoch($db);
             $successMsg = ($on === '1')
                 ? 'Синхронизация отключена: вебхуки не обрабатываются, cron-скрипты и запись в Б24 заблокированы. Новые рулоны — только если отмечено разрешение локального прихода при паузе.'
                 : 'Синхронизация снова включена.';
+            $successMsg .= ' Длинный приход при необходимости откатывается (обновлён счётчик прерывания).';
         } catch (Exception $e) {
             $errorMsg = 'Не удалось сохранить переключатель: ' . $e->getMessage();
+        }
+    }
+
+    if ($action === 'interrupt_running_receipt') {
+        try {
+            integrationBumpStockAbortEpoch($db);
+            $successMsg = 'Сигнал прерывания отправлен: выполняющийся приход должен откатиться в течение нескольких секунд, если он ещё добавлял рулоны.';
+        } catch (Exception $e) {
+            $errorMsg = 'Не удалось отправить прерывание: ' . $e->getMessage();
         }
     }
 
@@ -275,6 +286,7 @@ $storedReserveRaw = getAppSetting($db, integrationWarehouseReserveGateSettingsKe
 $storedRealRaw = getAppSetting($db, integrationWarehouseRealizationGateSettingsKey(), '');
 $integrationSyncPaused = integrationAllSyncPaused($db);
 $integrationAllowLocalReceiptDuringPause = integrationAllowsLocalReceiptDuringPause($db);
+$integrationStockAbortEpoch = integrationGetStockAbortEpoch($db);
 ?>
 
 <main class="container">
@@ -317,6 +329,15 @@ $integrationAllowLocalReceiptDuringPause = integrationAllowsLocalReceiptDuringPa
                 <p style="margin-top:12px;">
                     <button class="btn btn-warning" type="submit">Сохранить переключатель</button>
                 </p>
+            </form>
+            <p class="text-muted" style="margin-top:12px;">
+                Долгий приход один раз считает «номер конфигурации» (сейчас <strong><?= (int)$integrationStockAbortEpoch ?></strong>).
+                Любое сохранение блока выше увеличивает номер и <strong>откатывает</strong> ещё выполняющийся приход (ролбэк всех уже созданных в этой транзакции рулонов этого запуска).
+            </p>
+            <form method="POST" style="margin-top:10px;">
+                <input type="hidden" name="action" value="interrupt_running_receipt">
+                <button class="btn btn-danger" type="submit">Только прервать выполняющийся приход</button>
+                <span class="text-muted" style="margin-left:10px;">Без смены галочек паузы — только остановить «залипший» прогон.</span>
             </form>
         </div>
     </details>

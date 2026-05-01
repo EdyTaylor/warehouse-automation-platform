@@ -27,6 +27,43 @@ function integrationAllowsLocalReceiptDuringPause(PDO $db)
     return trim((string)getAppSetting($db, integrationAllowLocalReceiptDuringPauseSettingsKey(), '0')) === '1';
 }
 
+/** @return string */
+function integrationStockAbortEpochSettingsKey()
+{
+    return 'integration_stock_abort_epoch';
+}
+
+/** Текущая «эпоха»: при сохранении паузы или нажатии «Прервать приход» увеличивается — долгий приход откатывается при несовпадении. */
+function integrationGetStockAbortEpoch(PDO $db)
+{
+    return (int)trim((string)getAppSetting($db, integrationStockAbortEpochSettingsKey(), '0'));
+}
+
+function integrationBumpStockAbortEpoch(PDO $db)
+{
+    $cur = integrationGetStockAbortEpoch($db);
+    $next = $cur + 1;
+    if ($next > 2000000000) {
+        $next = 1;
+    }
+    setAppSetting($db, integrationStockAbortEpochSettingsKey(), (string)$next);
+    return $next;
+}
+
+/**
+ * Вызвать из долгого прихода: если эпоха изменилась (настройки сохранили в другом запросе) — прервать и откатить транзакцию.
+ *
+ * @param int $epochAtStart
+ * @throws Exception
+ */
+function integrationAssertReceiptAbortEpochUnchanged(PDO $db, $epochAtStart)
+{
+    $now = integrationGetStockAbortEpoch($db);
+    if ($now !== (int)$epochAtStart) {
+        throw new Exception('Приход прерван: изменены настройки интеграции (пауза / разрешение прихода) или нажато «Прервать приход». Повторите при необходимости.');
+    }
+}
+
 /**
  * При паузе синхронизации не создаём рулоны через обычные формы склада/дашборда.
  * Приход документом — только при integrationAllowsLocalReceiptDuringPause + local_only.
