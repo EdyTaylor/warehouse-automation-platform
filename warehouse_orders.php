@@ -6,6 +6,7 @@ header('Content-Type: text/html; charset=utf-8');
 require __DIR__ . '/db.php';
 require_once __DIR__ . '/api/bitrix/send.php';
 require_once __DIR__ . '/functions/deal_rows_sync_service.php';
+require_once __DIR__ . '/functions/sale_order_allocations.php';
 
 $db = getDB();
 $message = '';
@@ -35,56 +36,6 @@ function ensurePickerFinanceSchema($db) {
     } catch (Exception $e) {
         // Keep picker page working even if schema update fails.
     }
-}
-
-function releaseRequestReserve($db, $requestId) {
-    $cutsStmt = $db->prepare("
-        SELECT c.id, c.roll_id, c.meters
-        FROM b24_sale_line_cuts c
-        JOIN b24_sale_lines l ON l.id = c.line_id
-        WHERE l.request_id = ?
-    ");
-    $cutsStmt->execute(array($requestId));
-    $cuts = $cutsStmt->fetchAll(PDO::FETCH_ASSOC);
-
-    foreach ($cuts as $cut) {
-        $rollId = intval($cut['roll_id']);
-        $meters = floatval($cut['meters']);
-
-        $rollStmt = $db->prepare("SELECT reserved_length FROM rolls WHERE id = ?");
-        $rollStmt->execute(array($rollId));
-        $roll = $rollStmt->fetch(PDO::FETCH_ASSOC);
-        if (!$roll) {
-            continue;
-        }
-
-        $newReserved = max(0, floatval($roll['reserved_length']) - $meters);
-        if ($newReserved <= 0) {
-            $db->prepare("
-                UPDATE rolls
-                SET reserved = 0, deal_id = NULL, reserved_length = 0
-                WHERE id = ?
-            ")->execute(array($rollId));
-        } else {
-            $db->prepare("
-                UPDATE rolls
-                SET reserved_length = ?
-                WHERE id = ?
-            ")->execute(array($newReserved, $rollId));
-        }
-    }
-
-    $db->prepare("
-        DELETE c FROM b24_sale_line_cuts c
-        JOIN b24_sale_lines l ON l.id = c.line_id
-        WHERE l.request_id = ?
-    ")->execute(array($requestId));
-
-    $db->prepare("
-        UPDATE b24_sale_lines
-        SET status = 'new'
-        WHERE request_id = ? AND status != 'completed'
-    ")->execute(array($requestId));
 }
 
 if (!hasPickerColumns($db)) {
@@ -178,7 +129,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } elseif ($action === 'cancel_reserve') {
                 $db->beginTransaction();
                 try {
-                    releaseRequestReserve($db, $requestId);
+                    // Снимаем резерв через order_allocations + rolls (источник истины для автоподбора).
+                    releaseRequestAllocations($db, $requestId, null);
+                    $db->prepare("
+                        DELETE c FROM b24_sale_line_cuts c
+                        INNER JOIN b24_sale_lines l ON l.id = c.line_id
+                        WHERE l.request_id = ?
+                    ")->execute(array($requestId));
+                    $db->prepare("
+                        UPDATE b24_sale_lines
+                        SET status = 'new'
+                        WHERE request_id = ? AND status != 'completed'
+                    ")->execute(array($requestId));
+                    $dealIdRow = intval(isset($request['b24_deal_id']) ? $request['b24_deal_id'] : 0);
+                    if ($dealIdRow > 0) {
+                        try {
+                            $db->prepare("UPDATE deals SET status = 'cancelled' WHERE b24_deal_id = ?")->execute(array($dealIdRow));
+                        } catch (Exception $ignoreDealsLegacy) {
+                        }
+                        $db->prepare("
+                            UPDATE rolls
+                            SET reserved = 0, deal_id = NULL, reserved_length = 0
+                            WHERE deal_id = ?
+                        ")->execute(array($dealIdRow));
+                    }
                     $db->prepare("
                         UPDATE b24_sale_requests
                         SET picker_status = 'cancelled',
@@ -210,7 +184,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-$filterStatus = isset($_GET['status']) ? trim($_GET['status']) : '';
+$filterStatusRaw = isset($_GET['status']) ? trim($_GET['status']) : '';
 $filterDate = isset($_GET['date']) ? trim($_GET['date']) : '';
 $filterDealId = intval(isset($_GET['deal_id']) ? $_GET['deal_id'] : 0);
 
@@ -218,9 +192,12 @@ $allowedStatuses = array('new', 'picked', 'confirmed', 'shipped', 'cancelled');
 $where = array();
 $params = array();
 
-if (in_array($filterStatus, $allowedStatuses, true)) {
+if (in_array($filterStatusRaw, $allowedStatuses, true)) {
     $where[] = "r.picker_status = ?";
-    $params[] = $filterStatus;
+    $params[] = $filterStatusRaw;
+} elseif ($filterStatusRaw !== 'all') {
+    // По умолчанию — только активная очередь (без отменённых и завершённых).
+    $where[] = "r.status NOT IN ('cancelled', 'completed')";
 }
 if ($filterDate !== '') {
     $where[] = "DATE(r.created_at) = ?";
@@ -275,9 +252,10 @@ require __DIR__ . '/includes/header.php';
                 <div class="form-group">
                     <label>Статус</label>
                     <select name="status">
-                        <option value="">Все</option>
+                        <option value="" <?= $filterStatusRaw === '' ? 'selected' : '' ?>>Активные (не отмен./заверш.)</option>
+                        <option value="all" <?= $filterStatusRaw === 'all' ? 'selected' : '' ?>>Все включая архив</option>
                         <?php foreach ($allowedStatuses as $status): ?>
-                            <option value="<?= h($status) ?>" <?= $filterStatus === $status ? 'selected' : '' ?>><?= h($status) ?></option>
+                            <option value="<?= h($status) ?>" <?= $filterStatusRaw === $status ? 'selected' : '' ?>><?= h($status) ?></option>
                         <?php endforeach; ?>
                     </select>
                 </div>
