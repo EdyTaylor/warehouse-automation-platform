@@ -27,6 +27,8 @@ $cycleLastRun = '';
 $successMsg = '';
 $errorMsg = '';
 
+$bulkReceiptUiDefault = isset($_GET['bulk']) && (string)$_GET['bulk'] === '1';
+
 $funnelSnap = integrationLoadFunnelsSnapshotDecoded($db);
 $reserveGateMerged = integrationMergedReserveGate($db, $bitrixCfg);
 $realGateMerged = integrationMergedRealizationGate($db, $bitrixCfg);
@@ -397,6 +399,35 @@ $dbEmergencyRollBlockOn = (trim((string)getAppSetting($db, stockEmergencyRollCre
         </div>
     </details>
 
+    <details class="card integration-section" id="sec-bulk-receipt" open>
+        <summary class="integration-section-summary">Массовый приход из прайса (Llumar / большой JSON)</summary>
+        <div class="integration-section-body">
+            <p class="text-muted" style="margin-top:0;">
+                Один загружаемый <strong>.json</strong> в приложении даёт <strong>один документ прихода</strong> (<code>stock_operation_docs</code>):
+                в нём много строк номенклатуры (<code>stock_operation_lines</code>) и отдельная запись в <code>rolls</code> на каждый рулон — все они ссылаются на этот документ (<code>receipt_doc_id</code>).
+                Это не «много файлов прихода», а одна операция оприходования, пока вы не отправите другой файл или не смените <code>doc_number</code>.
+            </p>
+            <p class="text-muted">
+                Если в JSON указан свой <code>doc_number</code> (например <code>PR-LLUMAR-BULK-2026-05-01</code>), повторная отправка <strong>того же номера и того же уже проведённого прихода</strong> будет пропущена как дубликат.
+                Если <code>doc_number</code> пустой, номер считается от хеша тела запроса — повтор точно того же POST тоже идемпотентен.
+            </p>
+            <ol style="margin:12px 0;padding-left:1.35rem;line-height:1.55;">
+                <li><strong>Сгенерировать JSON</strong> на ПК: в репозитории <code>example/new/build_products_prices_usd_x88.js</code> (Node.js) → файл вида <code>bulk_receipt_from_llumar.generated.json</code>.</li>
+                <li><strong>Товары в Б24:</strong> заранее импорт из каталога (<a href="#sec-quick">«Импортировать товары из Б24»</a> ниже), чтобы совпали <code>b24_product_id</code> из JSON.</li>
+                <li>
+                    <strong>Запустить приход:</strong>
+                    <a class="btn btn-primary btn-sm" href="sync_monitor.php?bulk=1#sec-receipt-json" style="margin-left:8px;">Форма прихода с «Только локально» по умолчанию</a>
+                    <span class="text-muted"> — меньше 504 и нагрузки на Б24; склад в портале потом можно подтянуть отдельной синхронизацией остатков.</span>
+                </li>
+                <li>Снимите аварийные блокировки рулонов (флаг в БД / триггер / <code>STOCK_CREATES_OFF</code>), если включали для остановки дублей.</li>
+                <li>Один запрос, дождитесь сообщения об успехе. При обрыве (504) смотрите в БД документ прихода — не отправляйте второй раз с тем же <code>doc_number</code>, если первая попытка уже провелась частично/полностью.</li>
+            </ol>
+            <p class="text-muted" style="margin-bottom:0;">
+                Альтернатива браузеру для очень больших файлов — тот же JSON через <code>POST api/create_receipt_json.php</code> (заголовок секрета, при необходимости <code>&quot;local_only&quot;: true</code> в теле): лимиты задаёт <code>upload_max_filesize</code> / прокси хостинга.
+            </p>
+        </div>
+    </details>
+
     <details class="card integration-section" id="sec-receipt-json" open>
         <summary class="integration-section-summary">Приход из JSON (без Postman)</summary>
         <div class="integration-section-body">
@@ -406,6 +437,11 @@ $dbEmergencyRollBlockOn = (trim((string)getAppSetting($db, stockEmergencyRollCre
                 В JSON можно добавить ключ <code>&quot;local_only&quot;: true</code>; галочка тоже задаёт режим локально только.
                 При <strong>паузе синхронизации</strong> приход создаёт рулоны только если в блоке «Пауза» включено <strong>«Разрешить локальный приход при паузе»</strong> и здесь отмечено «только локально» (или в JSON есть <code>local_only</code>).
             </p>
+            <?php if ($bulkReceiptUiDefault): ?>
+                <div class="alert alert-info">
+                    Открыто в режиме <strong>массового прихода</strong> (<code>?bulk=1</code>): галочка «Только локально» включена по умолчанию. Снимите её, если нужен один документ сразу в Битрикс24 (риск таймаута на большом файле).
+                </div>
+            <?php endif; ?>
             <?php if ($stockReceiptSecretStored === ''): ?>
                 <div class="alert alert-warning">Секрет прихода ещё не задан — сначала сохраните его в блоке «Склады и синк».</div>
             <?php endif; ?>
@@ -426,7 +462,7 @@ $dbEmergencyRollBlockOn = (trim((string)getAppSetting($db, stockEmergencyRollCre
                 </div>
                 <div class="form-group">
                     <label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;">
-                        <input type="checkbox" name="receipt_local_only" value="1" style="margin-top:4px;">
+                        <input type="checkbox" name="receipt_local_only" value="1" <?= $bulkReceiptUiDefault ? 'checked' : '' ?> style="margin-top:4px;">
                         <span><strong>Только локально</strong> — не звать Битрикс24 при этом приходе (<code>local_only</code>).</span>
                     </label>
                 </div>
@@ -443,6 +479,8 @@ $dbEmergencyRollBlockOn = (trim((string)getAppSetting($db, stockEmergencyRollCre
         <p class="text-muted">Перейти к нужному блоку. Ниже секции можно сворачивать, чтобы убрать лишнее с экрана.</p>
         <nav class="integration-nav" aria-label="Разделы интеграции">
             <a href="#sec-sync-master">Пауза синхронизации</a>
+            <span class="text-muted">·</span>
+            <a href="#sec-bulk-receipt">Массовый приход (Llumar)</a>
             <span class="text-muted">·</span>
             <a href="#sec-receipt-json">Приход из JSON</a>
             <span class="text-muted">·</span>
@@ -472,7 +510,7 @@ $dbEmergencyRollBlockOn = (trim((string)getAppSetting($db, stockEmergencyRollCre
     <details class="card integration-section" id="sec-quick" open>
         <summary class="integration-section-summary">Быстрые действия</summary>
         <div class="integration-section-body">
-            <p class="text-muted">Кнопки запускают синк через модальное окно, без открытия новых вкладок.</p>
+            <p class="text-muted">Кнопки запускают синк через модальное окно, без открытия новых вкладок. Массовый приход из JSON — в разделе <a href="#sec-bulk-receipt">«Массовый приход (Llumar)»</a> и форме <a href="sync_monitor.php?bulk=1#sec-receipt-json">Приход из JSON (?bulk=1)</a>.</p>
             <div style="display:flex;gap:10px;flex-wrap:wrap;">
                 <a class="btn btn-primary b24-sync-link" href="api/bitrix/import_products.php">Импортировать товары из Б24</a>
                 <a class="btn btn-primary b24-sync-link" href="api/bitrix/sync_stock.php?push=1">Синхронизировать остатки</a>
