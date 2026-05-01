@@ -5,6 +5,8 @@ header('Content-Type: text/html; charset=utf-8');
 
 require 'db.php';
 $db = getDB();
+require_once __DIR__ . '/functions/app_settings.php';
+require_once __DIR__ . '/functions/integration_sync_control.php';
 require_once __DIR__ . '/functions/stock_movements.php';
 
 $productId = intval(isset($_GET['product_id']) ? $_GET['product_id'] : 0);
@@ -25,6 +27,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $purchasePrice = floatval(isset($_POST['purchase_price']) ? $_POST['purchase_price'] : 0);
     
     if ($quantity > 0) {
+        $blockMsg = integrationStockRollCreationBlockedMessage($db);
+        if ($blockMsg !== '') {
+            $error = $blockMsg;
+        } else {
+
         $db->beginTransaction();
         
         try {
@@ -71,6 +78,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } catch (Exception $e) {
             $db->rollBack();
             $error = "Ошибка: " . $e->getMessage();
+        }
         }
     } else {
         $error = "Укажите количество рулонов";

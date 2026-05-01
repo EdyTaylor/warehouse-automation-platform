@@ -8,6 +8,8 @@ require 'db.php';
 $db = getDB();
 require_once __DIR__ . '/functions/stock_movements.php';
 require_once __DIR__ . '/functions/pricing.php';
+require_once __DIR__ . '/functions/app_settings.php';
+require_once __DIR__ . '/functions/integration_sync_control.php';
 require_once __DIR__ . '/api/bitrix/send.php';
 
 // Compatibility wrapper for legacy calls in this file.
@@ -115,6 +117,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST'
     && !isset($_POST['delete_roll'])
     && (!isset($_POST['action']) || $_POST['action'] !== 'writeoff')
 ) {
+    $blockMsg = integrationStockRollCreationBlockedMessage($db);
+    if ($blockMsg !== '') {
+        $error_msg = $blockMsg;
+    } else {
     $product_id = intval($_POST['product_id']);
     $quantity = intval($_POST['quantity']);
     $min = floatval($_POST['min_full']);
@@ -148,6 +154,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST'
         ));
     }
     $success_msg = "✅ Добавлено рулонов: $quantity";
+    }
 }
 
 // 🔥 УДАЛЕНИЕ РУЛОНА (только не для проданных/списанных)

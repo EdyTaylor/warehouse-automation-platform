@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 ini_set('display_errors', 1);
 error_reporting(E_ALL);
 header('Content-Type: text/html; charset=utf-8');
@@ -13,6 +13,7 @@ require_once __DIR__ . '/functions/app_settings.php';
 $db = getDB();
 
 require_once __DIR__ . '/includes/stock_operations_core.php';
+require_once __DIR__ . '/functions/integration_sync_control.php';
 
 $successMsg = '';
 $errorMsg = '';
@@ -168,6 +169,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             'receipt_currency' => $receiptCurrency,
             'min_full' => $minFull,
             'lines' => $payloadLines,
+            'local_only' => !empty($_POST['receipt_local_only']),
         ));
 
         if (!empty($receiptResult['ok'])) {
@@ -312,6 +314,8 @@ $stockRolls = $db->query("
       AND r.reserved = 0
     ORDER BY p.name ASC, r.current_length ASC, r.id ASC
 ")->fetchAll(PDO::FETCH_ASSOC);
+$integrationSyncPaused = integrationAllSyncPaused($db);
+
 $recentDocs = $db->query("
     SELECT id, operation_type, doc_number, supplier, total_amount, status, created_at, b24_document_id, b24_sync_status, b24_sync_response
     FROM stock_operation_docs
@@ -365,6 +369,15 @@ require 'includes/header.php';
                 <input type="text" name="comment_text" placeholder="Примечание к приходу">
             </div>
             <p class="text-muted">Ввод цен в выбранной валюте. Отчет и синк в Б24 всегда в KGS. Курс USD из вкладки "Интеграция": <strong><?= htmlspecialchars(number_format($usdToKgsRate, 2, '.', ' ')) ?></strong>.</p>
+            <?php if ($integrationSyncPaused): ?>
+                <div class="alert alert-warning">Синхронизация <strong>выключена</strong>. Обычный приход с записью в Б24 недоступен — отметьте ниже «Только локально» или включите синхронизацию в Центре интеграции.</div>
+            <?php endif; ?>
+            <div class="form-group">
+                <label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;">
+                    <input type="checkbox" name="receipt_local_only" value="1" style="margin-top:4px;">
+                    <span><strong>Только локально</strong> — приход в приложение без документа и без вызовов Битрикс24 (как <code>local_only</code> в JSON).</span>
+                </label>
+            </div>
 
             <div class="table-responsive receipt-table-wrap">
                 <table class="table" id="receipt-lines">

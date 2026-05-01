@@ -6,6 +6,7 @@ header('Content-Type: text/html; charset=utf-8');
 require __DIR__ . '/db.php';
 require_once __DIR__ . '/functions/stock_movements.php';
 require_once __DIR__ . '/functions/app_settings.php';
+require_once __DIR__ . '/functions/integration_sync_control.php';
 require_once __DIR__ . '/api/bitrix/send.php';
 
 $db = getDB();
@@ -88,6 +89,10 @@ function resolveConflictStatus($db, $conflictId, $status, $detailsSuffix) {
 }
 
 function addMetersToLocalStock($db, $productId, $meters, $comment) {
+    $blockMsg = integrationStockRollCreationBlockedMessage($db);
+    if ($blockMsg !== '') {
+        throw new Exception($blockMsg);
+    }
     $productStmt = $db->prepare("SELECT id, roll_length, purchase_price FROM products WHERE id = ? LIMIT 1");
     $productStmt->execute([$productId]);
     $product = $productStmt->fetch(PDO::FETCH_ASSOC);

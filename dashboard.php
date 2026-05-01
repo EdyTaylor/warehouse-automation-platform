@@ -7,6 +7,7 @@ require 'db.php';
 $db = getDB();
 require_once __DIR__ . '/functions/stock_movements.php';
 require_once __DIR__ . '/functions/app_settings.php';
+require_once __DIR__ . '/functions/integration_sync_control.php';
 require_once __DIR__ . '/api/bitrix/send.php';
 
 $dashboardMessage = '';
@@ -26,6 +27,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if ($action === 'receipt_quick') {
+        $blockRoll = integrationStockRollCreationBlockedMessage($db);
+        if ($blockRoll !== '') {
+            $dashboardError = $blockRoll;
+        } else {
         $productId = intval(isset($_POST['product_id']) ? $_POST['product_id'] : 0);
         $newProductName = trim(isset($_POST['new_product_name']) ? $_POST['new_product_name'] : '');
         $quantity = intval(isset($_POST['quantity']) ? $_POST['quantity'] : 0);
@@ -160,6 +165,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
                 $dashboardError = $e->getMessage();
             }
+        }
         }
     }
 }

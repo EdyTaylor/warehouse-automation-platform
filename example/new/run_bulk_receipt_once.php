@@ -9,6 +9,7 @@
  *   php example/new/run_bulk_receipt_once.php
  *   php example/new/run_bulk_receipt_once.php --force
  *   php example/new/run_bulk_receipt_once.php --input="example/new/bulk_receipt_from_llumar.generated.json"
+ *   php example/new/run_bulk_receipt_once.php --local-only   (или "local_only": true в JSON — нужно при паузе синхронизации)
  */
 
 if (php_sapi_name() !== 'cli') {
@@ -62,6 +63,10 @@ $payload = json_decode($raw, true);
 if (!is_array($payload)) {
     echo "Invalid JSON input.\n";
     exit(3);
+}
+
+if (hasArg('local-only')) {
+    $payload['local_only'] = true;
 }
 
 $db = getDB();

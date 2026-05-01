@@ -304,7 +304,7 @@ $integrationSyncPaused = integrationAllSyncPaused($db);
                 <input type="hidden" name="action" value="save_sync_master_switch">
                 <label style="display:flex;gap:10px;align-items:flex-start;max-width:42rem;cursor:pointer;">
                     <input type="checkbox" name="integration_all_sync_paused" value="1" <?= $integrationSyncPaused ? 'checked' : '' ?> style="margin-top:4px;">
-                    <span><strong>Отключить синхронизацию</strong> — вебхуки Б24 получают ответ <code>integration_sync_paused</code> <em>без</em> записи в <code>webhook_log</code>; cron/импорт и исходящие вызовы Б24 через <code>sendToBitrix</code> блокируются. Ручные действия в приложении (приход JSON, правки товаров и т.д.) по-прежнему пишут в локальную БД.</span>
+                    <span><strong>Отключить синхронизацию</strong> — вебхуки Б24: ответ <code>integration_sync_paused</code> <em>без</em> записи в <code>webhook_log</code>; cron/импорт и исходящие <code>sendToBitrix</code> блокируются. Добавление рулонов через склад, дашборд, <code>add_stock</code> и «принятие остатка из Б24» по конфликту — тоже заблокированы. Исключение: приход с режимом <strong>только локально</strong> (<code>local_only</code>) и JSON/API/форма складских операций с соответствующей галочкой.</span>
                 </label>
                 <p style="margin-top:12px;">
                     <button class="btn btn-warning" type="submit">Сохранить переключатель</button>
