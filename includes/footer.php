@@ -178,13 +178,29 @@
                 });
             });
 
-            // Автоматическое скрытие алертов
+            // Алерты закрываются вручную по крестику (без быстрого авто-скрытия)
             const alerts = document.querySelectorAll('.alert');
             alerts.forEach(alert => {
-                setTimeout(() => {
+                if (alert.getAttribute('data-dismissible') === 'ready') {
+                    return;
+                }
+                alert.setAttribute('data-dismissible', 'ready');
+                alert.style.position = alert.style.position || 'relative';
+                alert.style.paddingRight = alert.style.paddingRight || '2.25rem';
+
+                const closeBtn = document.createElement('button');
+                closeBtn.type = 'button';
+                closeBtn.setAttribute('aria-label', 'Закрыть уведомление');
+                closeBtn.innerHTML = '&times;';
+                closeBtn.style.cssText = 'position:absolute;top:6px;right:8px;border:none;background:transparent;font-size:18px;line-height:1;cursor:pointer;opacity:.75;';
+                closeBtn.addEventListener('mouseenter', function() { closeBtn.style.opacity = '1'; });
+                closeBtn.addEventListener('mouseleave', function() { closeBtn.style.opacity = '.75'; });
+                closeBtn.addEventListener('click', function() {
+                    alert.style.transition = 'opacity .2s ease';
                     alert.style.opacity = '0';
-                    setTimeout(() => alert.remove(), 300);
-                }, 5000);
+                    setTimeout(function () { alert.remove(); }, 220);
+                });
+                alert.appendChild(closeBtn);
             });
 
             // Синхронизация без открытия новой вкладки + диалог результата
