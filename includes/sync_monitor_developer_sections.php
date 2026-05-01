@@ -1,4 +1,4 @@
-    <details class="card integration-section" id="sec-sync-master">
+﻿    <details class="card integration-section" id="sec-sync-master">
         <summary class="integration-section-summary">Пауза всей синхронизации с Битрикс24</summary>
         <div class="integration-section-body">
             <p class="text-muted">
@@ -90,6 +90,8 @@
                 Для большого прихода включите ниже опцию «только локально» — один документ в приложении без вызовов Б24 (меньше вероятность 504 и дробления из‑за повторов после таймаута).
                 В JSON можно добавить ключ <code>&quot;local_only&quot;: true</code>; галочка тоже задаёт режим локально только.
                 При <strong>паузе синхронизации</strong> приход создаёт рулоны только если в блоке «Пауза» включено <strong>«Разрешить локальный приход при паузе»</strong> и здесь отмечено «только локально» (или в JSON есть <code>local_only</code>).
+                Если у локальной позиции нет привязки к Битриксу (<code>b24_product_id</code>), перед созданием новой карточки приложение ищет в CRM товар с <strong>тем же именем</strong>, чтобы не плодить дубликаты; отключить: в <code>app_settings</code> ключ <code>stock_receipt_link_b24_by_exact_name</code> = <code>0</code>.
+                Отдельно дубликаты с суффиксом <strong>[stock]</strong> могут создаваться, когда Битрикс не принимает тип товара в складском документе (логика <code>ensureUsableB24ProductId</code>): тогда нужен складской тип товара в каталоге.
             </p>
             <?php if ($bulkReceiptUiDefault): ?>
                 <div class="alert alert-info">

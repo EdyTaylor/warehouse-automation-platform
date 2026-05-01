@@ -1221,13 +1221,83 @@ function stockOperationsFlushDeferredEnsureProductBitrix($db, array $productIdTo
     }
 }
 
+/**
+ * Найти в Битриксе crm.product с точным именем (без создания дубликата в каталоге).
+ * При нескольких совпадениях — минимальный ID (старейший).
+ *
+ * @param string $name
+ * @return int
+ */
+function stockOperationsFindCrmProductIdByExactName($name) {
+    $name = trim((string)$name);
+    if ($name === '') {
+        return 0;
+    }
+    $filters = array(
+        array('=NAME' => $name),
+        array('NAME' => $name),
+    );
+    foreach ($filters as $filter) {
+        $resp = sendToBitrix('crm.product.list', array(
+            'filter' => $filter,
+            'select' => array('ID', 'NAME'),
+            'start' => 0,
+        ));
+        if (!is_array($resp) || isset($resp['error']) || !isset($resp['result']) || !is_array($resp['result'])) {
+            continue;
+        }
+        $bestId = 0;
+        foreach ($resp['result'] as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            $id = intval(isset($row['ID']) ? $row['ID'] : (isset($row['id']) ? $row['id'] : 0));
+            $nm = isset($row['NAME']) ? trim((string)$row['NAME']) : (isset($row['name']) ? trim((string)$row['name']) : '');
+            if ($id <= 0) {
+                continue;
+            }
+            if ($nm !== '' && $nm !== $name) {
+                if (function_exists('mb_strtoupper')) {
+                    if (mb_strtoupper($nm, 'UTF-8') !== mb_strtoupper($name, 'UTF-8')) {
+                        continue;
+                    }
+                } elseif (strcasecmp($nm, $name) !== 0) {
+                    continue;
+                }
+            }
+            if ($bestId === 0 || $id < $bestId) {
+                $bestId = $id;
+            }
+        }
+        if ($bestId > 0) {
+            return $bestId;
+        }
+    }
+    return 0;
+}
+
 function ensureProductInBitrix($db, $product, $pricePerMeter) {
     $productId = intval(isset($product['id']) ? $product['id'] : 0);
     $productName = isset($product['name']) ? (string)$product['name'] : '';
+    $productNameTrim = trim($productName);
     $b24ProductId = intval(isset($product['b24_product_id']) ? $product['b24_product_id'] : 0);
 
     if ($productId <= 0 || $productName === '') {
         return $product;
+    }
+
+    // Не создаём вторую карточку каталога, если позиция с таким именем уже есть в Б24.
+    if ($b24ProductId <= 0 && $productNameTrim !== '') {
+        $doLinkSetting = trim((string)getAppSetting($db, 'stock_receipt_link_b24_by_exact_name', '1'));
+        if ($doLinkSetting !== '0') {
+            $linkedId = stockOperationsFindCrmProductIdByExactName($productNameTrim);
+            if ($linkedId > 0) {
+                $db->prepare('UPDATE products SET b24_product_id = ? WHERE id = ?')
+                    ->execute(array($linkedId, $productId));
+                $b24ProductId = $linkedId;
+                $product['b24_product_id'] = $linkedId;
+            }
+        }
     }
 
     if ($b24ProductId > 0) {
