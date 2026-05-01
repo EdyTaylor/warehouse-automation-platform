@@ -5,72 +5,20 @@ header('Content-Type: application/json; charset=utf-8');
 
 require '../db.php';
 $db = getDB();
-require_once __DIR__ . '/bitrix/deal.php';
-require_once __DIR__ . '/bitrix/warehouse_gate.php';
-require_once __DIR__ . '/bitrix/send.php';
-require_once __DIR__ . '/../functions/stock_movements.php';
 require_once __DIR__ . '/../functions/webhook_log_schema.php';
 
 /** @var int|null Строка в webhook_log текущего запроса (для итога обработки). */
 $GLOBALS['webhook_log_id'] = null;
 
-/**
- * Извлекает ID сделки/товара из тела outbound без доп. запросов в Битрикс.
- */
-function webhookLogExtractEntityIds($eventName, array $payload) {
-    $dealId = null;
-    $productId = null;
-    $ev = (string)$eventName;
-    if (strpos($ev, 'DEAL') !== false) {
-        $fields = extractDealPayload($payload);
-        $did = intval($fields['ID'] ?? 0);
-        if ($did > 0) {
-            $dealId = $did;
-        }
-    }
-    if (strpos($ev, 'PRODUCT') !== false) {
-        $row = isset($payload['data']) && is_array($payload['data']) ? $payload['data'] : [];
-        $pid = intval($row['ID'] ?? $row['id'] ?? 0);
-        if ($pid > 0) {
-            $productId = $pid;
-        }
-    }
-    return [$dealId, $productId];
+function extractDealPayload($data) {
+    return webhookLogExtractDealPayload($data);
 }
 
-function webhookLogInsertIncoming(PDO $db, $eventName, array $data, $dealId = null, $productId = null) {
-    $stmt = $db->prepare('
-        INSERT INTO webhook_log (event, data, processed, created_at, entity_deal_id, entity_product_id)
-        VALUES (?, ?, 0, NOW(), ?, ?)
-    ');
-    $payload = json_encode($data, JSON_UNESCAPED_UNICODE);
-    $stmt->execute([
-        $eventName,
-        $payload === false ? '{}' : $payload,
-        $dealId,
-        $productId,
-    ]);
-    return intval($db->lastInsertId());
-}
-
-function webhookLogFinish(PDO $db, $outcome, $dealId = null, $productId = null) {
-    $lid = isset($GLOBALS['webhook_log_id']) ? intval($GLOBALS['webhook_log_id']) : 0;
-    if ($lid <= 0 || $outcome === null || $outcome === '') {
-        return;
-    }
-    $parts = ['handler_outcome = ?'];
-    $bind = [$outcome];
-    if ($dealId !== null && $dealId > 0) {
-        $parts[] = 'entity_deal_id = ?';
-        $bind[] = intval($dealId);
-    }
-    if ($productId !== null && $productId > 0) {
-        $parts[] = 'entity_product_id = ?';
-        $bind[] = intval($productId);
-    }
-    $bind[] = $lid;
-    $sql = 'UPDATE webhook_log SET ' . implode(', ', $parts) . ' WHERE id = ?';
-    $db->prepare($sql)->execute($bind);
+function webhookLoadHandlers() {
+    require_once __DIR__ . '/bitrix/deal.php';
+    require_once __DIR__ . '/bitrix/warehouse_gate.php';
+    require_once __DIR__ . '/bitrix/send.php';
+    require_once __DIR__ . '/../functions/stock_movements.php';
 }
 
 function ensureWebhookLockTable($db) {
@@ -106,11 +54,22 @@ function ensureDynamicItemInboxTable($db) {
     ");
 }
 
-// Получаем данные от Битрикс24
+// Получаем данные от Битрикс24 (сначала лог в БД — до тяжёлых require, чтобы видеть даже сбои и «пустые» запросы)
 $input = file_get_contents('php://input');
-$data = json_decode($input, true);
+$data = json_decode((string)$input, true);
 
-if (!$data) {
+webhookLogEnsureSchema($db);
+
+if (!is_array($data)) {
+    $raw = mb_substr((string)$input, 0, 60000);
+    $GLOBALS['webhook_log_id'] = webhookLogInsertIncoming(
+        $db,
+        'INVALID_JSON_OR_BODY',
+        ['hint' => 'json_decode_failed', 'body_chars' => strlen((string)$input), 'body_preview' => $raw],
+        null,
+        null
+    );
+    webhookLogFinish($db, 'json_decode_failed_or_empty_body');
     echo json_encode(['error' => 'No data received']);
     exit;
 }
@@ -119,9 +78,10 @@ $event = $data['event'] ?? '';
 $auth = $data['auth'] ?? [];
 $eventHash = hash('sha256', $event . '|' . json_encode($data['data'] ?? [], JSON_UNESCAPED_UNICODE));
 
-webhookLogEnsureSchema($db);
 list($incomingDealId, $incomingProductId) = webhookLogExtractEntityIds($event, $data);
-$GLOBALS['webhook_log_id'] = webhookLogInsertIncoming($db, $event, $data, $incomingDealId, $incomingProductId);
+$GLOBALS['webhook_log_id'] = webhookLogInsertIncoming($db, $event === '' ? 'EMPTY_EVENT_FIELD' : $event, $data, $incomingDealId, $incomingProductId);
+
+webhookLoadHandlers();
 
 ensureWebhookLockTable($db);
 $lockStmt = $db->prepare("INSERT IGNORE INTO webhook_event_lock (event_hash, event_name) VALUES (?, ?)");
@@ -445,18 +405,6 @@ function getUserName($db, $userId) {
     // Здесь можно добавить получение имени пользователя из Б24
     // Пока возвращаем ID
     return "User {$userId}";
-}
-
-function extractDealPayload($data) {
-    if (!isset($data['data']) || !is_array($data['data'])) {
-        return [];
-    }
-
-    if (isset($data['data']['FIELDS']) && is_array($data['data']['FIELDS'])) {
-        return $data['data']['FIELDS'];
-    }
-
-    return $data['data'];
 }
 
 function applyDealPaidOrReserveMark($db, $dealId, $dealData) {
