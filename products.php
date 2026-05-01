@@ -1,6 +1,11 @@
 <?php
 ini_set('display_errors', 1);
 error_reporting(E_ALL);
+
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
 header('Content-Type: text/html; charset=utf-8');
 
 require 'db.php';
@@ -260,6 +265,63 @@ function markProductSyncPending($db, $productId) {
     $stmt->execute(array(intval($productId)));
 }
 
+define('B24_PRICE_SYNC_REPORT_MAX_ROWS', 3000);
+
+function truncateB24SyncDetail($text, $maxChars) {
+    $text = (string)$text;
+    if ($text === '') {
+        return '';
+    }
+    if (function_exists('mb_strlen') && function_exists('mb_substr')) {
+        if (mb_strlen($text, 'UTF-8') > $maxChars) {
+            return mb_substr($text, 0, $maxChars, 'UTF-8') . '…';
+        }
+        return $text;
+    }
+    if (strlen($text) > $maxChars) {
+        return substr($text, 0, $maxChars) . '…';
+    }
+    return $text;
+}
+
+/**
+ * @return array{id:int,name:string,b24_id:int,detail:string}
+ */
+function makeB24PriceSyncListRow($productId, $name, $b24ProductId, $detail) {
+    return array(
+        'id' => intval($productId),
+        'name' => trim((string)$name),
+        'b24_id' => intval($b24ProductId),
+        'detail' => truncateB24SyncDetail($detail, 450)
+    );
+}
+
+function resetB24PriceSyncSessionReport() {
+    $_SESSION['b24_price_sync_report'] = array(
+        'updated' => array(),
+        'skipped' => array(),
+        'errors' => array()
+    );
+}
+
+function appendB24PriceSyncSessionReport($bucket, $row) {
+    if (!isset($_SESSION['b24_price_sync_report']) || !is_array($_SESSION['b24_price_sync_report'])) {
+        resetB24PriceSyncSessionReport();
+    }
+    $key = null;
+    if ($bucket === 'updated') {
+        $key = 'updated';
+    } elseif ($bucket === 'skipped') {
+        $key = 'skipped';
+    } else {
+        $key = 'errors';
+    }
+    if (count($_SESSION['b24_price_sync_report'][$key]) >= B24_PRICE_SYNC_REPORT_MAX_ROWS) {
+        return;
+    }
+    $_SESSION['b24_price_sync_report'][$key][] = $row;
+}
+
 function runB24SyncForProductIds($db, $productIds) {
     $ids = array_values(array_unique(array_filter(array_map('intval', (array)$productIds), function($v) {
         return $v > 0;
@@ -268,6 +330,8 @@ function runB24SyncForProductIds($db, $productIds) {
     if (empty($ids)) {
         return array('ok' => 0, 'err' => 0, 'skip' => 0, 'total' => 0);
     }
+
+    resetB24PriceSyncSessionReport();
 
     $batchSize = getB24SyncBatchSize($db);
     $delayMs = getB24SyncDelayMs($db);
@@ -278,6 +342,9 @@ function runB24SyncForProductIds($db, $productIds) {
     foreach ($chunks as $chunkIndex => $chunk) {
         foreach ($chunk as $productId) {
             $res = syncProductPriceToB24($db, $productId);
+            if (!empty($res['sync_report_bucket']) && isset($res['sync_report_row'])) {
+                appendB24PriceSyncSessionReport($res['sync_report_bucket'], $res['sync_report_row']);
+            }
             if (!empty($res['skipped'])) {
                 $skip++;
             } elseif ($res['ok']) {
@@ -343,9 +410,13 @@ function processPriceSyncChunk($db, $offset, $limit) {
             if (count($errors) < 5) {
                 $errors[] = array('product_id' => 0, 'message' => 'Некорректный product_id');
             }
+            appendB24PriceSyncSessionReport('errors', makeB24PriceSyncListRow(0, '', 0, 'Некорректный product_id в партии'));
             continue;
         }
         $res = syncProductPriceToB24($db, $productId);
+        if (!empty($res['sync_report_bucket']) && isset($res['sync_report_row'])) {
+            appendB24PriceSyncSessionReport($res['sync_report_bucket'], $res['sync_report_row']);
+        }
         if (!empty($res['skipped'])) {
             $skip++;
         } elseif (isset($res['ok']) && $res['ok']) {
@@ -606,21 +677,36 @@ function runCreateMissingProductsInB24($db, $limit) {
 }
 
 function syncProductPriceToB24($db, $productId) {
+    $pid = intval($productId);
     $stmt = $db->prepare("
         SELECT id, name, b24_product_id, price_per_meter
         FROM products
         WHERE id = ?
         LIMIT 1
     ");
-    $stmt->execute(array(intval($productId)));
+    $stmt->execute(array($pid));
     $product = $stmt->fetch(PDO::FETCH_ASSOC);
+    $pName = '';
+    if (is_array($product) && isset($product['name'])) {
+        $pName = (string)$product['name'];
+    }
     if (!$product) {
-        return array('ok' => false, 'message' => 'Товар не найден');
+        return array(
+            'ok' => false,
+            'message' => 'Товар не найден',
+            'sync_report_bucket' => 'errors',
+            'sync_report_row' => makeB24PriceSyncListRow($pid, '', 0, 'Товар не найден в базе приложения')
+        );
     }
     $attemptAt = date('Y-m-d H:i:s');
     if (empty($product['b24_product_id'])) {
         updateProductSyncState($db, $productId, 'error', 'Нет b24_product_id', $attemptAt);
-        return array('ok' => false, 'message' => 'Нет b24_product_id');
+        return array(
+            'ok' => false,
+            'message' => 'Нет b24_product_id',
+            'sync_report_bucket' => 'errors',
+            'sync_report_row' => makeB24PriceSyncListRow($pid, $pName, 0, 'Нет b24_product_id — сначала создайте товар в Б24')
+        );
     }
 
     $b24Id = intval($product['b24_product_id']);
@@ -629,7 +715,9 @@ function syncProductPriceToB24($db, $productId) {
         return array(
             'ok' => false,
             'skipped' => true,
-            'message' => 'Пропущено: не задана цена за метр'
+            'message' => 'Пропущено: не задана цена за метр',
+            'sync_report_bucket' => 'skipped',
+            'sync_report_row' => makeB24PriceSyncListRow($pid, $pName, $b24Id, 'В приложении цена за метр не задана или равна 0')
         );
     }
 
@@ -690,7 +778,17 @@ function syncProductPriceToB24($db, $productId) {
 
     if (($crmOk || $priceUpsertOk) && $verified) {
         updateProductSyncState($db, $productId, 'sent', null, $attemptAt);
-        return array('ok' => true, 'message' => 'Обновлено в Б24');
+        return array(
+            'ok' => true,
+            'message' => 'Обновлено в Б24',
+            'sync_report_bucket' => 'updated',
+            'sync_report_row' => makeB24PriceSyncListRow(
+                $pid,
+                $pName,
+                $b24Id,
+                'Отправлено ' . $retailPrice . ' ' . $currencyId . ', в Б24 значение подтверждено чтением после записи'
+            )
+        );
     }
 
     $crmErr = 'crm.product.update не вызывался';
@@ -719,7 +817,12 @@ function syncProductPriceToB24($db, $productId) {
         $err .= ' | ' . $verifyError;
     }
     updateProductSyncState($db, $productId, 'error', $err, $attemptAt);
-    return array('ok' => false, 'message' => $err);
+    return array(
+        'ok' => false,
+        'message' => $err,
+        'sync_report_bucket' => 'errors',
+        'sync_report_row' => makeB24PriceSyncListRow($pid, $pName, $b24Id, $err)
+    );
 }
 
 if (isset($_GET['delete_id'])) {
@@ -764,13 +867,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if ($action === 'sync_one') {
         $productId = intval(isset($_POST['product_id']) ? $_POST['product_id'] : 0);
+        resetB24PriceSyncSessionReport();
         $res = syncProductPriceToB24($db, $productId);
+        if (!empty($res['sync_report_bucket']) && isset($res['sync_report_row'])) {
+            appendB24PriceSyncSessionReport($res['sync_report_bucket'], $res['sync_report_row']);
+        }
         if (!empty($res['skipped'])) {
             $msg = "Отправка товара #{$productId}: пропущено (нет цены за метр)";
         } else {
             $msg = $res['ok'] ? "Отправка товара #{$productId}: успешно" : ("Отправка товара #{$productId}: " . $res['message']);
         }
-        header("Location: products.php?sync_msg=" . urlencode($msg));
+        header("Location: products.php?sync_msg=" . urlencode($msg) . "&sync_show_report=1");
         exit;
     }
 
@@ -778,7 +885,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $ids = isset($_POST['selected_ids']) && is_array($_POST['selected_ids']) ? $_POST['selected_ids'] : array();
         $stats = runB24SyncForProductIds($db, $ids);
         $sk = intval(isset($stats['skip']) ? $stats['skip'] : 0);
-        header("Location: products.php?sync_msg=" . urlencode("Отправить выбранные: обновлено {$stats['ok']}, ошибок {$stats['err']}, пропущено {$sk}, всего {$stats['total']}"));
+        header("Location: products.php?sync_msg=" . urlencode("Отправить выбранные: обновлено {$stats['ok']}, ошибок {$stats['err']}, пропущено {$sk}, всего {$stats['total']}") . "&sync_show_report=1");
         exit;
     }
 
@@ -793,19 +900,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $ids = array_map(function($r) { return intval($r['id']); }, $rows);
         $stats = runB24SyncForProductIds($db, $ids);
         $sk = intval(isset($stats['skip']) ? $stats['skip'] : 0);
-        header("Location: products.php?sync_msg=" . urlencode("Повтор ошибок: обновлено {$stats['ok']}, ошибок {$stats['err']}, пропущено {$sk}, всего {$stats['total']}"));
+        header("Location: products.php?sync_msg=" . urlencode("Повтор ошибок: обновлено {$stats['ok']}, ошибок {$stats['err']}, пропущено {$sk}, всего {$stats['total']}") . "&sync_show_errors=1&sync_show_report=1");
         exit;
     }
 
     if ($action === 'sync_row_to_b24') {
         $productId = intval(isset($_POST['product_id']) ? $_POST['product_id'] : 0);
+        resetB24PriceSyncSessionReport();
         $result = syncProductPriceToB24($db, $productId);
+        if (!empty($result['sync_report_bucket']) && isset($result['sync_report_row'])) {
+            appendB24PriceSyncSessionReport($result['sync_report_bucket'], $result['sync_report_row']);
+        }
         if (!empty($result['skipped'])) {
             $message = "Товар #{$productId}: пропущено (нет цены за метр)";
         } else {
             $message = $result['ok'] ? "Товар #{$productId}: отправка в Б24 выполнена" : ("Товар #{$productId}: " . $result['message']);
         }
-        header("Location: products.php?sync_msg=" . urlencode($message));
+        header("Location: products.php?sync_msg=" . urlencode($message) . "&sync_show_report=1");
         exit;
     }
 
@@ -966,6 +1077,10 @@ if (isset($_GET['sync_job']) && $_GET['sync_job'] === 'prices') {
         $limit = 10;
     }
 
+    if ($offset === 0) {
+        resetB24PriceSyncSessionReport();
+    }
+
     $chunk = processPriceSyncChunk($db, $offset, $limit);
     $okAcc += intval(isset($chunk['ok']) ? $chunk['ok'] : 0);
     $errAcc += intval(isset($chunk['err']) ? $chunk['err'] : 0);
@@ -982,7 +1097,7 @@ if (isset($_GET['sync_job']) && $_GET['sync_job'] === 'prices') {
     }
 
     if (!empty($chunk['done'])) {
-        header("Location: products.php?sync_msg=" . urlencode("Отправить в Б24: обновлено {$okAcc}, ошибок {$errAcc}, пропущено {$skipAcc}, всего {$total}") . "&sync_show_errors=1");
+        header("Location: products.php?sync_msg=" . urlencode("Отправить в Б24: обновлено {$okAcc}, ошибок {$errAcc}, пропущено {$skipAcc}, всего {$total}") . "&sync_show_errors=1&sync_show_report=1");
         exit;
     }
     $nextUrl = "products.php?sync_job=prices&sync_offset={$nextOffset}&sync_ok={$okAcc}&sync_err={$errAcc}&sync_skip={$skipAcc}";
@@ -1005,6 +1120,12 @@ if (isset($_GET['sync_job']) && $_GET['sync_job'] === 'prices') {
 
 $hasCatalogId = hasColumn($db, 'products', 'catalog_id');
 $syncMsg = isset($_GET['sync_msg']) ? $_GET['sync_msg'] : '';
+$showSyncReport = isset($_GET['sync_show_report']) && $_GET['sync_show_report'] === '1';
+$priceSyncReport = null;
+if ($showSyncReport && isset($_SESSION['b24_price_sync_report']) && is_array($_SESSION['b24_price_sync_report'])) {
+    $priceSyncReport = $_SESSION['b24_price_sync_report'];
+    unset($_SESSION['b24_price_sync_report']);
+}
 $showSyncErrors = isset($_GET['sync_show_errors']) && $_GET['sync_show_errors'] === '1';
 $recentSyncErrors = array();
 if ($showSyncErrors) {
@@ -1161,6 +1282,95 @@ require 'includes/header.php';
 
     <?php if ($syncMsg): ?>
         <div class="alert alert-info"><?php echo htmlspecialchars($syncMsg); ?></div>
+    <?php endif; ?>
+    <?php
+    $reportUpd = ($priceSyncReport && isset($priceSyncReport['updated']) && is_array($priceSyncReport['updated']))
+        ? $priceSyncReport['updated'] : array();
+    $reportSk = ($priceSyncReport && isset($priceSyncReport['skipped']) && is_array($priceSyncReport['skipped']))
+        ? $priceSyncReport['skipped'] : array();
+    $reportEr = ($priceSyncReport && isset($priceSyncReport['errors']) && is_array($priceSyncReport['errors']))
+        ? $priceSyncReport['errors'] : array();
+    $reportTotal = count($reportUpd) + count($reportSk) + count($reportEr);
+    ?>
+    <?php if ($priceSyncReport !== null && $reportTotal > 0): ?>
+        <?php $reportMaxHit = (
+            count($reportUpd) >= B24_PRICE_SYNC_REPORT_MAX_ROWS
+            || count($reportSk) >= B24_PRICE_SYNC_REPORT_MAX_ROWS
+            || count($reportEr) >= B24_PRICE_SYNC_REPORT_MAX_ROWS
+        ); ?>
+        <div class="card b24-sync-report-card" id="b24-sync-report">
+            <h3 style="margin-top:0">Отчёт по последней отправке цен в Б24</h3>
+            <p class="muted" style="margin-top:0">Сверяйте в Битрикс24 по колонке «ID в Б24». Списком удобно проверить выборочно несколько SKU.
+                <?php if ($reportMaxHit): ?>
+                    <strong>Внимание:</strong> в одном из блоков сохранены не более <?php echo intval(B24_PRICE_SYNC_REPORT_MAX_ROWS); ?> строк — очень длинную выгрузку разбивайте фильтром или выбором.
+                <?php endif; ?></p>
+
+            <?php if (!empty($reportUpd)): ?>
+            <details open>
+                <summary><strong>Обновлено в Б24 (проверка пройдена)</strong> — <?php echo count($reportUpd); ?> шт.</summary>
+                <div class="table-responsive" style="margin-top:.75rem">
+                    <table class="table table-sm">
+                        <thead><tr><th>ID</th><th>Товар</th><th>B24 ID</th><th>Что отправлено</th><th></th></tr></thead>
+                        <tbody>
+                        <?php foreach ($reportUpd as $rw): ?>
+                            <tr>
+                                <td><?php echo intval(isset($rw['id']) ? $rw['id'] : 0); ?></td>
+                                <td><?php echo htmlspecialchars(isset($rw['name']) ? $rw['name'] : '', ENT_QUOTES, 'UTF-8'); ?></td>
+                                <td><?php echo intval(isset($rw['b24_id']) ? $rw['b24_id'] : 0); ?></td>
+                                <td><?php echo htmlspecialchars(isset($rw['detail']) ? $rw['detail'] : '', ENT_QUOTES, 'UTF-8'); ?></td>
+                                <td><a href="<?php echo htmlspecialchars(buildProductsUrl(array('edit_id' => intval(isset($rw['id']) ? $rw['id'] : 0), 'page' => null))); ?>">в каталоге</a></td>
+                            </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </details>
+            <?php endif; ?>
+
+            <?php if (!empty($reportSk)): ?>
+            <details <?php echo empty($reportUpd) ? 'open' : ''; ?> style="margin-top:12px">
+                <summary><strong>Пропущено</strong> (нет цены за метр) — <?php echo count($reportSk); ?> шт.</summary>
+                <div class="table-responsive" style="margin-top:.75rem">
+                    <table class="table table-sm">
+                        <thead><tr><th>ID</th><th>Товар</th><th>B24 ID</th><th>Причина</th><th></th></tr></thead>
+                        <tbody>
+                        <?php foreach ($reportSk as $rw): ?>
+                            <tr>
+                                <td><?php echo intval(isset($rw['id']) ? $rw['id'] : 0); ?></td>
+                                <td><?php echo htmlspecialchars(isset($rw['name']) ? $rw['name'] : '', ENT_QUOTES, 'UTF-8'); ?></td>
+                                <td><?php echo intval(isset($rw['b24_id']) ? $rw['b24_id'] : 0); ?></td>
+                                <td><?php echo htmlspecialchars(isset($rw['detail']) ? $rw['detail'] : '', ENT_QUOTES, 'UTF-8'); ?></td>
+                                <td><a href="<?php echo htmlspecialchars(buildProductsUrl(array('edit_id' => intval(isset($rw['id']) ? $rw['id'] : 0), 'page' => null))); ?>">в каталоге</a></td>
+                            </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </details>
+            <?php endif; ?>
+
+            <?php if (!empty($reportEr)): ?>
+            <details open style="margin-top:12px">
+                <summary><strong>Ошибки при этой отправке</strong> — <?php echo count($reportEr); ?> шт.</summary>
+                <div class="table-responsive" style="margin-top:.75rem">
+                    <table class="table table-sm">
+                        <thead><tr><th>ID</th><th>Товар</th><th>B24 ID</th><th>Текст ошибки</th><th></th></tr></thead>
+                        <tbody>
+                        <?php foreach ($reportEr as $rw): ?>
+                            <tr>
+                                <td><?php echo intval(isset($rw['id']) ? $rw['id'] : 0); ?></td>
+                                <td><?php echo htmlspecialchars(isset($rw['name']) ? $rw['name'] : '', ENT_QUOTES, 'UTF-8'); ?></td>
+                                <td><?php echo intval(isset($rw['b24_id']) ? $rw['b24_id'] : 0); ?></td>
+                                <td><?php echo htmlspecialchars(isset($rw['detail']) ? $rw['detail'] : '', ENT_QUOTES, 'UTF-8'); ?></td>
+                                <td><a href="<?php echo htmlspecialchars(buildProductsUrl(array('edit_id' => intval(isset($rw['id']) ? $rw['id'] : 0), 'page' => null))); ?>">в каталоге</a></td>
+                            </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </details>
+            <?php endif; ?>
+        </div>
     <?php endif; ?>
     <?php if ($showSyncErrors && !empty($recentSyncErrors)): ?>
         <div class="card">
