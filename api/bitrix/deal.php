@@ -295,9 +295,9 @@ function cancelDealReservations($db, $dealId) {
 }
 
 function queueDealForWarehouse($db, $data) {
-    $deal_id = intval($data['deal_id'] ?? 0);
-    $deal_name = $data['deal_name'] ?? '';
-    $responsible = $data['responsible'] ?? '';
+    $deal_id = intval(isset($data['deal_id']) ? $data['deal_id'] : 0);
+    $deal_name = isset($data['deal_name']) ? $data['deal_name'] : '';
+    $responsible = isset($data['responsible']) ? $data['responsible'] : '';
     $products = isset($data['products']) && is_array($data['products']) ? $data['products'] : [];
 
     if (!$deal_id || empty($products)) {
@@ -348,10 +348,10 @@ function queueDealForWarehouse($db, $data) {
         ");
 
         foreach ($products as $p) {
-            $b24_id = intval($p['id'] ?? 0);
-            $name = $p['name'] ?? 'Без названия';
-            $qty = floatval($p['quantity'] ?? 0);
-            $price = floatval($p['price'] ?? 0);
+            $b24_id = intval(isset($p['id']) ? $p['id'] : 0);
+            $name = isset($p['name']) ? $p['name'] : 'Без названия';
+            $qty = floatval(isset($p['quantity']) ? $p['quantity'] : 0);
+            $price = floatval(isset($p['price']) ? $p['price'] : 0);
 
             if ($qty <= 0) {
                 continue;
@@ -414,7 +414,8 @@ function queueDealForWarehouse($db, $data) {
     }
 }
 
-if (realpath($_SERVER['SCRIPT_FILENAME'] ?? '') === __FILE__) {
+$__deal_script = isset($_SERVER['SCRIPT_FILENAME']) ? $_SERVER['SCRIPT_FILENAME'] : '';
+if (realpath($__deal_script) === __FILE__) {
     $db = getDB();
     ensureOrderAllocationsTable($db);
     ensureColumnExists($db, 'rolls', 'reserved_length', '`reserved_length` decimal(10,2) NOT NULL DEFAULT 0 AFTER `current_length`');
@@ -427,11 +428,11 @@ if (realpath($_SERVER['SCRIPT_FILENAME'] ?? '') === __FILE__) {
     }
 
     if (isset($data['action']) && $data['action'] === 'replace_roll_allocation') {
-        $requestId = intval($data['sale_request_id'] ?? 0);
-        $productId = intval($data['product_id'] ?? 0);
-        $fromRollId = intval($data['from_roll_id'] ?? 0);
-        $toRollId = intval($data['to_roll_id'] ?? 0);
-        $meters = floatval($data['meters'] ?? 0);
+        $requestId = intval(isset($data['sale_request_id']) ? $data['sale_request_id'] : 0);
+        $productId = intval(isset($data['product_id']) ? $data['product_id'] : 0);
+        $fromRollId = intval(isset($data['from_roll_id']) ? $data['from_roll_id'] : 0);
+        $toRollId = intval(isset($data['to_roll_id']) ? $data['to_roll_id'] : 0);
+        $meters = floatval(isset($data['meters']) ? $data['meters'] : 0);
         if ($requestId <= 0 || $productId <= 0 || $fromRollId <= 0 || $toRollId <= 0 || $meters <= 0) {
             echo json_encode(["error" => "Неверные параметры ручной замены"]);
             exit;
