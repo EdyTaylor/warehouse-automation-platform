@@ -129,6 +129,66 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $errorMsg = 'Не удалось сохранить настройки: ' . $e->getMessage();
         }
     }
+
+    if ($action === 'run_stock_receipt_json') {
+        require_once __DIR__ . '/includes/stock_operations_core.php';
+        ensureStockOperationTables($db);
+        $expectedRec = trim((string)getAppSetting($db, 'stock_receipt_api_secret', ''));
+        $secretIn = isset($_POST['receipt_run_secret']) ? trim((string)$_POST['receipt_run_secret']) : '';
+        if ($expectedRec === '') {
+            $errorMsg = 'Сначала задайте и сохраните секрет JSON-прихода в блоке «Склады и синк» ниже.';
+        } elseif ($secretIn !== $expectedRec) {
+            $errorMsg = 'Неверный секрет прихода.';
+        } else {
+            $jsonRaw = '';
+            if (isset($_FILES['receipt_json_file']) && isset($_FILES['receipt_json_file']['tmp_name'])
+                && isset($_FILES['receipt_json_file']['error']) && (int)$_FILES['receipt_json_file']['error'] === UPLOAD_ERR_OK
+                && is_uploaded_file($_FILES['receipt_json_file']['tmp_name'])) {
+                $jsonRaw = (string)file_get_contents($_FILES['receipt_json_file']['tmp_name']);
+            }
+            if (trim($jsonRaw) === '' && isset($_POST['receipt_json_paste'])) {
+                $jsonRaw = (string)$_POST['receipt_json_paste'];
+            }
+            $jsonRaw = trim($jsonRaw);
+            if ($jsonRaw === '') {
+                $errorMsg = 'Выберите файл .json или вставьте JSON в текстовое поле.';
+            } else {
+                $dataRec = json_decode($jsonRaw, true);
+                if (!is_array($dataRec)) {
+                    $jem = '';
+                    if (function_exists('json_last_error_msg')) {
+                        $jem = json_last_error_msg();
+                    }
+                    $errorMsg = 'Некорректный JSON' . ($jem !== '' ? (': ' . $jem) : '') . '.';
+                } else {
+                    $paramsRec = array(
+                        'doc_number' => isset($dataRec['doc_number']) ? $dataRec['doc_number'] : '',
+                        'supplier' => isset($dataRec['supplier']) ? $dataRec['supplier'] : '',
+                        'comment_text' => isset($dataRec['comment_text']) ? $dataRec['comment_text'] : '',
+                        'receipt_currency' => isset($dataRec['receipt_currency']) ? $dataRec['receipt_currency'] : 'USD',
+                        'min_full' => isset($dataRec['min_full']) ? $dataRec['min_full'] : 0.5,
+                        'lines' => isset($dataRec['lines']) && is_array($dataRec['lines']) ? $dataRec['lines'] : array(),
+                    );
+                    $resultRec = stockOperationsProcessCreateReceiptPayload($db, $paramsRec);
+                    if (!empty($resultRec['ok'])) {
+                        $parts = array();
+                        $parts[] = 'локальный документ #' . (isset($resultRec['doc_id']) ? (int)$resultRec['doc_id'] : 0);
+                        if (isset($resultRec['b24_document_id']) && $resultRec['b24_document_id'] !== null && (string)$resultRec['b24_document_id'] !== '') {
+                            $parts[] = 'Б24 документ: ' . $resultRec['b24_document_id'];
+                        }
+                        if (isset($resultRec['sync_status']) && trim((string)$resultRec['sync_status']) !== '') {
+                            $parts[] = 'синхронизация Б24: ' . $resultRec['sync_status'];
+                        }
+                        $smExtra = trim(isset($resultRec['success_message']) ? $resultRec['success_message'] : '');
+                        $successMsg = 'Приход из JSON выполнен (' . implode(', ', $parts) . ')'
+                            . ($smExtra !== '' ? '. ' . $smExtra : '') . '.';
+                    } else {
+                        $errorMsg = 'Приход не выполнен: ' . trim(isset($resultRec['error_message']) ? $resultRec['error_message'] : 'ошибка');
+                    }
+                }
+            }
+        }
+    }
 }
 
 $stockReceiptSecretStored = trim((string)getAppSetting($db, 'stock_receipt_api_secret', ''));
@@ -248,11 +308,46 @@ $integrationSyncPaused = integrationAllSyncPaused($db);
         </div>
     </details>
 
+    <details class="card integration-section" id="sec-receipt-json" open>
+        <summary class="integration-section-summary">Приход из JSON (без Postman)</summary>
+        <div class="integration-section-body">
+            <p class="text-muted">
+                Тот же формат, что для <code>api/create_receipt_json.php</code>: формируется локальный складской документ и отправка прихода в Битрикс24.
+                Если включена <strong>пауза синхронизации</strong>, запись в Б24 может быть заблокирована — локальная часть всё равно может выполниться или откатиться в зависимости от ошибки Б24.
+            </p>
+            <?php if ($stockReceiptSecretStored === ''): ?>
+                <div class="alert alert-warning">Секрет прихода ещё не задан — сначала сохраните его в блоке «Склады и синк».</div>
+            <?php endif; ?>
+            <form method="POST" enctype="multipart/form-data">
+                <input type="hidden" name="action" value="run_stock_receipt_json">
+                <div class="form-group">
+                    <label>Файл JSON</label>
+                    <input class="input" type="file" name="receipt_json_file" accept=".json,application/json">
+                </div>
+                <div class="form-group">
+                    <label>Или вставьте JSON целиком</label>
+                    <textarea class="input" name="receipt_json_paste" rows="10" style="width:100%;max-width:100%;font-family:monospace;font-size:12px;" placeholder="{ &quot;doc_number&quot;: &quot;…&quot;, &quot;lines&quot;: [ … ] }"></textarea>
+                </div>
+                <div class="form-group">
+                    <label>Секрет (<code>stock_receipt_api_secret</code>)</label>
+                    <input class="input" type="password" name="receipt_run_secret" autocomplete="off" style="max-width:28rem;"
+                        <?= $stockReceiptSecretStored !== '' ? 'required' : '' ?>>
+                </div>
+                <button class="btn btn-primary" type="submit" <?= $stockReceiptSecretStored === '' ? 'disabled' : '' ?>>Запустить приход</button>
+            </form>
+            <p class="text-muted" style="margin-top:10px;font-size:0.9rem;">
+                Ограничение размера файла задаётся в PHP (<code>upload_max_filesize</code> / <code>post_max_size</code> на сервере). Большие приходы удобнее грузить через тот же JSON по API после настройки HTTPS.
+            </p>
+        </div>
+    </details>
+
     <div class="card">
         <h3 style="margin-top:0;">Разделы</h3>
         <p class="text-muted">Перейти к нужному блоку. Ниже секции можно сворачивать, чтобы убрать лишнее с экрана.</p>
         <nav class="integration-nav" aria-label="Разделы интеграции">
             <a href="#sec-sync-master">Пауза синхронизации</a>
+            <span class="text-muted">·</span>
+            <a href="#sec-receipt-json">Приход из JSON</a>
             <span class="text-muted">·</span>
             <a href="#sec-quick">Быстрые действия</a>
             <span class="text-muted">·</span>
