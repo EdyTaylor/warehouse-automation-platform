@@ -685,7 +685,8 @@ function b24ResolveRetailPriceCatalogTargetIdsMeta($catalogProductId) {
     $offerRows = array();
     foreach ($filterAttempts as $filter) {
         $offerResp = sendToBitrix('catalog.product.offer.list', array(
-            'select' => array('id', 'parentId', 'measure'),
+            // Берем только гарантированно доступные поля оффера (без спорных).
+            'select' => array('id', 'iblockId', 'name', 'parentId'),
             'filter' => $filter
         ));
         $offerRows = b24CatalogOfferRowsFromListResponse($offerResp);
