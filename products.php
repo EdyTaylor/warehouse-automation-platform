@@ -407,9 +407,61 @@ function fetchB24ProductSnapshot($b24ProductId) {
     );
 }
 
+function b24CatalogPriceRowId($row) {
+    return intval(isset($row['id']) ? $row['id'] : (isset($row['ID']) ? $row['ID'] : 0));
+}
+
+function b24CatalogPriceRowGroup($row) {
+    return intval(isset($row['catalogGroupId']) ? $row['catalogGroupId'] : (isset($row['CATALOG_GROUP_ID']) ? $row['CATALOG_GROUP_ID'] : 0));
+}
+
+function b24CatalogPriceRowQtyFrom($row) {
+    if (isset($row['quantityFrom'])) {
+        return intval($row['quantityFrom']);
+    }
+    if (isset($row['QUANTITY_FROM'])) {
+        return intval($row['QUANTITY_FROM']);
+    }
+
+    return 1;
+}
+
+/**
+ * Одна строка типовой цены (без «лестницы»): предпочтение группе BASE (1), затем минимальный quantityFrom.
+ */
+function pickRetailCatalogPriceRow($rows) {
+    if (empty($rows) || !is_array($rows)) {
+        return null;
+    }
+
+    $rows = array_values($rows);
+    $base = array();
+    foreach ($rows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        if (b24CatalogPriceRowGroup($row) === 1) {
+            $base[] = $row;
+        }
+    }
+
+    $candidates = !empty($base) ? $base : $rows;
+    usort($candidates, function ($a, $b) {
+        return b24CatalogPriceRowQtyFrom($a) - b24CatalogPriceRowQtyFrom($b);
+    });
+
+    foreach ($candidates as $row) {
+        if (b24CatalogPriceRowId($row) > 0) {
+            return $row;
+        }
+    }
+
+    return null;
+}
+
 function upsertB24RetailPrice($b24ProductId, $retailPrice, $currencyId) {
     $b24ProductId = intval($b24ProductId);
-    $retailPrice = floatval($retailPrice);
+    $retailPrice = round(floatval($retailPrice), 4);
     $currencyId = strtoupper(trim((string)$currencyId));
     if ($b24ProductId <= 0 || $retailPrice <= 0 || $currencyId === '') {
         return array('ok' => false, 'error' => 'invalid_args');
@@ -424,23 +476,14 @@ function upsertB24RetailPrice($b24ProductId, $retailPrice, $currencyId) {
         $rows = $listResp['result'];
     }
 
-    $priceId = 0;
-    $groupId = 0;
-    if (!empty($rows)) {
-        foreach ($rows as $row) {
-            $rowGroup = intval(isset($row['catalogGroupId']) ? $row['catalogGroupId'] : (isset($row['CATALOG_GROUP_ID']) ? $row['CATALOG_GROUP_ID'] : 0));
-            if ($rowGroup > 0) {
-                $groupId = $rowGroup;
-            }
-            $priceId = intval(isset($row['id']) ? $row['id'] : (isset($row['ID']) ? $row['ID'] : 0));
-            if ($rowGroup === 1 && $priceId > 0) {
-                $groupId = 1;
-                break;
-            }
+    $pickedRow = pickRetailCatalogPriceRow($rows);
+    $priceId = $pickedRow ? b24CatalogPriceRowId($pickedRow) : 0;
+    $groupId = 1;
+    if ($pickedRow) {
+        $g = b24CatalogPriceRowGroup($pickedRow);
+        if ($g > 0) {
+            $groupId = $g;
         }
-    }
-    if ($groupId <= 0) {
-        $groupId = 1;
     }
 
     if ($priceId > 0) {
@@ -573,100 +616,81 @@ function syncProductPriceToB24($db, $productId) {
     }
 
     $b24Id = intval($product['b24_product_id']);
-    $retailPrice = floatval(isset($product['price_per_meter']) ? $product['price_per_meter'] : 0);
-    $purchasePrice = floatval(isset($product['purchase_price']) ? $product['purchase_price'] : 0);
+    $retailPrice = round(floatval(isset($product['price_per_meter']) ? $product['price_per_meter'] : 0), 4);
     $currencyId = strtoupper(trim((string)getAppSetting($db, 'default_currency', 'KGS')));
     if ($currencyId === '') {
         $currencyId = 'KGS';
     }
 
-    $crmFields = array('NAME' => $product['name']);
+    // В Б24 передаём только розничную цену за метр (без закупки и без catalog.product.update — иначе «single price» / диапазоны).
+    $crmFields = array();
     if ($retailPrice > 0) {
         $crmFields['PRICE'] = $retailPrice;
         $crmFields['CURRENCY_ID'] = $currencyId;
     }
-    if ($purchasePrice > 0) {
-        $crmFields['PURCHASING_PRICE'] = $purchasePrice;
-    }
 
-    $crmResp = sendToBitrix('crm.product.update', array(
-        'id' => $b24Id,
-        'fields' => $crmFields
-    ));
-    $crmOk = is_array($crmResp) && !isset($crmResp['error']);
-
-    $catalogOk = false;
-    $catalogResp = null;
-    $catalogFields = array();
+    $crmResp = null;
+    $crmOk = false;
     if ($retailPrice > 0) {
-        $catalogFields['price'] = $retailPrice;
-        $catalogFields['currencyId'] = $currencyId;
-    }
-    if ($purchasePrice > 0) {
-        $catalogFields['purchasingPrice'] = $purchasePrice;
-        $catalogFields['purchasingCurrency'] = $currencyId;
-    }
-    if (!empty($catalogFields)) {
-        $catalogResp = sendToBitrix('catalog.product.update', array(
+        $crmResp = sendToBitrix('crm.product.update', array(
             'id' => $b24Id,
-            'fields' => $catalogFields
+            'fields' => $crmFields
         ));
-        $catalogOk = is_array($catalogResp) && !isset($catalogResp['error']);
+        $crmOk = is_array($crmResp) && !isset($crmResp['error']);
     }
-    $priceUpsertOk = false;
+
     $priceUpsertResp = null;
+    $priceUpsertOk = false;
     if ($retailPrice > 0) {
         $priceUpsertResp = upsertB24RetailPrice($b24Id, $retailPrice, $currencyId);
         $priceUpsertOk = isset($priceUpsertResp['ok']) && $priceUpsertResp['ok'];
     }
 
     $verifyNeedsPrice = $retailPrice > 0;
-    $verifyNeedsPurchase = $purchasePrice > 0;
     $verified = false;
     $verifyError = '';
-    if ($crmOk || $catalogOk || $priceUpsertOk) {
+    if ($crmOk || $priceUpsertOk) {
         $snapshot = fetchB24ProductSnapshot($b24Id);
         $priceSnapshot = $verifyNeedsPrice ? fetchB24RetailPrice($b24Id) : array('ok' => true, 'price' => null);
-        if ($snapshot['ok']) {
-            $priceMatches = !$verifyNeedsPrice;
-            $purchaseMatches = !$verifyNeedsPurchase;
-            if ($verifyNeedsPrice && isset($priceSnapshot['ok']) && $priceSnapshot['ok'] && $priceSnapshot['price'] !== null) {
-                $priceMatches = abs(floatval($priceSnapshot['price']) - $retailPrice) < 0.01;
+        $priceMatches = !$verifyNeedsPrice;
+        $crmPriceMatches = false;
+
+        if ($verifyNeedsPrice) {
+            if (isset($priceSnapshot['ok']) && $priceSnapshot['ok'] && $priceSnapshot['price'] !== null) {
+                $priceMatches = abs(floatval($priceSnapshot['price']) - $retailPrice) < 0.02;
             }
-            if ($verifyNeedsPurchase && $snapshot['purchase_price'] !== null) {
-                $purchaseMatches = abs(floatval($snapshot['purchase_price']) - $purchasePrice) < 0.01;
+            if ($snapshot['ok'] && $snapshot['price'] !== null) {
+                $crmPriceMatches = abs(floatval($snapshot['price']) - $retailPrice) < 0.02;
             }
-            $verified = ($priceMatches && $purchaseMatches);
-            if (!$verified) {
-                $verifyError = 'Проверка после обновления: в Б24 значения не совпали';
-            }
+            $verified = ($priceMatches || $crmPriceMatches);
         } else {
+            $verified = true;
+        }
+
+        if (!$verified && $snapshot['ok']) {
+            $verifyError = 'Проверка после обновления: в Б24 цена за метр не совпала';
+        } elseif (!$verified) {
             $verifyError = 'Не удалось прочитать товар в Б24 после обновления';
         }
     }
 
-    if (($crmOk || $catalogOk || $priceUpsertOk) && $verified) {
+    if (($crmOk || $priceUpsertOk) && $verified) {
         updateProductSyncState($db, $productId, 'sent', null, $attemptAt);
         return array('ok' => true, 'message' => 'Обновлено в Б24');
     }
 
-    $crmErr = 'crm.product.update failed';
+    $crmErr = 'crm.product.update не вызывался';
     if (is_array($crmResp)) {
         if (isset($crmResp['error_description']) && $crmResp['error_description'] !== '') {
             $crmErr = $crmResp['error_description'];
         } elseif (isset($crmResp['error']) && $crmResp['error'] !== '') {
             $crmErr = $crmResp['error'];
+        } elseif ($retailPrice > 0 && !$crmOk) {
+            $crmErr = 'crm.product.update failed';
         }
     }
-    $catalogErr = 'catalog.product.update skipped/failed';
-    if (is_array($catalogResp)) {
-        if (isset($catalogResp['error_description']) && $catalogResp['error_description'] !== '') {
-            $catalogErr = $catalogResp['error_description'];
-        } elseif (isset($catalogResp['error']) && $catalogResp['error'] !== '') {
-            $catalogErr = $catalogResp['error'];
-        }
-    }
-    $priceErr = 'catalog.price upsert skipped/failed';
+
+    $priceErr = $retailPrice > 0 ? 'catalog.price: не выполнено' : 'Не задана цена за метр';
     if (is_array($priceUpsertResp) && isset($priceUpsertResp['response']) && is_array($priceUpsertResp['response'])) {
         $respRow = $priceUpsertResp['response'];
         if (isset($respRow['error_description']) && $respRow['error_description'] !== '') {
@@ -675,7 +699,8 @@ function syncProductPriceToB24($db, $productId) {
             $priceErr = $respRow['error'];
         }
     }
-    $err = $crmErr . ' | ' . $catalogErr . ' | ' . $priceErr;
+
+    $err = $crmErr . ' | ' . $priceErr;
     if ($verifyError !== '') {
         $err .= ' | ' . $verifyError;
     }
