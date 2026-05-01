@@ -223,6 +223,8 @@ $previewRows = array();
 ensureColumnExists($db, 'products', 'sync_status', "`sync_status` varchar(20) NOT NULL DEFAULT 'pending'");
 ensureColumnExists($db, 'products', 'last_error', '`last_error` text NULL');
 ensureColumnExists($db, 'products', 'last_attempt_at', '`last_attempt_at` datetime NULL');
+ensureColumnExists($db, 'products', 'last_b24_target_ids', '`last_b24_target_ids` text NULL');
+ensureColumnExists($db, 'products', 'last_b24_parent_type', '`last_b24_parent_type` int NULL');
 $db->exec("UPDATE products SET sync_status = 'pending' WHERE sync_status IS NULL OR sync_status = ''");
 
 function getB24SyncBatchSize($db) {
@@ -254,6 +256,19 @@ function updateProductSyncState($db, $productId, $status, $error, $attemptAt) {
         WHERE id = ?
     ");
     $stmt->execute(array($status, $error, $attemptAt, intval($productId)));
+}
+
+function updateProductB24SyncAudit($db, $productId, $targetIds, $parentType) {
+    $targets = array_values(array_unique(array_filter(array_map('intval', (array)$targetIds), function($v) {
+        return $v > 0;
+    })));
+    $targetCsv = empty($targets) ? null : implode(',', $targets);
+    $stmt = $db->prepare("
+        UPDATE products
+        SET last_b24_target_ids = ?, last_b24_parent_type = ?
+        WHERE id = ?
+    ");
+    $stmt->execute(array($targetCsv, intval($parentType), intval($productId)));
 }
 
 function markProductSyncPending($db, $productId) {
@@ -1024,6 +1039,8 @@ function syncProductPriceToB24($db, $productId) {
         );
     }
 
+    updateProductB24SyncAudit($db, $productId, $targets, $parentType);
+
     $crmFields = array();
     if ($retailPrice > 0) {
         $crmFields['PRICE'] = $retailPrice;
@@ -1142,6 +1159,69 @@ function syncProductPriceToB24($db, $productId) {
     );
 }
 
+function inspectProductPriceInB24($db, $productId) {
+    $pid = intval($productId);
+    if ($pid <= 0) {
+        return array('ok' => false, 'message' => 'Некорректный product_id');
+    }
+    $stmt = $db->prepare("
+        SELECT id, name, b24_product_id, price_per_meter
+        FROM products
+        WHERE id = ?
+        LIMIT 1
+    ");
+    $stmt->execute(array($pid));
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$row) {
+        return array('ok' => false, 'message' => 'Товар не найден');
+    }
+    $b24Id = intval(isset($row['b24_product_id']) ? $row['b24_product_id'] : 0);
+    if ($b24Id <= 0) {
+        return array('ok' => false, 'message' => 'Нет b24_product_id');
+    }
+    $localPrice = round(floatval(isset($row['price_per_meter']) ? $row['price_per_meter'] : 0), 4);
+    $meta = b24ResolveRetailPriceCatalogTargetIdsMeta($b24Id);
+    $targets = isset($meta['targets']) && is_array($meta['targets']) ? $meta['targets'] : array();
+    $parentType = intval(isset($meta['parent_type']) ? $meta['parent_type'] : 0);
+    updateProductB24SyncAudit($db, $pid, $targets, $parentType);
+    if (empty($targets)) {
+        return array('ok' => false, 'message' => "Проверка #{$pid}: не найдены target IDs в Б24");
+    }
+
+    $parts = array();
+    $allMatch = true;
+    foreach ($targets as $tid) {
+        $tid = intval($tid);
+        if ($tid <= 0) {
+            continue;
+        }
+        $snap = fetchB24RetailPrice($tid);
+        if (!isset($snap['ok']) || !$snap['ok']) {
+            $parts[] = "target {$tid}: ошибка чтения";
+            $allMatch = false;
+            continue;
+        }
+        $remotePrice = $snap['price'];
+        if ($remotePrice === null) {
+            $parts[] = "target {$tid}: цены нет";
+            $allMatch = false;
+            continue;
+        }
+        $remotePrice = round(floatval($remotePrice), 4);
+        $isMatch = abs($remotePrice - $localPrice) < 0.02;
+        $parts[] = "target {$tid}: {$remotePrice}" . ($isMatch ? ' (OK)' : ' (mismatch)');
+        if (!$isMatch) {
+            $allMatch = false;
+        }
+    }
+
+    $head = "Проверка #{$pid} (b24 {$b24Id}, type={$parentType}, local={$localPrice}): ";
+    return array(
+        'ok' => $allMatch,
+        'message' => $head . implode('; ', $parts)
+    );
+}
+
 if (isset($_GET['delete_id'])) {
     $stmt = $db->prepare("DELETE FROM products WHERE id = ?");
     $stmt->execute(array(intval($_GET['delete_id'])));
@@ -1234,6 +1314,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $message = $result['ok'] ? "Товар #{$productId}: отправка в Б24 выполнена" : ("Товар #{$productId}: " . $result['message']);
         }
         header("Location: products.php?sync_msg=" . urlencode($message) . "&sync_show_report=1");
+        exit;
+    }
+
+    if ($action === 'check_row_in_b24') {
+        $productId = intval(isset($_POST['product_id']) ? $_POST['product_id'] : 0);
+        $check = inspectProductPriceInB24($db, $productId);
+        $msg = isset($check['message']) ? (string)$check['message'] : 'Проверка завершена';
+        header("Location: products.php?sync_msg=" . urlencode($msg));
         exit;
     }
 
@@ -1954,6 +2042,7 @@ require 'includes/header.php';
                                 <button type="button" class="btn btn-success btn-sm inline-save-btn" title="Сохранить">Сохр.</button>
                                 <button type="button" class="btn btn-light btn-sm inline-cancel-btn" title="Отмена">Отм.</button>
                                 <button type="button" class="btn btn-warning btn-sm inline-sync-btn" title="Отправить в B24">B24</button>
+                                <button type="button" class="btn btn-light btn-sm inline-check-b24-btn" title="Проверить текущую цену в Б24">Проверить B24</button>
                                 <a class="btn btn-light btn-sm" title="Открыть форму редактирования" href="<?php echo buildProductsUrl(array('edit_id' => intval($p['id']))); ?>">Форма</a>
                                 <a class="btn btn-danger btn-sm" title="Удалить товар" href="products.php?delete_id=<?php echo intval($p['id']); ?>" onclick="return confirm('Удалить товар #<?php echo intval($p['id']); ?>?');">Удал.</a>
                             </div>
@@ -2098,6 +2187,7 @@ require 'includes/header.php';
             var saveBtn = row.querySelector('.inline-save-btn');
             var cancelBtn = row.querySelector('.inline-cancel-btn');
             var syncBtn = row.querySelector('.inline-sync-btn');
+            var checkB24Btn = row.querySelector('.inline-check-b24-btn');
 
             if (editBtn) {
                 editBtn.addEventListener('click', function () {
@@ -2130,6 +2220,14 @@ require 'includes/header.php';
                 syncBtn.addEventListener('click', function () {
                     postForm({
                         action: 'sync_row_to_b24',
+                        product_id: row.getAttribute('data-product-id')
+                    });
+                });
+            }
+            if (checkB24Btn) {
+                checkB24Btn.addEventListener('click', function () {
+                    postForm({
+                        action: 'check_row_in_b24',
                         product_id: row.getAttribute('data-product-id')
                     });
                 });
