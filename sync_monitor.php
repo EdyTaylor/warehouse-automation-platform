@@ -6,52 +6,111 @@ header('Content-Type: text/html; charset=utf-8');
 require 'db.php';
 require_once __DIR__ . '/functions/app_settings.php';
 require_once __DIR__ . '/functions/webhook_log_schema.php';
+require_once __DIR__ . '/functions/integration_workflow_gates.php';
+require_once __DIR__ . '/functions/integration_bitrix_funnels.php';
 $db = getDB();
 webhookLogEnsureSchema($db);
+
+$bitrixCfg = require __DIR__ . '/api/bitrix/config.php';
 
 $webhookLimit = isset($_GET['limit']) ? max(10, min(500, intval($_GET['limit']))) : 80;
 $page_title = 'Центр интеграции';
 require 'includes/header.php';
 
-$webhookRows = [];
-$movementErrors = [];
-$movementPending = [];
-$syncConflicts = [];
+$webhookRows = array();
+$movementErrors = array();
+$movementPending = array();
+$syncConflicts = array();
 $cycleLastRun = '';
 $successMsg = '';
 $errorMsg = '';
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'save_integration_settings') {
-    try {
-        $storeFrom = max(1, intval(isset($_POST['default_store_from_id']) ? $_POST['default_store_from_id'] : 1));
-        $storeTo = max(1, intval(isset($_POST['default_store_to_id']) ? $_POST['default_store_to_id'] : 1));
-        $responsibleId = max(1, intval(isset($_POST['default_responsible_id']) ? $_POST['default_responsible_id'] : 1));
-        $currency = strtoupper(trim(isset($_POST['default_currency']) ? $_POST['default_currency'] : 'KGS'));
-        $batchLimit = max(10, min(500, intval(isset($_POST['sync_batch_limit']) ? $_POST['sync_batch_limit'] : 100)));
-        $docDelayMs = max(0, min(5000, intval(isset($_POST['b24_doc_delay_ms']) ? $_POST['b24_doc_delay_ms'] : 700)));
-        $conductChecks = max(1, min(20, intval(isset($_POST['b24_conduct_check_attempts']) ? $_POST['b24_conduct_check_attempts'] : 5)));
-        $usdToKgsRate = floatval(isset($_POST['usd_to_kgs_rate']) ? $_POST['usd_to_kgs_rate'] : 90);
-        $stockSyncStoreId = max(1, intval(isset($_POST['stock_sync_store_id']) ? $_POST['stock_sync_store_id'] : 1));
-        $syncCycleChunk = max(5, min(100, intval(isset($_POST['sync_cycle_chunk']) ? $_POST['sync_cycle_chunk'] : 30)));
-        if ($usdToKgsRate <= 0) {
-            $usdToKgsRate = 90;
+$funnelSnap = integrationLoadFunnelsSnapshotDecoded($db);
+$reserveGateMerged = integrationMergedReserveGate($db, $bitrixCfg);
+$realGateMerged = integrationMergedRealizationGate($db, $bitrixCfg);
+$reserveStageMap = integrationStagesSelectedMapFromRules(
+    isset($reserveGateMerged['rules']) && is_array($reserveGateMerged['rules']) ? $reserveGateMerged['rules'] : array()
+);
+$realStageMap = integrationStagesSelectedMapFromRules(
+    isset($realGateMerged['rules']) && is_array($realGateMerged['rules']) ? $realGateMerged['rules'] : array()
+);
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
+    $action = (string)$_POST['action'];
+
+    if ($action === 'refresh_b24_funnels') {
+        try {
+            $snap = integrationBuildDealFunnelsSnapshotFromBitrix();
+            integrationSaveFunnelsSnapshot($db, $snap);
+            $funnelSnap = $snap;
+            if (!empty($snap['errors']) && is_array($snap['errors'])) {
+                $errorMsg = 'Справочник сохранён, но при запросах к Б24 были ошибки: ' . htmlspecialchars(implode(' | ', $snap['errors']));
+            } else {
+                $successMsg = 'Воронки и стадии обновлены из Битрикс24.';
+            }
+        } catch (Exception $e) {
+            $errorMsg = 'Не удалось обновить справочник: ' . $e->getMessage();
         }
-        if ($currency === '') {
-            $currency = 'KGS';
+    }
+
+    if ($action === 'save_workflow_gates') {
+        try {
+            $reserveGate = integrationBuildGateFromPost(
+                isset($_POST['reserve_filter_enabled']),
+                isset($_POST['reserve_stages']) && is_array($_POST['reserve_stages']) ? $_POST['reserve_stages'] : array()
+            );
+            $realGate = integrationBuildGateFromPost(
+                isset($_POST['realization_filter_enabled']),
+                isset($_POST['realization_stages']) && is_array($_POST['realization_stages']) ? $_POST['realization_stages'] : array()
+            );
+            setAppSetting($db, integrationWarehouseReserveGateSettingsKey(), json_encode($reserveGate, JSON_UNESCAPED_UNICODE));
+            setAppSetting($db, integrationWarehouseRealizationGateSettingsKey(), json_encode($realGate, JSON_UNESCAPED_UNICODE));
+            $reserveGateMerged = integrationMergedReserveGate($db, $bitrixCfg);
+            $realGateMerged = integrationMergedRealizationGate($db, $bitrixCfg);
+            $reserveStageMap = integrationStagesSelectedMapFromRules(
+                isset($reserveGateMerged['rules']) && is_array($reserveGateMerged['rules']) ? $reserveGateMerged['rules'] : array()
+            );
+            $realStageMap = integrationStagesSelectedMapFromRules(
+                isset($realGateMerged['rules']) && is_array($realGateMerged['rules']) ? $realGateMerged['rules'] : array()
+            );
+            $successMsg = 'Правила резерва и реализации сохранены. Вебхук читает их из БД поверх базовых настроек в api/bitrix/config.php.';
+        } catch (Exception $e) {
+            $errorMsg = 'Не удалось сохранить правила: ' . $e->getMessage();
         }
-        setAppSetting($db, 'default_store_from_id', (string)$storeFrom);
-        setAppSetting($db, 'default_store_to_id', (string)$storeTo);
-        setAppSetting($db, 'default_responsible_id', (string)$responsibleId);
-        setAppSetting($db, 'default_currency', $currency);
-        setAppSetting($db, 'sync_batch_limit', (string)$batchLimit);
-        setAppSetting($db, 'b24_doc_delay_ms', (string)$docDelayMs);
-        setAppSetting($db, 'b24_conduct_check_attempts', (string)$conductChecks);
-        setAppSetting($db, 'usd_to_kgs_rate', (string)$usdToKgsRate);
-        setAppSetting($db, 'stock_sync_store_id', (string)$stockSyncStoreId);
-        setAppSetting($db, 'sync_cycle_chunk', (string)$syncCycleChunk);
-        $successMsg = 'Настройки интеграции сохранены.';
-    } catch (Exception $e) {
-        $errorMsg = 'Не удалось сохранить настройки: ' . $e->getMessage();
+    }
+
+    if ($action === 'save_integration_settings') {
+        try {
+            $storeFrom = max(1, intval(isset($_POST['default_store_from_id']) ? $_POST['default_store_from_id'] : 1));
+            $storeTo = max(1, intval(isset($_POST['default_store_to_id']) ? $_POST['default_store_to_id'] : 1));
+            $responsibleId = max(1, intval(isset($_POST['default_responsible_id']) ? $_POST['default_responsible_id'] : 1));
+            $currency = strtoupper(trim(isset($_POST['default_currency']) ? $_POST['default_currency'] : 'KGS'));
+            $batchLimit = max(10, min(500, intval(isset($_POST['sync_batch_limit']) ? $_POST['sync_batch_limit'] : 100)));
+            $docDelayMs = max(0, min(5000, intval(isset($_POST['b24_doc_delay_ms']) ? $_POST['b24_doc_delay_ms'] : 700)));
+            $conductChecks = max(1, min(20, intval(isset($_POST['b24_conduct_check_attempts']) ? $_POST['b24_conduct_check_attempts'] : 5)));
+            $usdToKgsRate = floatval(isset($_POST['usd_to_kgs_rate']) ? $_POST['usd_to_kgs_rate'] : 90);
+            $stockSyncStoreId = max(1, intval(isset($_POST['stock_sync_store_id']) ? $_POST['stock_sync_store_id'] : 1));
+            $syncCycleChunk = max(5, min(100, intval(isset($_POST['sync_cycle_chunk']) ? $_POST['sync_cycle_chunk'] : 30)));
+            if ($usdToKgsRate <= 0) {
+                $usdToKgsRate = 90;
+            }
+            if ($currency === '') {
+                $currency = 'KGS';
+            }
+            setAppSetting($db, 'default_store_from_id', (string)$storeFrom);
+            setAppSetting($db, 'default_store_to_id', (string)$storeTo);
+            setAppSetting($db, 'default_responsible_id', (string)$responsibleId);
+            setAppSetting($db, 'default_currency', $currency);
+            setAppSetting($db, 'sync_batch_limit', (string)$batchLimit);
+            setAppSetting($db, 'b24_doc_delay_ms', (string)$docDelayMs);
+            setAppSetting($db, 'b24_conduct_check_attempts', (string)$conductChecks);
+            setAppSetting($db, 'usd_to_kgs_rate', (string)$usdToKgsRate);
+            setAppSetting($db, 'stock_sync_store_id', (string)$stockSyncStoreId);
+            setAppSetting($db, 'sync_cycle_chunk', (string)$syncCycleChunk);
+            $successMsg = 'Настройки интеграции сохранены.';
+        } catch (Exception $e) {
+            $errorMsg = 'Не удалось сохранить настройки: ' . $e->getMessage();
+        }
     }
 }
 
@@ -70,6 +129,11 @@ $integrationSettings = array(
 
 $cycleLastRun = (string)getAppSetting($db, 'sync_cycle_last_run_json', '');
 
+$funnelCats = ($funnelSnap !== null && isset($funnelSnap['categories']) && is_array($funnelSnap['categories']))
+    ? $funnelSnap['categories']
+    : array();
+$funnelFetchedAt = ($funnelSnap !== null && isset($funnelSnap['fetched_at'])) ? (string)$funnelSnap['fetched_at'] : '';
+
 try {
     $wk = $db->query('
         SELECT id, event,
@@ -85,7 +149,7 @@ try {
     ');
     $webhookRows = $wk->fetchAll(PDO::FETCH_ASSOC);
 } catch (Exception $e) {
-    $webhookRows = [];
+    $webhookRows = array();
 }
 
 try {
@@ -104,8 +168,8 @@ try {
         LIMIT 20
     ")->fetchAll(PDO::FETCH_ASSOC);
 } catch (Exception $e) {
-    $movementErrors = [];
-    $movementPending = [];
+    $movementErrors = array();
+    $movementPending = array();
 }
 
 try {
@@ -117,12 +181,15 @@ try {
         LIMIT 50
     ")->fetchAll(PDO::FETCH_ASSOC);
 } catch (Exception $e) {
-    $syncConflicts = [];
+    $syncConflicts = array();
 }
+
+$storedReserveRaw = getAppSetting($db, integrationWarehouseReserveGateSettingsKey(), '');
+$storedRealRaw = getAppSetting($db, integrationWarehouseRealizationGateSettingsKey(), '');
 ?>
 
 <main class="container">
-    <h2>⚙️ Центр интеграции</h2>
+    <h2 id="sec-top">Центр интеграции</h2>
 
     <?php if ($successMsg !== ''): ?>
         <div class="alert alert-success"><?= htmlspecialchars($successMsg) ?></div>
@@ -132,235 +199,421 @@ try {
     <?php endif; ?>
 
     <div class="card">
-        <h3>Быстрые действия</h3>
-        <p class="text-muted">Кнопки запускают синк через модальное окно, без открытия новых вкладок.</p>
-        <div style="display:flex;gap:10px;flex-wrap:wrap;">
-            <a class="btn btn-primary b24-sync-link" href="api/bitrix/import_products.php">📦 Импортировать товары из Б24</a>
-            <a class="btn btn-primary b24-sync-link" href="api/bitrix/sync_stock.php?push=1">🏪 Синхронизировать остатки</a>
-            <a class="btn btn-secondary b24-sync-link" href="api/sync_prices.php?action=to_b24">💰 Синхронизировать цены</a>
-            <a class="btn btn-secondary b24-sync-link" href="api/bitrix/sync_cycle.php?chunk=<?= (int)$integrationSettings['sync_cycle_chunk'] ?>">🔁 Запустить 1 цикл автосинка</a>
-        </div>
+        <h3 style="margin-top:0;">Разделы</h3>
+        <p class="text-muted">Перейти к нужному блоку. Ниже секции можно сворачивать, чтобы убрать лишнее с экрана.</p>
+        <nav class="integration-nav" aria-label="Разделы интеграции">
+            <a href="#sec-quick">Быстрые действия</a>
+            <span class="text-muted">·</span>
+            <a href="#sec-tech">Техраздел Б24</a>
+            <span class="text-muted">·</span>
+            <a href="#sec-funnels">Воронки и стадии</a>
+            <span class="text-muted">·</span>
+            <a href="#sec-workflow">Резерв и реализация</a>
+            <span class="text-muted">·</span>
+            <a href="#sec-settings">Склады и синк</a>
+            <span class="text-muted">·</span>
+            <a href="#sec-autosync">Автосинк</a>
+            <span class="text-muted">·</span>
+            <a href="#sec-webhooks">Вебхуки</a>
+            <span class="text-muted">·</span>
+            <a href="#sec-mov-errors">Ошибки Б24</a>
+            <span class="text-muted">·</span>
+            <a href="#sec-pending">Ожидают отправки</a>
+            <span class="text-muted">·</span>
+            <a href="#sec-conflicts">Расхождения</a>
+        </nav>
+        <button type="button" class="btn btn-light btn-sm js-theme-toggle">Переключить тему</button>
     </div>
 
-    <div class="card">
-        <h3>Технический раздел Б24</h3>
-        <p class="text-muted">
-            Этот раздел нужен для сервисных операций интеграции: ручной резерв/подтверждение строк сделки,
-            повтор синка product rows и диагностика ошибок Б24. Для ежедневной работы кладовщика используйте
-            вкладку <strong>Место кладовщика</strong>.
-        </p>
-        <a class="btn btn-light" href="b24_sales.php">Открыть тех.раздел Б24</a>
-    </div>
-
-    <div class="card">
-        <h3>Настройки интеграции</h3>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
-            <button type="button" class="btn btn-light btn-sm js-theme-toggle">🌓 Переключить тему</button>
-        </div>
-        <form method="POST">
-            <input type="hidden" name="action" value="save_integration_settings">
-            <div class="form-grid">
-                <div class="form-group">
-                    <label>Склад списания (storeFrom)</label>
-                    <input class="input" type="number" min="1" name="default_store_from_id" value="<?= (int)$integrationSettings['default_store_from_id'] ?>">
-                </div>
-                <div class="form-group">
-                    <label>Склад прихода (storeTo)</label>
-                    <input class="input" type="number" min="1" name="default_store_to_id" value="<?= (int)$integrationSettings['default_store_to_id'] ?>">
-                </div>
-                <div class="form-group">
-                    <label>Ответственный (responsibleId)</label>
-                    <input class="input" type="number" min="1" name="default_responsible_id" value="<?= (int)$integrationSettings['default_responsible_id'] ?>">
-                </div>
-                <div class="form-group">
-                    <label>Валюта</label>
-                    <input class="input" type="text" maxlength="3" name="default_currency" value="<?= htmlspecialchars((string)$integrationSettings['default_currency']) ?>">
-                </div>
-                <div class="form-group">
-                    <label>Скорость синка (batch limit)</label>
-                    <input class="input" type="number" min="10" max="500" name="sync_batch_limit" value="<?= (int)$integrationSettings['sync_batch_limit'] ?>">
-                </div>
-                <div class="form-group">
-                    <label>Задержка перед проведением документа Б24 (мс)</label>
-                    <input class="input" type="number" min="0" max="5000" name="b24_doc_delay_ms" value="<?= (int)$integrationSettings['b24_doc_delay_ms'] ?>">
-                </div>
-                <div class="form-group">
-                    <label>Проверок статуса проведения (attempts)</label>
-                    <input class="input" type="number" min="1" max="20" name="b24_conduct_check_attempts" value="<?= (int)$integrationSettings['b24_conduct_check_attempts'] ?>">
-                </div>
-                <div class="form-group">
-                    <label>Курс USD → KGS (для прихода)</label>
-                    <input class="input" type="number" min="0.01" step="0.01" name="usd_to_kgs_rate" value="<?= htmlspecialchars((string)$integrationSettings['usd_to_kgs_rate']) ?>">
-                </div>
-                <div class="form-group">
-                    <label>ID склада Б24 для синка остатков</label>
-                    <input class="input" type="number" min="1" name="stock_sync_store_id" value="<?= (int)$integrationSettings['stock_sync_store_id'] ?>">
-                </div>
-                <div class="form-group">
-                    <label>Размер шага автосинка (5-100)</label>
-                    <input class="input" type="number" min="5" max="100" name="sync_cycle_chunk" value="<?= (int)$integrationSettings['sync_cycle_chunk'] ?>">
-                </div>
+    <details class="card integration-section" id="sec-quick" open>
+        <summary class="integration-section-summary">Быстрые действия</summary>
+        <div class="integration-section-body">
+            <p class="text-muted">Кнопки запускают синк через модальное окно, без открытия новых вкладок.</p>
+            <div style="display:flex;gap:10px;flex-wrap:wrap;">
+                <a class="btn btn-primary b24-sync-link" href="api/bitrix/import_products.php">Импортировать товары из Б24</a>
+                <a class="btn btn-primary b24-sync-link" href="api/bitrix/sync_stock.php?push=1">Синхронизировать остатки</a>
+                <a class="btn btn-secondary b24-sync-link" href="api/sync_prices.php?action=to_b24">Синхронизировать цены</a>
+                <a class="btn btn-secondary b24-sync-link" href="api/bitrix/sync_cycle.php?chunk=<?= (int)$integrationSettings['sync_cycle_chunk'] ?>">Запустить 1 цикл автосинка</a>
             </div>
-            <button class="btn btn-success" type="submit">Сохранить настройки</button>
-        </form>
-    </div>
+        </div>
+    </details>
 
-    <div class="card">
-        <h3>Автосинхронизация и контроль расхождений</h3>
-        <p class="text-muted">
-            Рекомендуется запускать <code>api/bitrix/sync_cycle.php?chunk=<?= (int)$integrationSettings['sync_cycle_chunk'] ?></code> по cron каждые 2-5 минут.
-            Цикл постепенно отправляет остатки/цены в Б24 и периодически проверяет изменения в Б24 на расхождения.
-        </p>
-        <?php if ($cycleLastRun !== ''): ?>
-            <p><strong>Последний результат цикла:</strong></p>
-            <pre style="white-space:pre-wrap;"><?= htmlspecialchars($cycleLastRun) ?></pre>
-        <?php else: ?>
-            <p class="text-muted">Цикл еще не запускался.</p>
-        <?php endif; ?>
-    </div>
+    <details class="card integration-section" id="sec-tech">
+        <summary class="integration-section-summary">Технический раздел Б24</summary>
+        <div class="integration-section-body">
+            <p class="text-muted">
+                Сервисные операции интеграции: ручной резерв, синк product rows, диагностика. Для ежедневной работы —
+                <strong>Место кладовщика</strong>.
+            </p>
+            <a class="btn btn-light" href="b24_sales.php">Открыть тех.раздел Б24</a>
+        </div>
+    </details>
 
-    <div class="card">
-        <h3>Вебхук-события Битрикс24</h3>
-        <p class="text-muted">
-            Каждая строка — один POST от исходящего вебхука Б24 на <code>api/webhook.php</code>.
-            Повторная доставка того же события помечается как <strong>duplicate_delivery_skipped</strong> (видно здесь же).
-            Размер: <code>?limit=120</code> в адресной строке (до 500).
-            Колонка <strong>Товар B24</strong>: для <code>ONCRMPRODUCT*</code> — из тела вебхука; для <code>ONCRMDEAL*</code> может подставиться
-            первый каталожный <code>PRODUCT_ID</code>, если строки успешно загружены по REST после события. Итог обработки очереди/ошибки — в <strong>Итог обработки</strong>.
-        </p>
-        <?php if (empty($webhookRows)): ?>
-            <div class="alert alert-warning">
-                Записей пока нет. Проверьте:<br>
-                • URL вебхука в Битрикс24 точно <code>http(s)://ваш-хост/api/webhook.php</code> и включены события <code>ONCRMDEALADD</code> / <code>ONCRMDEALUPDATE</code>.<br>
-                • JSON-диагностика БД без Битрикс: откройте <a href="api/webhook_ping.php" target="_blank" rel="noopener"><code>api/webhook_ping.php</code></a> — должен быть <code>webhook_log_rows</code> и при необходимости тестовая строка: <code>api/webhook_ping.php?write=1&amp;k=CHANGE_ME_FRIENDCRM_DIAG</code> (ключ задаётся в <code>api/webhook_ping.php</code>).<br>
-                • Если ping показывает строки, а после сделки их нет — до сайта из облака Б24 не добираются запросы (URL, HTTPS, блокировки).
-            </div>
-        <?php endif; ?>
-        <div class="webhook-log-table-wrap" style="max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;box-sizing:border-box;">
-        <table class="table webhook-log-table" style="margin-bottom:0;">
-            <tr>
-                <th>ID</th>
-                <th>Событие</th>
-                <th>Итог обработки</th>
-                <th>Сделка</th>
-                <th>Товар B24</th>
-                <th>Payload</th>
-                <th>Время</th>
-            </tr>
-            <?php foreach ($webhookRows as $row): ?>
-                <?php
-                $wid = (int)$row['id'];
-                $snippet = '';
-                $rawPrev = isset($row['data_preview']) ? trim((string)$row['data_preview']) : '';
-                if ($rawPrev !== '') {
-                    $decoded = json_decode($rawPrev, true);
-                    if (function_exists('json_last_error') && json_last_error() === JSON_ERROR_NONE) {
-                        $snippet = json_encode($decoded, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-                    }
-                    if ($snippet === '') {
-                        $snippet = $rawPrev;
-                    }
-                    if (strlen($snippet) > 2000) {
-                        $snippet = substr($snippet, 0, 2000) . '…';
-                    }
-                }
-                ?>
-                <tr class="webhook-event-row">
-                    <td><?= $wid ?></td>
-                    <td><code><?= htmlspecialchars((string)$row['event']) ?></code></td>
-                    <td>
-                        <?php
-                        $hoc = (string)$row['handler_outcome'];
-                        $hdl = isset($row['handler_detail']) ? trim((string)$row['handler_detail']) : '';
-                        if ($hoc !== '') {
-                            echo '<code>' . htmlspecialchars($hoc) . '</code>';
-                            if ($hdl !== '') {
-                                echo '<details style="margin-top:6px;max-width:100%;"><summary style="cursor:pointer;font-size:12px;color:var(--muted,#6c757d);">Детали ошибки / пояснение</summary>'
-                                    . '<div style="margin-top:6px;max-width:100%;overflow-x:auto;"><pre style="margin:0;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font-size:11px;padding:8px;background:var(--bs-body-bg,#f1f3f5);border-radius:4px;border:1px solid rgba(127,127,127,0.25);">'
-                                    . htmlspecialchars($hdl)
-                                    . '</pre></div></details>';
-                            }
-                        } else {
-                            echo '<span class="text-muted">—</span>';
-                        }
-                        ?>
-                    </td>
-                    <td><?= isset($row['entity_deal_id']) && intval($row['entity_deal_id']) > 0 ? intval($row['entity_deal_id']) : '—' ?></td>
-                    <td><?= isset($row['entity_product_id']) && intval($row['entity_product_id']) > 0 ? intval($row['entity_product_id']) : '—' ?></td>
-                    <td><?= isset($row['data_chars']) ? intval($row['data_chars']) . ' симв.' : '—' ?></td>
-                    <td><?= htmlspecialchars((string)$row['created_at']) ?></td>
-                </tr>
-                <?php if ($snippet !== ''): ?>
-                <tr class="webhook-json-row">
-                    <td colspan="7" style="max-width:100%;vertical-align:top;">
-                        <details>
-                            <summary style="cursor:pointer;">Показать тело события (до 1500 симв.; форматирование JSON)</summary>
-                            <div style="max-width:100%;margin-top:8px;overflow-x:auto;overflow-y:hidden;box-sizing:border-box;">
-                                <pre style="margin:0;white-space:pre-wrap;overflow-wrap:anywhere;word-wrap:break-word;word-break:break-word;font-size:12px;padding:10px;background:var(--bs-body-bg,#f8f9fa);border-radius:6px;border:1px solid rgba(127,127,127,0.2);"><?= htmlspecialchars($snippet) ?></pre>
-                            </div>
-                        </details>
-                    </td>
-                </tr>
+    <details class="card integration-section" id="sec-funnels" open>
+        <summary class="integration-section-summary">Воронки и стадии из Битрикс24</summary>
+        <div class="integration-section-body">
+            <p class="text-muted">
+                Актуальные названия воронок (CATEGORY_ID), идентификаторы стадий (<code>STATUS_ID</code> в сделке —
+                <code>STAGE_ID</code>) и подписи. Данные кэшируются в БД; обновите после изменений в Б24.
+            </p>
+            <form method="POST" style="margin-bottom:12px;">
+                <input type="hidden" name="action" value="refresh_b24_funnels">
+                <button class="btn btn-primary" type="submit">Обновить справочник из Б24</button>
+            </form>
+            <?php if ($funnelFetchedAt !== ''): ?>
+                <p><strong>Последнее обновление:</strong> <?= htmlspecialchars($funnelFetchedAt) ?>
+                <?php if ($funnelSnap !== null && !empty($funnelSnap['category_source'])): ?>
+                    <span class="text-muted">(источник воронок: <?= htmlspecialchars((string)$funnelSnap['category_source']) ?>)</span>
                 <?php endif; ?>
-            <?php endforeach; ?>
-        </table>
+                </p>
+            <?php endif; ?>
+            <?php if (count($funnelCats) === 0): ?>
+                <div class="alert alert-warning">Справочник пуст. Нажмите «Обновить справочник из Б24» (нужен рабочий вебхук в <code>api/bitrix/config.php</code>).</div>
+            <?php else: ?>
+                <?php foreach ($funnelCats as $fcat): ?>
+                    <?php
+                    if (!is_array($fcat)) {
+                        continue;
+                    }
+                    $fcid = isset($fcat['id']) ? (int)$fcat['id'] : 0;
+                    $fname = isset($fcat['name']) ? (string)$fcat['name'] : ('Воронка #' . $fcid);
+                    $fentity = isset($fcat['entity_id']) ? (string)$fcat['entity_id'] : '';
+                    $fstages = isset($fcat['stages']) && is_array($fcat['stages']) ? $fcat['stages'] : array();
+                    ?>
+                    <details style="margin:10px 0;border:1px solid var(--border-color);border-radius:6px;padding:4px 10px;">
+                        <summary style="cursor:pointer;font-weight:600;">
+                            <?= htmlspecialchars($fname) ?> — <span class="text-muted">CATEGORY_ID = <?= (int)$fcid ?></span>
+                            <?php if ($fentity !== ''): ?>
+                                · <code><?= htmlspecialchars($fentity) ?></code>
+                            <?php endif; ?>
+                        </summary>
+                        <?php if (count($fstages) === 0): ?>
+                            <p class="text-muted">Стадий не получено.</p>
+                        <?php else: ?>
+                            <table class="integration-funnel-stage-table">
+                                <tr>
+                                    <th>Название</th>
+                                    <th>STATUS_ID</th>
+                                    <th>Семантика</th>
+                                </tr>
+                                <?php foreach ($fstages as $st): ?>
+                                    <?php if (!is_array($st)) { continue; } ?>
+                                    <tr>
+                                        <td><?= htmlspecialchars(isset($st['NAME']) ? (string)$st['NAME'] : '') ?></td>
+                                        <td><code><?= htmlspecialchars(isset($st['STATUS_ID']) ? (string)$st['STATUS_ID'] : '') ?></code></td>
+                                        <td><?= htmlspecialchars(isset($st['SEMANTICS']) ? (string)$st['SEMANTICS'] : '') ?></td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </table>
+                        <?php endif; ?>
+                    </details>
+                <?php endforeach; ?>
+            <?php endif; ?>
         </div>
-    </div>
+    </details>
 
-    <div class="card">
-        <h3>Ошибки отправки в Б24</h3>
-        <table class="table">
-            <tr><th>ID</th><th>Product</th><th>Тип</th><th>Deal</th><th>Статус</th><th>Ответ</th><th>Время</th></tr>
-            <?php foreach ($movementErrors as $row): ?>
-                <tr>
-                    <td><?= (int)$row['id'] ?></td>
-                    <td><?= (int)$row['product_id'] ?></td>
-                    <td><?= htmlspecialchars($row['movement_type']) ?></td>
-                    <td><?= (int)$row['deal_id'] ?></td>
-                    <td><?= htmlspecialchars($row['bitrix_status']) ?></td>
-                    <td><pre style="white-space:pre-wrap;max-width:420px;"><?= htmlspecialchars((string)$row['bitrix_response']) ?></pre></td>
-                    <td><?= htmlspecialchars($row['created_at']) ?></td>
-                </tr>
-            <?php endforeach; ?>
-        </table>
-    </div>
+    <details class="card integration-section" id="sec-workflow" open>
+        <summary class="integration-section-summary">Резерв (очередь кладовщика) и реализация (списание)</summary>
+        <div class="integration-section-body">
+            <p class="text-muted">
+                <strong>Резерв</strong> — когда вебхук ставит сделку в очередь <code>b24_sale_requests</code> (см. <code>api/webhook.php</code>).
+                <strong>Реализация</strong> — когда сделка считается оплаченной/завершённой: статус заявки <code>completed</code>,
+                проводки <code>sale_meter</code> «Сделка оплачена в Б24». Если включить фильтр реализации, используются только отмеченные стадии;
+                если выключить — сохраняется прежняя логика (семантика успеха и известные <code>WON</code> / <code>FINAL_INVOICE</code> и т.д.).
+            </p>
+            <?php if ($storedReserveRaw === ''): ?>
+                <p class="text-muted">Переопределения резерва в БД ещё не сохранялись — действуют правила из <code>api/bitrix/config.php</code> (<code>warehouse_queue</code>).</p>
+            <?php endif; ?>
+            <?php if ($storedRealRaw === ''): ?>
+                <p class="text-muted">Переопределения реализации в БД ещё не сохранялись — действует блок <code>warehouse_realization</code> из config или эвристика по умолчанию.</p>
+            <?php endif; ?>
+            <?php if (count($funnelCats) === 0): ?>
+                <div class="alert alert-warning">Сначала обновите справочник воронок выше — иначе нет списка стадий для галочек.</div>
+            <?php endif; ?>
+            <form method="POST">
+                <input type="hidden" name="action" value="save_workflow_gates">
+                <p style="display:flex;flex-wrap:wrap;gap:16px;align-items:center;">
+                    <label style="display:inline-flex;gap:8px;align-items:center;">
+                        <input type="checkbox" name="reserve_filter_enabled" value="1" <?= !empty($reserveGateMerged['filter_enabled']) ? 'checked' : '' ?>>
+                        Ограничить <strong>резерв</strong> выбранными стадиями
+                    </label>
+                    <label style="display:inline-flex;gap:8px;align-items:center;">
+                        <input type="checkbox" name="realization_filter_enabled" value="1" <?= !empty($realGateMerged['filter_enabled']) ? 'checked' : '' ?>>
+                        Задавать <strong>реализацию</strong> только выбранными стадиями
+                    </label>
+                </p>
+                <?php foreach ($funnelCats as $fcat): ?>
+                    <?php
+                    if (!is_array($fcat)) {
+                        continue;
+                    }
+                    $fcid = isset($fcat['id']) ? (int)$fcat['id'] : 0;
+                    $fname = isset($fcat['name']) ? (string)$fcat['name'] : ('Воронка #' . $fcid);
+                    $fstages = isset($fcat['stages']) && is_array($fcat['stages']) ? $fcat['stages'] : array();
+                    ?>
+                    <fieldset style="border:1px solid var(--border-color);border-radius:8px;padding:10px;margin:12px 0;">
+                        <legend><strong><?= htmlspecialchars($fname) ?></strong> <span class="text-muted">(<?= (int)$fcid ?>)</span></legend>
+                        <?php if (count($fstages) === 0): ?>
+                            <p class="text-muted">Нет стадий в кэше.</p>
+                        <?php else: ?>
+                            <table class="integration-funnel-stage-table">
+                                <tr>
+                                    <th>Стадия</th>
+                                    <th>STATUS_ID</th>
+                                    <th>Резерв</th>
+                                    <th>Реализация</th>
+                                </tr>
+                                <?php foreach ($fstages as $st): ?>
+                                    <?php
+                                    if (!is_array($st)) {
+                                        continue;
+                                    }
+                                    $sid = isset($st['STATUS_ID']) ? (string)$st['STATUS_ID'] : '';
+                                    if ($sid === '') {
+                                        continue;
+                                    }
+                                    $sname = isset($st['NAME']) ? (string)$st['NAME'] : '';
+                                    $rOn = isset($reserveStageMap[$fcid][$sid]);
+                                    $zOn = isset($realStageMap[$fcid][$sid]);
+                                    ?>
+                                    <tr>
+                                        <td><?= htmlspecialchars($sname) ?></td>
+                                        <td><code><?= htmlspecialchars($sid) ?></code></td>
+                                        <td style="text-align:center;">
+                                            <input type="checkbox" name="reserve_stages[<?= (int)$fcid ?>][]" value="<?= htmlspecialchars($sid) ?>" <?= $rOn ? 'checked' : '' ?>>
+                                        </td>
+                                        <td style="text-align:center;">
+                                            <input type="checkbox" name="realization_stages[<?= (int)$fcid ?>][]" value="<?= htmlspecialchars($sid) ?>" <?= $zOn ? 'checked' : '' ?>>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </table>
+                        <?php endif; ?>
+                    </fieldset>
+                <?php endforeach; ?>
+                <button class="btn btn-success" type="submit">Сохранить правила</button>
+            </form>
+        </div>
+    </details>
 
-    <div class="card">
-        <h3>Ожидают отправки</h3>
-        <table class="table">
-            <tr><th>ID</th><th>Product</th><th>Тип</th><th>Deal</th><th>Статус</th><th>Время</th></tr>
-            <?php foreach ($movementPending as $row): ?>
-                <tr>
-                    <td><?= (int)$row['id'] ?></td>
-                    <td><?= (int)$row['product_id'] ?></td>
-                    <td><?= htmlspecialchars($row['movement_type']) ?></td>
-                    <td><?= (int)$row['deal_id'] ?></td>
-                    <td><?= htmlspecialchars($row['bitrix_status']) ?></td>
-                    <td><?= htmlspecialchars($row['created_at']) ?></td>
-                </tr>
-            <?php endforeach; ?>
-        </table>
-    </div>
+    <details class="card integration-section" id="sec-settings" open>
+        <summary class="integration-section-summary">Настройки интеграции (склады, задержки, курс)</summary>
+        <div class="integration-section-body">
+            <form method="POST">
+                <input type="hidden" name="action" value="save_integration_settings">
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label>Склад списания (storeFrom)</label>
+                        <input class="input" type="number" min="1" name="default_store_from_id" value="<?= (int)$integrationSettings['default_store_from_id'] ?>">
+                    </div>
+                    <div class="form-group">
+                        <label>Склад прихода (storeTo)</label>
+                        <input class="input" type="number" min="1" name="default_store_to_id" value="<?= (int)$integrationSettings['default_store_to_id'] ?>">
+                    </div>
+                    <div class="form-group">
+                        <label>Ответственный (responsibleId)</label>
+                        <input class="input" type="number" min="1" name="default_responsible_id" value="<?= (int)$integrationSettings['default_responsible_id'] ?>">
+                    </div>
+                    <div class="form-group">
+                        <label>Валюта</label>
+                        <input class="input" type="text" maxlength="3" name="default_currency" value="<?= htmlspecialchars((string)$integrationSettings['default_currency']) ?>">
+                    </div>
+                    <div class="form-group">
+                        <label>Скорость синка (batch limit)</label>
+                        <input class="input" type="number" min="10" max="500" name="sync_batch_limit" value="<?= (int)$integrationSettings['sync_batch_limit'] ?>">
+                    </div>
+                    <div class="form-group">
+                        <label>Задержка перед проведением документа Б24 (мс)</label>
+                        <input class="input" type="number" min="0" max="5000" name="b24_doc_delay_ms" value="<?= (int)$integrationSettings['b24_doc_delay_ms'] ?>">
+                    </div>
+                    <div class="form-group">
+                        <label>Проверок статуса проведения (attempts)</label>
+                        <input class="input" type="number" min="1" max="20" name="b24_conduct_check_attempts" value="<?= (int)$integrationSettings['b24_conduct_check_attempts'] ?>">
+                    </div>
+                    <div class="form-group">
+                        <label>Курс USD → KGS (для прихода)</label>
+                        <input class="input" type="number" min="0.01" step="0.01" name="usd_to_kgs_rate" value="<?= htmlspecialchars((string)$integrationSettings['usd_to_kgs_rate']) ?>">
+                    </div>
+                    <div class="form-group">
+                        <label>ID склада Б24 для синка остатков</label>
+                        <input class="input" type="number" min="1" name="stock_sync_store_id" value="<?= (int)$integrationSettings['stock_sync_store_id'] ?>">
+                    </div>
+                    <div class="form-group">
+                        <label>Размер шага автосинка (5-100)</label>
+                        <input class="input" type="number" min="5" max="100" name="sync_cycle_chunk" value="<?= (int)$integrationSettings['sync_cycle_chunk'] ?>">
+                    </div>
+                </div>
+                <button class="btn btn-success" type="submit">Сохранить настройки</button>
+            </form>
+        </div>
+    </details>
 
-    <div class="card">
-        <h3>Найденные расхождения с Б24</h3>
-        <p class="text-muted">Если здесь есть строки, нужно проверить товар и понять, где фактическая истина (приложение или Б24).</p>
-        <table class="table">
-            <tr><th>ID</th><th>Тип</th><th>B24 товар</th><th>Локальный товар</th><th>Локально</th><th>В Б24</th><th>Комментарий</th><th>Время</th></tr>
-            <?php foreach ($syncConflicts as $row): ?>
+    <details class="card integration-section" id="sec-autosync">
+        <summary class="integration-section-summary">Автосинхронизация и контроль расхождений</summary>
+        <div class="integration-section-body">
+            <p class="text-muted">
+                Рекомендуется запускать <code>api/bitrix/sync_cycle.php?chunk=<?= (int)$integrationSettings['sync_cycle_chunk'] ?></code> по cron каждые 2-5 минут.
+                Цикл постепенно отправляет остатки/цены в Б24 и периодически проверяет изменения в Б24 на расхождения.
+            </p>
+            <?php if ($cycleLastRun !== ''): ?>
+                <p><strong>Последний результат цикла:</strong></p>
+                <pre style="white-space:pre-wrap;"><?= htmlspecialchars($cycleLastRun) ?></pre>
+            <?php else: ?>
+                <p class="text-muted">Цикл еще не запускался.</p>
+            <?php endif; ?>
+        </div>
+    </details>
+
+    <details class="card integration-section" id="sec-webhooks">
+        <summary class="integration-section-summary">Вебхук-события Битрикс24</summary>
+        <div class="integration-section-body">
+            <p class="text-muted">
+                Каждая строка — один POST от исходящего вебхука Б24 на <code>api/webhook.php</code>.
+                Повторная доставка того же события помечается как <strong>duplicate_delivery_skipped</strong> (видно здесь же).
+                Размер: <code>?limit=120</code> в адресной строке (до 500).
+                Колонка <strong>Товар B24</strong>: для <code>ONCRMPRODUCT*</code> — из тела вебхука; для <code>ONCRMDEAL*</code> может подставиться
+                первый каталожный <code>PRODUCT_ID</code>, если строки успешно загружены по REST после события. Итог обработки очереди/ошибки — в <strong>Итог обработки</strong>.
+            </p>
+            <?php if (empty($webhookRows)): ?>
+                <div class="alert alert-warning">
+                    Записей пока нет. Проверьте:<br>
+                    • URL вебхука в Битрикс24 точно <code>http(s)://ваш-хост/api/webhook.php</code> и включены события <code>ONCRMDEALADD</code> / <code>ONCRMDEALUPDATE</code>.<br>
+                    • JSON-диагностика БД без Битрикс: откройте <a href="api/webhook_ping.php" target="_blank" rel="noopener"><code>api/webhook_ping.php</code></a> — должен быть <code>webhook_log_rows</code> и при необходимости тестовая строка: <code>api/webhook_ping.php?write=1&amp;k=CHANGE_ME_FRIENDCRM_DIAG</code> (ключ задаётся в <code>api/webhook_ping.php</code>).<br>
+                    • Если ping показывает строки, а после сделки их нет — до сайта из облака Б24 не добираются запросы (URL, HTTPS, блокировки).
+                </div>
+            <?php endif; ?>
+            <div class="webhook-log-table-wrap" style="max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;box-sizing:border-box;">
+            <table class="table webhook-log-table" style="margin-bottom:0;">
                 <tr>
-                    <td><?= (int)$row['id'] ?></td>
-                    <td><?= htmlspecialchars((string)$row['conflict_type']) ?></td>
-                    <td><?= (int)$row['b24_product_id'] ?></td>
-                    <td><?= (int)$row['local_product_id'] ?></td>
-                    <td><?= htmlspecialchars((string)$row['local_value']) ?></td>
-                    <td><?= htmlspecialchars((string)$row['b24_value']) ?></td>
-                    <td><?= htmlspecialchars((string)$row['details']) ?></td>
-                    <td><?= htmlspecialchars((string)$row['created_at']) ?></td>
+                    <th>ID</th>
+                    <th>Событие</th>
+                    <th>Итог обработки</th>
+                    <th>Сделка</th>
+                    <th>Товар B24</th>
+                    <th>Payload</th>
+                    <th>Время</th>
                 </tr>
-            <?php endforeach; ?>
-        </table>
-    </div>
+                <?php foreach ($webhookRows as $row): ?>
+                    <?php
+                    $wid = (int)$row['id'];
+                    $snippet = '';
+                    $rawPrev = isset($row['data_preview']) ? trim((string)$row['data_preview']) : '';
+                    if ($rawPrev !== '') {
+                        $decoded = json_decode($rawPrev, true);
+                        if (function_exists('json_last_error') && json_last_error() === JSON_ERROR_NONE) {
+                            $snippet = json_encode($decoded, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                        }
+                        if ($snippet === '') {
+                            $snippet = $rawPrev;
+                        }
+                        if (strlen($snippet) > 2000) {
+                            $snippet = substr($snippet, 0, 2000) . '…';
+                        }
+                    }
+                    ?>
+                    <tr class="webhook-event-row">
+                        <td><?= $wid ?></td>
+                        <td><code><?= htmlspecialchars((string)$row['event']) ?></code></td>
+                        <td>
+                            <?php
+                            $hoc = (string)$row['handler_outcome'];
+                            $hdl = isset($row['handler_detail']) ? trim((string)$row['handler_detail']) : '';
+                            if ($hoc !== '') {
+                                echo '<code>' . htmlspecialchars($hoc) . '</code>';
+                                if ($hdl !== '') {
+                                    echo '<details style="margin-top:6px;max-width:100%;"><summary style="cursor:pointer;font-size:12px;color:var(--text-muted,#6c757d);">Детали ошибки / пояснение</summary>'
+                                        . '<div style="margin-top:6px;max-width:100%;overflow-x:auto;"><pre style="margin:0;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font-size:11px;padding:8px;background:var(--card-background,#f1f3f5);border-radius:4px;border:1px solid rgba(127,127,127,0.25);">'
+                                        . htmlspecialchars($hdl)
+                                        . '</pre></div></details>';
+                                }
+                            } else {
+                                echo '<span class="text-muted">—</span>';
+                            }
+                            ?>
+                        </td>
+                        <td><?= isset($row['entity_deal_id']) && intval($row['entity_deal_id']) > 0 ? intval($row['entity_deal_id']) : '—' ?></td>
+                        <td><?= isset($row['entity_product_id']) && intval($row['entity_product_id']) > 0 ? intval($row['entity_product_id']) : '—' ?></td>
+                        <td><?= isset($row['data_chars']) ? intval($row['data_chars']) . ' симв.' : '—' ?></td>
+                        <td><?= htmlspecialchars((string)$row['created_at']) ?></td>
+                    </tr>
+                    <?php if ($snippet !== ''): ?>
+                    <tr class="webhook-json-row">
+                        <td colspan="7" style="max-width:100%;vertical-align:top;">
+                            <details>
+                                <summary style="cursor:pointer;">Показать тело события (до 1500 симв.; форматирование JSON)</summary>
+                                <div style="max-width:100%;margin-top:8px;overflow-x:auto;overflow-y:hidden;box-sizing:border-box;">
+                                    <pre style="margin:0;white-space:pre-wrap;overflow-wrap:anywhere;word-wrap:break-word;word-break:break-word;font-size:12px;padding:10px;background:var(--card-background,#f8f9fa);border-radius:6px;border:1px solid rgba(127,127,127,0.2);"><?= htmlspecialchars($snippet) ?></pre>
+                                </div>
+                            </details>
+                        </td>
+                    </tr>
+                    <?php endif; ?>
+                <?php endforeach; ?>
+            </table>
+            </div>
+        </div>
+    </details>
+
+    <details class="card integration-section" id="sec-mov-errors">
+        <summary class="integration-section-summary">Ошибки отправки в Б24</summary>
+        <div class="integration-section-body">
+            <table class="table">
+                <tr><th>ID</th><th>Product</th><th>Тип</th><th>Deal</th><th>Статус</th><th>Ответ</th><th>Время</th></tr>
+                <?php foreach ($movementErrors as $row): ?>
+                    <tr>
+                        <td><?= (int)$row['id'] ?></td>
+                        <td><?= (int)$row['product_id'] ?></td>
+                        <td><?= htmlspecialchars($row['movement_type']) ?></td>
+                        <td><?= (int)$row['deal_id'] ?></td>
+                        <td><?= htmlspecialchars($row['bitrix_status']) ?></td>
+                        <td><pre style="white-space:pre-wrap;max-width:420px;"><?= htmlspecialchars((string)$row['bitrix_response']) ?></pre></td>
+                        <td><?= htmlspecialchars($row['created_at']) ?></td>
+                    </tr>
+                <?php endforeach; ?>
+            </table>
+        </div>
+    </details>
+
+    <details class="card integration-section" id="sec-pending">
+        <summary class="integration-section-summary">Ожидают отправки</summary>
+        <div class="integration-section-body">
+            <table class="table">
+                <tr><th>ID</th><th>Product</th><th>Тип</th><th>Deal</th><th>Статус</th><th>Время</th></tr>
+                <?php foreach ($movementPending as $row): ?>
+                    <tr>
+                        <td><?= (int)$row['id'] ?></td>
+                        <td><?= (int)$row['product_id'] ?></td>
+                        <td><?= htmlspecialchars($row['movement_type']) ?></td>
+                        <td><?= (int)$row['deal_id'] ?></td>
+                        <td><?= htmlspecialchars($row['bitrix_status']) ?></td>
+                        <td><?= htmlspecialchars($row['created_at']) ?></td>
+                    </tr>
+                <?php endforeach; ?>
+            </table>
+        </div>
+    </details>
+
+    <details class="card integration-section" id="sec-conflicts">
+        <summary class="integration-section-summary">Найденные расхождения с Б24</summary>
+        <div class="integration-section-body">
+            <p class="text-muted">Если здесь есть строки, нужно проверить товар и понять, где фактическая истина (приложение или Б24).</p>
+            <table class="table">
+                <tr><th>ID</th><th>Тип</th><th>B24 товар</th><th>Локальный товар</th><th>Локально</th><th>В Б24</th><th>Комментарий</th><th>Время</th></tr>
+                <?php foreach ($syncConflicts as $row): ?>
+                    <tr>
+                        <td><?= (int)$row['id'] ?></td>
+                        <td><?= htmlspecialchars((string)$row['conflict_type']) ?></td>
+                        <td><?= (int)$row['b24_product_id'] ?></td>
+                        <td><?= (int)$row['local_product_id'] ?></td>
+                        <td><?= htmlspecialchars((string)$row['local_value']) ?></td>
+                        <td><?= htmlspecialchars((string)$row['b24_value']) ?></td>
+                        <td><?= htmlspecialchars((string)$row['details']) ?></td>
+                        <td><?= htmlspecialchars($row['created_at']) ?></td>
+                    </tr>
+                <?php endforeach; ?>
+            </table>
+        </div>
+    </details>
 </main>
 
 <?php require 'includes/footer.php'; ?>

@@ -63,15 +63,14 @@ function bitrixWarehouseGateRuleMatches(array $rule, $categoryId, $stageId) {
 }
 
 /**
+ * When filter_enabled is true: first matching rule allows (or deny via action).
+ * Empty rules => no match.
+ *
  * @param array $deal Merged deal fields (webhook overlay on crm.deal.get).
- * @param array $gate  $cfg['warehouse_queue'] from config.php
+ * @param array $gate  ['filter_enabled'=>bool, 'rules'=>...]
  */
-function bitrixWarehouseQueueAllowed(array $deal, array $gate) {
-    if (empty($gate['filter_enabled'])) {
-        return true;
-    }
-
-    $rules = isset($gate['rules']) && is_array($gate['rules']) ? $gate['rules'] : [];
+function bitrixWorkflowGateRulesMatchDeal(array $deal, array $gate) {
+    $rules = isset($gate['rules']) && is_array($gate['rules']) ? $gate['rules'] : array();
     if (count($rules) === 0) {
         return false;
     }
@@ -93,4 +92,39 @@ function bitrixWarehouseQueueAllowed(array $deal, array $gate) {
     }
 
     return false;
+}
+
+/**
+ * @param array $deal Merged deal fields (webhook overlay on crm.deal.get).
+ * @param array $gate  $cfg['warehouse_queue'] from config.php (optional overrides in app_settings).
+ */
+function bitrixWarehouseQueueAllowed(array $deal, array $gate) {
+    if (empty($gate['filter_enabled'])) {
+        return true;
+    }
+    return bitrixWorkflowGateRulesMatchDeal($deal, $gate);
+}
+
+/**
+ * Legacy «оплачено / успех» по семантике и известным STAGE_ID (когда фильтр реализации выключен).
+ *
+ * @param array $deal crm.deal.get fields
+ */
+function bitrixLegacyRealizationIsPaid(array $deal) {
+    $stage = strtoupper(trim((string)(isset($deal['STAGE_ID']) ? $deal['STAGE_ID'] : '')));
+    $semantic = strtolower(trim((string)(isset($deal['SEMANTICS']) ? $deal['SEMANTICS'] : '')));
+    return $semantic === 's' || in_array($stage, array('WON', 'C4:WON', 'FINAL_INVOICE', 'UC_1G5NIZ'), true);
+}
+
+/**
+ * Реализация (списание sale_meter, completed): либо по правилам стадий, либо по старой эвристике.
+ *
+ * @param array $deal crm.deal.get fields
+ * @param array $gate  $cfg['warehouse_realization']
+ */
+function bitrixRealizationIsPaid(array $deal, array $gate) {
+    if (empty($gate['filter_enabled'])) {
+        return bitrixLegacyRealizationIsPaid($deal);
+    }
+    return bitrixWorkflowGateRulesMatchDeal($deal, $gate);
 }

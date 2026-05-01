@@ -9,6 +9,11 @@ function ensureAppSettingsTable($db) {
             PRIMARY KEY (`key`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     ");
+    try {
+        $db->exec("ALTER TABLE app_settings MODIFY `value` MEDIUMTEXT NULL");
+    } catch (Exception $e) {
+        // Already widened or no permission — ignore for idempotency on old hosts.
+    }
 }
 
 function getAppSetting($db, $key, $defaultValue = null) {

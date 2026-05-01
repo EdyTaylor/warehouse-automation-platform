@@ -56,4 +56,15 @@ return [
             // array('category_ids' => array(3), 'stages_exact' => array('C3:EXECUTING')),         // Товары — «Отгружены»
         ),
     ),
+
+    // Реализация сделки: completed + sale_meter из резерва (см. applyDealPaidOrReserveMark в api/webhook.php).
+    // filter_enabled=false — старая эвристика (SEMANTICS=s, стадии WON / FINAL_INVOICE и т.д.).
+    // filter_enabled=true — только перечисленные стадии (по CATEGORY_ID и STAGE_ID из crm.deal.get).
+    'warehouse_realization' => array(
+        'filter_enabled' => false,
+        'rules' => array(
+            // Пример после настройки в «Центр интеграции»:
+            // array('category_ids' => array(0), 'stages_exact' => array('WON', 'FINAL_INVOICE')),
+        ),
+    ),
 ];

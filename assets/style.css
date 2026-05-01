@@ -1085,3 +1085,56 @@ body.products-compact .products-row-actions .btn {
     gap: 10px;
     flex-wrap: wrap;
 }
+
+/* Центр интеграции: сворачиваемые секции */
+.integration-nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 0.5rem;
+}
+
+.integration-nav a {
+    font-size: 0.9rem;
+}
+
+details.card.integration-section {
+    margin-bottom: 1rem;
+}
+
+details.card.integration-section > summary.integration-section-summary {
+    cursor: pointer;
+    list-style: none;
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--text-color);
+    padding: 0.6rem 0;
+    margin: -0.25rem 0 0;
+}
+
+details.card.integration-section > summary.integration-section-summary::-webkit-details-marker {
+    display: none;
+}
+
+.integration-section-body {
+    padding-top: 0.25rem;
+}
+
+.integration-funnel-stage-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+    margin-top: 0.5rem;
+}
+
+.integration-funnel-stage-table th,
+.integration-funnel-stage-table td {
+    border: 1px solid var(--border-color);
+    padding: 4px 6px;
+    vertical-align: middle;
+}
+
+.integration-funnel-stage-table code {
+    font-size: 0.8rem;
+}

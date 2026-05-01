@@ -15,6 +15,8 @@ function extractDealPayload($data) {
 }
 
 function webhookLoadHandlers() {
+    require_once __DIR__ . '/../functions/app_settings.php';
+    require_once __DIR__ . '/../functions/integration_workflow_gates.php';
     require_once __DIR__ . '/bitrix/deal.php';
     require_once __DIR__ . '/bitrix/warehouse_gate.php';
     require_once __DIR__ . '/bitrix/send.php';
@@ -214,7 +216,7 @@ function handleNewDeal($db, $data) {
     }
 
     $cfg = require __DIR__ . '/bitrix/config.php';
-    $gate = isset($cfg['warehouse_queue']) && is_array($cfg['warehouse_queue']) ? $cfg['warehouse_queue'] : [];
+    $gate = integrationMergedReserveGate($db, $cfg);
     $dealCtx = $deal;
     if (!empty($gate['filter_enabled'])) {
         $dealCtx = bitrixMergeDealWebhookAndCrm($deal, getDealDetails($dealId));
@@ -278,7 +280,7 @@ function handleDealUpdate($db, $data) {
     $logProductIdDeal = ($firstPidUpd > 0 ? $firstPidUpd : null);
 
     $cfg = require __DIR__ . '/bitrix/config.php';
-    $gate = isset($cfg['warehouse_queue']) && is_array($cfg['warehouse_queue']) ? $cfg['warehouse_queue'] : [];
+    $gate = integrationMergedReserveGate($db, $cfg);
     $dealCtx = bitrixMergeDealWebhookAndCrm($deal, $dealData);
     
     if (!empty($products) && bitrixWarehouseQueueAllowed($dealCtx, $gate)) {
@@ -310,7 +312,8 @@ function handleDealUpdate($db, $data) {
         echo json_encode(['status' => 'no_products', 'deal_id' => $dealId]);
     }
 
-    applyDealPaidOrReserveMark($db, $dealId, $dealData);
+    $realGate = integrationMergedRealizationGate($db, $cfg);
+    applyDealPaidOrReserveMark($db, $dealId, $dealData, $realGate);
 }
 
 function handleNewProduct($db, $data) {
@@ -474,15 +477,21 @@ function getUserName($db, $userId) {
     return "User {$userId}";
 }
 
-function applyDealPaidOrReserveMark($db, $dealId, $dealData) {
+function applyDealPaidOrReserveMark($db, $dealId, $dealData, $realizationGate = null) {
     if ($dealId <= 0 || !is_array($dealData)) {
         return;
+    }
+
+    if ($realizationGate === null) {
+        $cfg = require __DIR__ . '/bitrix/config.php';
+        require_once __DIR__ . '/../functions/integration_workflow_gates.php';
+        $realizationGate = integrationMergedRealizationGate($db, $cfg);
     }
 
     try {
         $stage = strtoupper(trim((string)(isset($dealData['STAGE_ID']) ? $dealData['STAGE_ID'] : '')));
         $semantic = strtolower(trim((string)(isset($dealData['SEMANTICS']) ? $dealData['SEMANTICS'] : '')));
-        $isPaid = $semantic === 's' || in_array($stage, ['WON', 'C4:WON', 'FINAL_INVOICE', 'UC_1G5NIZ'], true);
+        $isPaid = bitrixRealizationIsPaid($dealData, $realizationGate);
 
         if ($isPaid) {
             $db->prepare("UPDATE b24_sale_requests SET status = 'completed', updated_at = NOW() WHERE b24_deal_id = ?")
