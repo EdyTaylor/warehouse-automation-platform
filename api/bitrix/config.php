@@ -30,18 +30,30 @@ return [
     // If deal_id is missing, movement sync will be skipped.
     'movement_timeline_method' => 'crm.timeline.comment.add',
 
-    // Очередь склада (api/webhook.php → queueDealForWarehouse): по умолчанию любая сделка с товарами.
-    // Включите filter_enabled и задайте rules, чтобы заявки создавались только на нужных этапах воронок.
-    // CATEGORY_ID и STAGE_ID возьмите из crm.deal.get или из карточки сделки (режим разработчика).
+    // Очередь склада (api/webhook.php → queueDealForWarehouse).
     //
-    // Пример три воронок:
-    //   'rules' => [
-    //     ['category_ids' => [1], 'stages_exact' => ['C1:UC_READY_SERVICE']],           // продажа услуг → «Готовы»
-    //     ['category_ids' => [2], 'stages_contains' => ['UC_INSPECTION']],              // выполнение — осмотр/работа
-    //     ['category_ids' => [3], 'stages_exact' => ['C3:UC_PAID_OR_SHIP']],           // товары → оплачено/отгрузка
-    //   ],
-    'warehouse_queue' => [
-        'filter_enabled' => false,
-        'rules' => [],
-    ],
+    // Портал llumar.bitrix24.kz — справочно:
+    //   CATEGORY_ID 0 — «Продажа услуг» (основная), ENTITY_ID DEAL_STAGE — STAGE_ID без префикса C0:.
+    //   CATEGORY_ID 1 — «Выполнение услуг», ENTITY_ID DEAL_STAGE_1 — C1:…
+    //   CATEGORY_ID 3 — «Продажа товаров», ENTITY_ID DEAL_STAGE_3 — C3:…
+    //   Рассылка (5) — не включать здесь (отдельная автоматизация).
+    //
+    // Стадии «Готовы на услуги» = PREPAYMENT_INVOICE при CATEGORY_ID 0 (проверено crm.status.list).
+    //
+    // filter_enabled=false — заявка на склад при любом ONCRMDEALUPDATE с товарами.
+    // filter_enabled=true — только если сделка в одной из rules (первая подошедшая).
+    'warehouse_queue' => array(
+        'filter_enabled' => true,
+        'rules' => array(
+            array(
+                'category_ids' => array(0),
+                'stages_exact' => array('PREPAYMENT_INVOICE'),
+            ),
+            // Раскомментируйте при необходимости:
+            // array('category_ids' => array(1), 'stages_exact' => array('C1:NEW')),               // После туннеля «Записаны»
+            // array('category_ids' => array(1), 'stages_exact' => array('C1:EXECUTING')),       // Выполнение — «В работе»
+            // array('category_ids' => array(3), 'stages_exact' => array('C3:PREPAYMENT_INVOICE')), // Товары — «Оплачены»
+            // array('category_ids' => array(3), 'stages_exact' => array('C3:EXECUTING')),         // Товары — «Отгружены»
+        ),
+    ),
 ];
