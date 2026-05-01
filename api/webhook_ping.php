@@ -40,7 +40,7 @@ if (isset($_GET['write']) && (string)$_GET['write'] === '1') {
         $GLOBALS['webhook_log_id'] = webhookLogInsertIncoming(
             $db,
             'MANUAL_DIAG_PING',
-            ['source' => 'webhook_ping.php', 'ip' => $_SERVER['REMOTE_ADDR'] ?? '', 'time' => gmdate('c')],
+            array('source' => 'webhook_ping.php', 'ip' => isset($_SERVER['REMOTE_ADDR']) ? $_SERVER['REMOTE_ADDR'] : '', 'time' => gmdate('c')),
             null,
             null
         );

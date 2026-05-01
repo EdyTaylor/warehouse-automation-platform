@@ -74,9 +74,10 @@ if (!is_array($data)) {
     exit;
 }
 
-$event = $data['event'] ?? '';
-$auth = $data['auth'] ?? [];
-$eventHash = hash('sha256', $event . '|' . json_encode($data['data'] ?? [], JSON_UNESCAPED_UNICODE));
+$event = isset($data['event']) ? $data['event'] : '';
+$auth = (isset($data['auth']) && is_array($data['auth'])) ? $data['auth'] : array();
+$eventDataForHash = (isset($data['data']) && is_array($data['data'])) ? $data['data'] : array();
+$eventHash = hash('sha256', $event . '|' . json_encode($eventDataForHash, JSON_UNESCAPED_UNICODE));
 
 list($incomingDealId, $incomingProductId) = webhookLogExtractEntityIds($event, $data);
 $GLOBALS['webhook_log_id'] = webhookLogInsertIncoming($db, $event === '' ? 'EMPTY_EVENT_FIELD' : $event, $data, $incomingDealId, $incomingProductId);
@@ -140,9 +141,9 @@ function handleNewDeal($db, $data) {
         exit;
     }
     
-    $dealId = intval($deal['ID'] ?? 0);
-    $dealName = $deal['TITLE'] ?? '';
-    $responsibleId = $deal['ASSIGNED_BY_ID'] ?? '';
+    $dealId = intval(isset($deal['ID']) ? $deal['ID'] : 0);
+    $dealName = isset($deal['TITLE']) ? $deal['TITLE'] : '';
+    $responsibleId = isset($deal['ASSIGNED_BY_ID']) ? $deal['ASSIGNED_BY_ID'] : '';
     
     if ($dealId <= 0) {
         webhookLogFinish($db, 'deal_add_invalid_id');
@@ -161,8 +162,8 @@ function handleNewDeal($db, $data) {
         echo json_encode([
             'status' => 'skipped_warehouse_gate',
             'deal_id' => $dealId,
-            'category_id' => $dealCtx['CATEGORY_ID'] ?? null,
-            'stage_id' => $dealCtx['STAGE_ID'] ?? null,
+            'category_id' => isset($dealCtx['CATEGORY_ID']) ? $dealCtx['CATEGORY_ID'] : null,
+            'stage_id' => isset($dealCtx['STAGE_ID']) ? $dealCtx['STAGE_ID'] : null,
         ]);
         exit;
     }
@@ -188,7 +189,7 @@ function handleNewDeal($db, $data) {
         }
         echo json_encode(isset($result['error'])
             ? ['status' => 'error', 'deal_id' => $dealId, 'error' => $result['error']]
-            : ['status' => 'deal_processed', 'deal_id' => $dealId, 'request_id' => $result['request_id'] ?? null]
+            : array('status' => 'deal_processed', 'deal_id' => $dealId, 'request_id' => isset($result['request_id']) ? $result['request_id'] : null)
         );
     } else {
         webhookLogFinish($db, 'no_products', $dealId, null);
@@ -198,7 +199,7 @@ function handleNewDeal($db, $data) {
 
 function handleDealUpdate($db, $data) {
     $deal = extractDealPayload($data);
-    $dealId = intval($deal['ID'] ?? 0);
+    $dealId = intval(isset($deal['ID']) ? $deal['ID'] : 0);
     
     if ($dealId <= 0) {
         webhookLogFinish($db, 'deal_update_invalid_id');
@@ -217,7 +218,7 @@ function handleDealUpdate($db, $data) {
     if (!empty($products) && bitrixWarehouseQueueAllowed($dealCtx, $gate)) {
         $result = queueDealForWarehouse($db, [
             'deal_id' => $dealId,
-            'deal_name' => $dealData['TITLE'] ?? ('Deal #' . $dealId),
+            'deal_name' => isset($dealData['TITLE']) ? $dealData['TITLE'] : ('Deal #' . $dealId),
             'responsible' => isset($dealData['ASSIGNED_BY_ID']) ? getUserName($db, $dealData['ASSIGNED_BY_ID']) : '',
             'products' => $products
         ]);
@@ -228,15 +229,15 @@ function handleDealUpdate($db, $data) {
         }
         echo json_encode(isset($result['error'])
             ? ['status' => 'error', 'deal_id' => $dealId, 'error' => $result['error']]
-            : ['status' => 'deal_updated', 'deal_id' => $dealId, 'request_id' => $result['request_id'] ?? null]
+            : array('status' => 'deal_updated', 'deal_id' => $dealId, 'request_id' => isset($result['request_id']) ? $result['request_id'] : null)
         );
     } elseif (!empty($products)) {
         webhookLogFinish($db, 'skipped_warehouse_gate', $dealId, null);
         echo json_encode([
             'status' => 'skipped_warehouse_gate',
             'deal_id' => $dealId,
-            'category_id' => $dealCtx['CATEGORY_ID'] ?? null,
-            'stage_id' => $dealCtx['STAGE_ID'] ?? null,
+            'category_id' => isset($dealCtx['CATEGORY_ID']) ? $dealCtx['CATEGORY_ID'] : null,
+            'stage_id' => isset($dealCtx['STAGE_ID']) ? $dealCtx['STAGE_ID'] : null,
         ]);
     } else {
         webhookLogFinish($db, 'no_products', $dealId, null);
@@ -247,7 +248,7 @@ function handleDealUpdate($db, $data) {
 }
 
 function handleNewProduct($db, $data) {
-    $product = $data['data'] ?? [];
+    $product = (isset($data['data']) && is_array($data['data'])) ? $data['data'] : array();
     
     if (empty($product)) {
         webhookLogFinish($db, 'product_add_empty_payload');
@@ -255,9 +256,9 @@ function handleNewProduct($db, $data) {
         exit;
     }
     
-    $productId = intval($product['ID'] ?? 0);
-    $productName = $product['NAME'] ?? '';
-    $productPrice = floatval($product['PRICE'] ?? 0);
+    $productId = intval(isset($product['ID']) ? $product['ID'] : 0);
+    $productName = isset($product['NAME']) ? $product['NAME'] : '';
+    $productPrice = floatval(isset($product['PRICE']) ? $product['PRICE'] : 0);
     
     if ($productId <= 0) {
         webhookLogFinish($db, 'product_add_invalid_id');
@@ -286,7 +287,7 @@ function handleNewProduct($db, $data) {
 }
 
 function handleProductUpdate($db, $data) {
-    $product = $data['data'] ?? [];
+    $product = (isset($data['data']) && is_array($data['data'])) ? $data['data'] : array();
     
     if (empty($product)) {
         webhookLogFinish($db, 'product_update_empty_payload');
@@ -294,9 +295,9 @@ function handleProductUpdate($db, $data) {
         exit;
     }
     
-    $productId = intval($product['ID'] ?? 0);
-    $productName = $product['NAME'] ?? '';
-    $productPrice = floatval($product['PRICE'] ?? 0);
+    $productId = intval(isset($product['ID']) ? $product['ID'] : 0);
+    $productName = isset($product['NAME']) ? $product['NAME'] : '';
+    $productPrice = floatval(isset($product['PRICE']) ? $product['PRICE'] : 0);
     
     if ($productId <= 0) {
         webhookLogFinish($db, 'product_update_invalid_id');
@@ -413,8 +414,8 @@ function applyDealPaidOrReserveMark($db, $dealId, $dealData) {
     }
 
     try {
-        $stage = strtoupper(trim((string)($dealData['STAGE_ID'] ?? '')));
-        $semantic = strtolower(trim((string)($dealData['SEMANTICS'] ?? '')));
+        $stage = strtoupper(trim((string)(isset($dealData['STAGE_ID']) ? $dealData['STAGE_ID'] : '')));
+        $semantic = strtolower(trim((string)(isset($dealData['SEMANTICS']) ? $dealData['SEMANTICS'] : '')));
         $isPaid = $semantic === 's' || in_array($stage, ['WON', 'C4:WON', 'FINAL_INVOICE', 'UC_1G5NIZ'], true);
 
         if ($isPaid) {
@@ -486,7 +487,7 @@ function getDealProducts($db, $dealId) {
     require_once __DIR__ . '/bitrix/send.php';
     
     $cfg = require __DIR__ . '/bitrix/config.php';
-    $method = $cfg['method_urls']['crm.deal.productrows.get'] ?? null;
+    $method = isset($cfg['method_urls']['crm.deal.productrows.get']) ? $cfg['method_urls']['crm.deal.productrows.get'] : null;
     
     if (!$method) {
         return [];
@@ -500,11 +501,12 @@ function getDealProducts($db, $dealId) {
     }
     
     $products = [];
-    foreach (($resp['result'] ?? []) as $item) {
-        $productId = intval($item['PRODUCT_ID'] ?? 0);
-        $quantity = floatval($item['QUANTITY'] ?? 0);
-        $price = floatval($item['PRICE'] ?? 0);
-        $name = $item['PRODUCT_NAME'] ?? '';
+    $rows = isset($resp['result']) && is_array($resp['result']) ? $resp['result'] : array();
+    foreach ($rows as $item) {
+        $productId = intval(isset($item['PRODUCT_ID']) ? $item['PRODUCT_ID'] : 0);
+        $quantity = floatval(isset($item['QUANTITY']) ? $item['QUANTITY'] : 0);
+        $price = floatval(isset($item['PRICE']) ? $item['PRICE'] : 0);
+        $name = isset($item['PRODUCT_NAME']) ? $item['PRODUCT_NAME'] : '';
         
         if ($productId > 0 && $quantity > 0) {
             $products[] = [

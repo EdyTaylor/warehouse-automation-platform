@@ -59,19 +59,20 @@ function webhookLogExtractEntityIds($eventName, array $payload) {
     $ev = (string)$eventName;
     if (strpos($ev, 'DEAL') !== false) {
         $fields = webhookLogExtractDealPayload($payload);
-        $did = intval($fields['ID'] ?? 0);
+        $did = intval(isset($fields['ID']) ? $fields['ID'] : 0);
         if ($did > 0) {
             $dealId = $did;
         }
     }
     if (strpos($ev, 'PRODUCT') !== false) {
-        $row = isset($payload['data']) && is_array($payload['data']) ? $payload['data'] : [];
-        $pid = intval($row['ID'] ?? $row['id'] ?? 0);
+        $row = isset($payload['data']) && is_array($payload['data']) ? $payload['data'] : array();
+        $pidSrc = isset($row['ID']) ? $row['ID'] : (isset($row['id']) ? $row['id'] : 0);
+        $pid = intval($pidSrc);
         if ($pid > 0) {
             $productId = $pid;
         }
     }
-    return [$dealId, $productId];
+    return array($dealId, $productId);
 }
 
 function webhookLogInsertIncoming(PDO $db, $eventName, array $data, $dealId = null, $productId = null) {
@@ -80,12 +81,12 @@ function webhookLogInsertIncoming(PDO $db, $eventName, array $data, $dealId = nu
         VALUES (?, ?, 0, NOW(), ?, ?)
     ');
     $payload = json_encode($data, JSON_UNESCAPED_UNICODE);
-    $stmt->execute([
+    $stmt->execute(array(
         $eventName,
         $payload === false ? '{}' : $payload,
         $dealId,
         $productId,
-    ]);
+    ));
     return intval($db->lastInsertId());
 }
 
@@ -94,8 +95,8 @@ function webhookLogFinish(PDO $db, $outcome, $dealId = null, $productId = null) 
     if ($lid <= 0 || $outcome === null || $outcome === '') {
         return;
     }
-    $parts = ['handler_outcome = ?'];
-    $bind = [$outcome];
+    $parts = array('handler_outcome = ?');
+    $bind = array($outcome);
     if ($dealId !== null && $dealId > 0) {
         $parts[] = 'entity_deal_id = ?';
         $bind[] = intval($dealId);
