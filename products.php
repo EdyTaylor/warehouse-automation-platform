@@ -266,18 +266,21 @@ function runB24SyncForProductIds($db, $productIds) {
     })));
 
     if (empty($ids)) {
-        return array('ok' => 0, 'err' => 0, 'total' => 0);
+        return array('ok' => 0, 'err' => 0, 'skip' => 0, 'total' => 0);
     }
 
     $batchSize = getB24SyncBatchSize($db);
     $delayMs = getB24SyncDelayMs($db);
     $ok = 0;
     $err = 0;
+    $skip = 0;
     $chunks = array_chunk($ids, $batchSize);
     foreach ($chunks as $chunkIndex => $chunk) {
         foreach ($chunk as $productId) {
             $res = syncProductPriceToB24($db, $productId);
-            if ($res['ok']) {
+            if (!empty($res['skipped'])) {
+                $skip++;
+            } elseif ($res['ok']) {
                 $ok++;
             } else {
                 $err++;
@@ -288,7 +291,7 @@ function runB24SyncForProductIds($db, $productIds) {
         }
     }
 
-    return array('ok' => $ok, 'err' => $err, 'total' => count($ids));
+    return array('ok' => $ok, 'err' => $err, 'skip' => $skip, 'total' => count($ids));
 }
 
 function processPriceSyncChunk($db, $offset, $limit) {
@@ -315,6 +318,7 @@ function processPriceSyncChunk($db, $offset, $limit) {
             'processed' => 0,
             'ok' => 0,
             'err' => 0,
+            'skip' => 0,
             'next_offset' => $offset,
             'done' => true
         );
@@ -330,6 +334,7 @@ function processPriceSyncChunk($db, $offset, $limit) {
 
     $ok = 0;
     $err = 0;
+    $skip = 0;
     $errors = array();
     foreach ($rows as $row) {
         $productId = intval(isset($row['id']) ? $row['id'] : 0);
@@ -341,7 +346,9 @@ function processPriceSyncChunk($db, $offset, $limit) {
             continue;
         }
         $res = syncProductPriceToB24($db, $productId);
-        if (isset($res['ok']) && $res['ok']) {
+        if (!empty($res['skipped'])) {
+            $skip++;
+        } elseif (isset($res['ok']) && $res['ok']) {
             $ok++;
         } else {
             $err++;
@@ -361,6 +368,7 @@ function processPriceSyncChunk($db, $offset, $limit) {
         'processed' => $processed,
         'ok' => $ok,
         'err' => $err,
+        'skip' => $skip,
         'errors' => $errors,
         'next_offset' => $nextOffset,
         'done' => ($nextOffset >= $total || $processed === 0)
@@ -617,6 +625,14 @@ function syncProductPriceToB24($db, $productId) {
 
     $b24Id = intval($product['b24_product_id']);
     $retailPrice = round(floatval(isset($product['price_per_meter']) ? $product['price_per_meter'] : 0), 4);
+    if ($retailPrice <= 0) {
+        return array(
+            'ok' => false,
+            'skipped' => true,
+            'message' => 'Пропущено: не задана цена за метр'
+        );
+    }
+
     $currencyId = strtoupper(trim((string)getAppSetting($db, 'default_currency', 'KGS')));
     if ($currencyId === '') {
         $currencyId = 'KGS';
@@ -663,8 +679,6 @@ function syncProductPriceToB24($db, $productId) {
                 $crmPriceMatches = abs(floatval($snapshot['price']) - $retailPrice) < 0.02;
             }
             $verified = ($priceMatches || $crmPriceMatches);
-        } else {
-            $verified = true;
         }
 
         if (!$verified && $snapshot['ok']) {
@@ -690,7 +704,7 @@ function syncProductPriceToB24($db, $productId) {
         }
     }
 
-    $priceErr = $retailPrice > 0 ? 'catalog.price: не выполнено' : 'Не задана цена за метр';
+    $priceErr = 'catalog.price: не выполнено';
     if (is_array($priceUpsertResp) && isset($priceUpsertResp['response']) && is_array($priceUpsertResp['response'])) {
         $respRow = $priceUpsertResp['response'];
         if (isset($respRow['error_description']) && $respRow['error_description'] !== '') {
@@ -738,7 +752,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = isset($_POST['action']) ? $_POST['action'] : 'save';
 
     if ($action === 'sync_to_b24') {
-        header("Location: products.php?sync_job=prices&sync_offset=0&sync_ok=0&sync_err=0");
+        header("Location: products.php?sync_job=prices&sync_offset=0&sync_ok=0&sync_err=0&sync_skip=0");
         exit;
     }
 
@@ -751,7 +765,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'sync_one') {
         $productId = intval(isset($_POST['product_id']) ? $_POST['product_id'] : 0);
         $res = syncProductPriceToB24($db, $productId);
-        $msg = $res['ok'] ? "Отправка товара #{$productId}: успешно" : ("Отправка товара #{$productId}: " . $res['message']);
+        if (!empty($res['skipped'])) {
+            $msg = "Отправка товара #{$productId}: пропущено (нет цены за метр)";
+        } else {
+            $msg = $res['ok'] ? "Отправка товара #{$productId}: успешно" : ("Отправка товара #{$productId}: " . $res['message']);
+        }
         header("Location: products.php?sync_msg=" . urlencode($msg));
         exit;
     }
@@ -759,7 +777,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'sync_selected') {
         $ids = isset($_POST['selected_ids']) && is_array($_POST['selected_ids']) ? $_POST['selected_ids'] : array();
         $stats = runB24SyncForProductIds($db, $ids);
-        header("Location: products.php?sync_msg=" . urlencode("Отправить выбранные: обновлено {$stats['ok']}, ошибок {$stats['err']}, всего {$stats['total']}"));
+        $sk = intval(isset($stats['skip']) ? $stats['skip'] : 0);
+        header("Location: products.php?sync_msg=" . urlencode("Отправить выбранные: обновлено {$stats['ok']}, ошибок {$stats['err']}, пропущено {$sk}, всего {$stats['total']}"));
         exit;
     }
 
@@ -773,14 +792,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         ")->fetchAll(PDO::FETCH_ASSOC);
         $ids = array_map(function($r) { return intval($r['id']); }, $rows);
         $stats = runB24SyncForProductIds($db, $ids);
-        header("Location: products.php?sync_msg=" . urlencode("Повторить ошибки отправки: обновлено {$stats['ok']}, ошибок {$stats['err']}, всего {$stats['total']}"));
+        $sk = intval(isset($stats['skip']) ? $stats['skip'] : 0);
+        header("Location: products.php?sync_msg=" . urlencode("Повтор ошибок: обновлено {$stats['ok']}, ошибок {$stats['err']}, пропущено {$sk}, всего {$stats['total']}"));
         exit;
     }
 
     if ($action === 'sync_row_to_b24') {
         $productId = intval(isset($_POST['product_id']) ? $_POST['product_id'] : 0);
         $result = syncProductPriceToB24($db, $productId);
-        $message = $result['ok'] ? "Товар #{$productId}: отправка в Б24 выполнена" : ("Товар #{$productId}: " . $result['message']);
+        if (!empty($result['skipped'])) {
+            $message = "Товар #{$productId}: пропущено (нет цены за метр)";
+        } else {
+            $message = $result['ok'] ? "Товар #{$productId}: отправка в Б24 выполнена" : ("Товар #{$productId}: " . $result['message']);
+        }
         header("Location: products.php?sync_msg=" . urlencode($message));
         exit;
     }
@@ -936,6 +960,7 @@ if (isset($_GET['sync_job']) && $_GET['sync_job'] === 'prices') {
     $offset = isset($_GET['sync_offset']) ? intval($_GET['sync_offset']) : 0;
     $okAcc = isset($_GET['sync_ok']) ? intval($_GET['sync_ok']) : 0;
     $errAcc = isset($_GET['sync_err']) ? intval($_GET['sync_err']) : 0;
+    $skipAcc = isset($_GET['sync_skip']) ? intval($_GET['sync_skip']) : 0;
     $limit = getB24SyncBatchSize($db);
     if ($limit < 10) {
         $limit = 10;
@@ -944,6 +969,7 @@ if (isset($_GET['sync_job']) && $_GET['sync_job'] === 'prices') {
     $chunk = processPriceSyncChunk($db, $offset, $limit);
     $okAcc += intval(isset($chunk['ok']) ? $chunk['ok'] : 0);
     $errAcc += intval(isset($chunk['err']) ? $chunk['err'] : 0);
+    $skipAcc += intval(isset($chunk['skip']) ? $chunk['skip'] : 0);
     $nextOffset = intval(isset($chunk['next_offset']) ? $chunk['next_offset'] : $offset);
     $total = intval(isset($chunk['total']) ? $chunk['total'] : 0);
     $chunkErrors = isset($chunk['errors']) && is_array($chunk['errors']) ? $chunk['errors'] : array();
@@ -956,10 +982,10 @@ if (isset($_GET['sync_job']) && $_GET['sync_job'] === 'prices') {
     }
 
     if (!empty($chunk['done'])) {
-        header("Location: products.php?sync_msg=" . urlencode("Отправить в Б24: обновлено {$okAcc}, ошибок {$errAcc}, всего {$total}") . "&sync_show_errors=1");
+        header("Location: products.php?sync_msg=" . urlencode("Отправить в Б24: обновлено {$okAcc}, ошибок {$errAcc}, пропущено {$skipAcc}, всего {$total}") . "&sync_show_errors=1");
         exit;
     }
-    $nextUrl = "products.php?sync_job=prices&sync_offset={$nextOffset}&sync_ok={$okAcc}&sync_err={$errAcc}";
+    $nextUrl = "products.php?sync_job=prices&sync_offset={$nextOffset}&sync_ok={$okAcc}&sync_err={$errAcc}&sync_skip={$skipAcc}";
     $progressPercent = $total > 0 ? min(100, intval(round(($nextOffset / $total) * 100))) : 0;
     header('Content-Type: text/html; charset=utf-8');
     echo '<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>Синхронизация цен с Б24</title>';
@@ -967,7 +993,7 @@ if (isset($_GET['sync_job']) && $_GET['sync_job'] === 'prices') {
     echo '<style>body{font-family:Arial,sans-serif;background:#f4f6f8;margin:0;padding:24px}.box{max-width:720px;margin:0 auto;background:#fff;border:1px solid #d9e2ec;border-radius:10px;padding:20px}.bar{height:10px;background:#e2e8f0;border-radius:999px;overflow:hidden}.fill{height:100%;background:#2563eb;width:' . $progressPercent . '%}.muted{color:#64748b}</style>';
     echo '</head><body><div class="box">';
     echo '<h3 style="margin-top:0">Синхронизация цен с Б24...</h3>';
-    echo '<p class="muted">Обработано: <strong>' . intval($nextOffset) . '</strong> из <strong>' . intval($total) . '</strong>. Успешно: <strong>' . intval($okAcc) . '</strong>, ошибок: <strong>' . intval($errAcc) . '</strong>.</p>';
+    echo '<p class="muted">Обработано: <strong>' . intval($nextOffset) . '</strong> из <strong>' . intval($total) . '</strong>. Успешно: <strong>' . intval($okAcc) . '</strong>, ошибок: <strong>' . intval($errAcc) . '</strong>, пропущено (нет цены/м): <strong>' . intval($skipAcc) . '</strong>.</p>';
     if ($lastChunkError !== '') {
         echo '<p class="muted" style="color:#b91c1c"><strong>Последняя ошибка:</strong> ' . htmlspecialchars($lastChunkError, ENT_QUOTES, 'UTF-8') . '</p>';
     }
@@ -1011,7 +1037,22 @@ $search = isset($_GET['q']) ? trim($_GET['q']) : '';
 $brandPrefix = isset($_GET['brand_prefix']) ? trim($_GET['brand_prefix']) : '';
 $catalogFilter = isset($_GET['catalog_id']) ? trim($_GET['catalog_id']) : '';
 $hasB24Filter = isset($_GET['has_b24']) ? $_GET['has_b24'] : 'all';
-$emptyPricesOnly = isset($_GET['empty_prices']) && $_GET['empty_prices'] === '1';
+
+$priceFilter = isset($_GET['price_filter']) ? trim($_GET['price_filter']) : 'all';
+$allowedPriceFilters = array('all', 'no_meter', 'empty_any', 'ready_b24_sync');
+if (!in_array($priceFilter, $allowedPriceFilters, true)) {
+    $priceFilter = 'all';
+}
+if (isset($_GET['empty_prices']) && $_GET['empty_prices'] === '1') {
+    $priceFilter = 'empty_any';
+}
+
+$syncStatusFilter = isset($_GET['sync_status']) ? trim($_GET['sync_status']) : 'all';
+$allowedSyncStatus = array('all', 'pending', 'sent', 'error');
+if (!in_array($syncStatusFilter, $allowedSyncStatus, true)) {
+    $syncStatusFilter = 'all';
+}
+
 $allowedPerPage = array(50, 100, 200);
 $perPage = isset($_GET['per_page']) ? intval($_GET['per_page']) : 50;
 if (!in_array($perPage, $allowedPerPage, true)) {
@@ -1042,8 +1083,11 @@ if ($hasB24Filter === 'yes') {
 } elseif ($hasB24Filter === 'no') {
     $where[] = "(b24_product_id IS NULL OR b24_product_id = 0)";
 }
-if ($emptyPricesOnly) {
-    $where[] = "(
+
+if ($priceFilter === 'no_meter') {
+    $where[] = '(price_per_meter IS NULL OR price_per_meter = 0)';
+} elseif ($priceFilter === 'empty_any') {
+    $where[] = '(
         purchase_price IS NULL OR purchase_price = 0
         OR delivery_price IS NULL OR delivery_price = 0
         OR price_per_meter IS NULL OR price_per_meter = 0
@@ -1051,7 +1095,15 @@ if ($emptyPricesOnly) {
         OR price_5_9 IS NULL OR price_5_9 = 0
         OR price_10_19 IS NULL OR price_10_19 = 0
         OR price_20_plus IS NULL OR price_20_plus = 0
-    )";
+    )';
+} elseif ($priceFilter === 'ready_b24_sync') {
+    $where[] = 'b24_product_id IS NOT NULL AND b24_product_id <> 0'
+        . ' AND price_per_meter IS NOT NULL AND price_per_meter > 0';
+}
+
+if ($syncStatusFilter !== 'all') {
+    $where[] = 'sync_status = ?';
+    $params[] = $syncStatusFilter;
 }
 
 $whereSql = '';
@@ -1084,6 +1136,22 @@ if ($hasCatalogId) {
         }
     }
 }
+
+$b24GlobStats = $db->query("
+    SELECT
+        SUM(CASE WHEN b24_product_id IS NOT NULL AND b24_product_id <> 0 THEN 1 ELSE 0 END) AS b24_linked,
+        SUM(CASE WHEN b24_product_id IS NOT NULL AND b24_product_id <> 0
+                 AND price_per_meter IS NOT NULL AND price_per_meter > 0 THEN 1 ELSE 0 END) AS b24_ready,
+        SUM(CASE WHEN b24_product_id IS NOT NULL AND b24_product_id <> 0
+                 AND (price_per_meter IS NULL OR price_per_meter = 0) THEN 1 ELSE 0 END) AS b24_no_meter_price,
+        SUM(CASE WHEN sync_status = 'error' THEN 1 ELSE 0 END) AS sync_error_cnt
+    FROM products
+")->fetch(PDO::FETCH_ASSOC);
+$b24LinkedTotal = intval(isset($b24GlobStats['b24_linked']) ? $b24GlobStats['b24_linked'] : 0);
+$b24ReadyTotal = intval(isset($b24GlobStats['b24_ready']) ? $b24GlobStats['b24_ready'] : 0);
+$b24NoMeterTotal = intval(isset($b24GlobStats['b24_no_meter_price']) ? $b24GlobStats['b24_no_meter_price'] : 0);
+$syncErrorTotal = intval(isset($b24GlobStats['sync_error_cnt']) ? $b24GlobStats['sync_error_cnt'] : 0);
+
 $page_title = 'Товары';
 require 'includes/header.php';
 ?>
@@ -1162,11 +1230,29 @@ require 'includes/header.php';
                 </div>
                 <?php endif; ?>
                 <div>
-                    <label class="form-label" for="has_b24">Наличие b24_product_id</label>
+                    <label class="form-label" for="has_b24">Привязка к Битрикс24</label>
                     <select class="form-control" id="has_b24" name="has_b24">
-                        <option value="all" <?php echo $hasB24Filter === 'all' ? 'selected' : ''; ?>>Все</option>
-                        <option value="yes" <?php echo $hasB24Filter === 'yes' ? 'selected' : ''; ?>>Только с B24</option>
-                        <option value="no" <?php echo $hasB24Filter === 'no' ? 'selected' : ''; ?>>Только без B24</option>
+                        <option value="all" <?php echo $hasB24Filter === 'all' ? 'selected' : ''; ?>>Все товары</option>
+                        <option value="yes" <?php echo $hasB24Filter === 'yes' ? 'selected' : ''; ?>>Только с ID в Б24</option>
+                        <option value="no" <?php echo $hasB24Filter === 'no' ? 'selected' : ''; ?>>Только без ID в Б24</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="form-label" for="price_filter">Цена за метр / готовность к отправке</label>
+                    <select class="form-control" id="price_filter" name="price_filter">
+                        <option value="all" <?php echo $priceFilter === 'all' ? 'selected' : ''; ?>>Не фильтровать по цене/м</option>
+                        <option value="no_meter" <?php echo $priceFilter === 'no_meter' ? 'selected' : ''; ?>>Цена за метр не указана (=0 или пусто)</option>
+                        <option value="ready_b24_sync" <?php echo $priceFilter === 'ready_b24_sync' ? 'selected' : ''; ?>>Готовы к отправке цены в Б24 (есть ID и цена/м&gt;0)</option>
+                        <option value="empty_any" <?php echo $priceFilter === 'empty_any' ? 'selected' : ''; ?>>Есть «дырка» в любой цене (себестоимость, доставка, сетку и т.д.)</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="form-label" for="sync_status">Последний статус отправки в Б24</label>
+                    <select class="form-control" id="sync_status" name="sync_status">
+                        <option value="all" <?php echo $syncStatusFilter === 'all' ? 'selected' : ''; ?>>Любой</option>
+                        <option value="pending" <?php echo $syncStatusFilter === 'pending' ? 'selected' : ''; ?>>Не отправлено / не проверено (pending)</option>
+                        <option value="sent" <?php echo $syncStatusFilter === 'sent' ? 'selected' : ''; ?>>Успешно отправлено (sent)</option>
+                        <option value="error" <?php echo $syncStatusFilter === 'error' ? 'selected' : ''; ?>>Были ошибки (error)</option>
                     </select>
                 </div>
                 <div>
@@ -1179,11 +1265,24 @@ require 'includes/header.php';
                 </div>
             </div>
             <div class="products-filter-actions">
-                <label>
-                    <input type="checkbox" name="empty_prices" value="1" <?php echo $emptyPricesOnly ? 'checked' : ''; ?>>
-                    Есть пустые цены
-                </label>
-                <div class="d-flex gap-1">
+                <div class="muted" style="flex:1;min-width:220px;line-height:1.5">
+                    <strong>По складу всего:</strong>
+                    с Б24 —
+                    <?php echo $b24LinkedTotal; ?>,
+                    готовы отправить цену —
+                    <?php echo $b24ReadyTotal; ?>,
+                    в Б24 без цены за метр —
+                    <?php echo $b24NoMeterTotal; ?>,
+                    в статусе ошибки —
+                    <?php echo $syncErrorTotal; ?>.
+                    <span class="d-block" style="margin-top:.35rem"><strong>Быстрые пресеты:</strong>
+                        <a href="<?php echo htmlspecialchars(buildProductsUrl(array('price_filter' => 'ready_b24_sync', 'has_b24' => 'all', 'sync_status' => 'all', 'page' => null))); ?>">только что реально отправим массовой кнопкой</a>
+                        · <a href="<?php echo htmlspecialchars(buildProductsUrl(array('price_filter' => 'no_meter', 'has_b24' => 'yes', 'sync_status' => 'all', 'page' => null))); ?>">в Б24, но без цены/м</a>
+                        · <a href="<?php echo htmlspecialchars(buildProductsUrl(array('price_filter' => 'all', 'has_b24' => 'all', 'sync_status' => 'error', 'page' => null))); ?>">ошибки синхронизации</a>
+                        · <a href="<?php echo htmlspecialchars(buildProductsUrl(array('price_filter' => 'empty_any', 'has_b24' => 'all', 'sync_status' => 'all', 'page' => null))); ?>">нужно добить прайс (любое поле пустое)</a>
+                    </span>
+                </div>
+                <div class="d-flex gap-1 align-items-start">
                     <button class="btn btn-primary btn-sm" type="submit">Применить</button>
                     <a class="btn btn-light btn-sm" href="products.php">Сбросить</a>
                 </div>
@@ -1193,7 +1292,7 @@ require 'includes/header.php';
         <div class="products-bulk-tools">
             <form method="POST" class="js-sync-action-form">
                 <input type="hidden" name="action" value="sync_to_b24">
-                <button class="btn btn-warning btn-sm" type="submit" data-loading-text="Отправка...">Отправить все цены в Б24</button>
+                <button class="btn btn-warning btn-sm" type="submit" title="Товары без цены за метр не трогаем в Б24 (считаются «пропущено»)." data-loading-text="Отправка...">Отправить все цены в Б24</button>
             </form>
             <form method="POST" class="js-sync-action-form">
                 <input type="hidden" name="action" value="sync_create_missing_b24">
