@@ -370,7 +370,7 @@ require 'includes/header.php';
             </div>
             <p class="text-muted">Ввод цен в выбранной валюте. Отчет и синк в Б24 всегда в KGS. Курс USD из вкладки "Интеграция": <strong><?= htmlspecialchars(number_format($usdToKgsRate, 2, '.', ' ')) ?></strong>.</p>
             <?php if ($integrationSyncPaused): ?>
-                <div class="alert alert-warning">Синхронизация <strong>выключена</strong>. Обычный приход с записью в Б24 недоступен — отметьте ниже «Только локально» или включите синхронизацию в Центре интеграции.</div>
+                <div class="alert alert-warning">Синхронизация <strong>выключена</strong>. Приход с Б24 недоступен. Чтобы при этом создавать рулоны, в Центре интеграции должна быть включена опция <strong>«Разрешить локальный приход при паузе»</strong>, и здесь нужна галочка «Только локально». Иначе приход будет отклонён.</div>
             <?php endif; ?>
             <div class="form-group">
                 <label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;">

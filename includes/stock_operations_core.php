@@ -1274,11 +1274,18 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
     }
 
     require_once __DIR__ . '/../functions/integration_sync_control.php';
-    if (!$localOnly && integrationAllSyncPaused($db)) {
-        $outBase['error_message'] = 'Синхронизация отключена: обычный приход недоступен. Укажите режим только локально '
-            . '(local_only / галочка «Только локально»), затем выполнится один локальный документ без запросов в Битрикс24, '
-            . 'или включите синхронизацию.';
-        return $outBase;
+    if (integrationAllSyncPaused($db)) {
+        if (!$localOnly) {
+            $outBase['error_message'] = 'Синхронизация отключена: обычный приход недоступен. Включите синхронизацию, '
+                . 'либо в Центре интеграции включите «Разрешить локальный приход при паузе» и используйте режим только локально '
+                . '(local_only / галочка «Только локально»).';
+            return $outBase;
+        }
+        if (!integrationAllowsLocalReceiptDuringPause($db)) {
+            $outBase['error_message'] = 'Синхронизация отключена: локальный приход при паузе запрещён настройкой. '
+                . 'В Центре интеграции включите «Разрешить локальный приход при паузе» или снимите паузу.';
+            return $outBase;
+        }
     }
 
     try {

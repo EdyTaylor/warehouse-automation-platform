@@ -42,9 +42,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     if ($action === 'save_sync_master_switch') {
         try {
             $on = isset($_POST['integration_all_sync_paused']) ? '1' : '0';
+            $allowLocalRec = isset($_POST['integration_allow_local_receipt_during_pause']) ? '1' : '0';
             setAppSetting($db, integrationAllSyncPausedSettingsKey(), $on);
+            setAppSetting($db, integrationAllowLocalReceiptDuringPauseSettingsKey(), $allowLocalRec);
             $successMsg = ($on === '1')
-                ? 'Синхронизация отключена: вебхуки не обрабатываются, cron-скрипты и запись в Б24 заблокированы. Можно безопасно чистить локальную БД.'
+                ? 'Синхронизация отключена: вебхуки не обрабатываются, cron-скрипты и запись в Б24 заблокированы. Новые рулоны — только если отмечено разрешение локального прихода при паузе.'
                 : 'Синхронизация снова включена.';
         } catch (Exception $e) {
             $errorMsg = 'Не удалось сохранить переключатель: ' . $e->getMessage();
@@ -272,6 +274,7 @@ try {
 $storedReserveRaw = getAppSetting($db, integrationWarehouseReserveGateSettingsKey(), '');
 $storedRealRaw = getAppSetting($db, integrationWarehouseRealizationGateSettingsKey(), '');
 $integrationSyncPaused = integrationAllSyncPaused($db);
+$integrationAllowLocalReceiptDuringPause = integrationAllowsLocalReceiptDuringPause($db);
 ?>
 
 <main class="container">
@@ -290,6 +293,7 @@ $integrationSyncPaused = integrationAllSyncPaused($db);
             Исходящие вебхуки получают ответ без изменения складских данных в приложении.
             Изменения в Битрикс24 из этого приложения (остатки, цены, приходные документы, комментарии к сделкам) не отправляются.
             Импорт товаров, цикл автосинка и ручные кнопки синка из этого раздела возвращают JSON с <code>integration_sync_paused</code>.
+            Новые рулоны только при активной галочке «Разрешить локальный приход при паузе» и режиме <code>local_only</code>.
         </div>
     <?php endif; ?>
 
@@ -304,7 +308,11 @@ $integrationSyncPaused = integrationAllSyncPaused($db);
                 <input type="hidden" name="action" value="save_sync_master_switch">
                 <label style="display:flex;gap:10px;align-items:flex-start;max-width:42rem;cursor:pointer;">
                     <input type="checkbox" name="integration_all_sync_paused" value="1" <?= $integrationSyncPaused ? 'checked' : '' ?> style="margin-top:4px;">
-                    <span><strong>Отключить синхронизацию</strong> — вебхуки Б24: ответ <code>integration_sync_paused</code> <em>без</em> записи в <code>webhook_log</code>; cron/импорт и исходящие <code>sendToBitrix</code> блокируются. Добавление рулонов через склад, дашборд, <code>add_stock</code> и «принятие остатка из Б24» по конфликту — тоже заблокированы. Исключение: приход с режимом <strong>только локально</strong> (<code>local_only</code>) и JSON/API/форма складских операций с соответствующей галочкой.</span>
+                    <span><strong>Отключить синхронизацию</strong> — вебхуки Б24 без записи в <code>webhook_log</code>; cron/импорт и исходящие <code>sendToBitrix</code> блокируются. Через склад, дашборд и <code>add_stock</code> рулоны не добавить. Приход документом (один файл прихода + рулоны) при паузе создаётся <em>только если</em> включена галочка ниже и используется режим «только локально».</span>
+                </label>
+                <label style="display:flex;gap:10px;align-items:flex-start;max-width:42rem;cursor:pointer;margin-top:14px;">
+                    <input type="checkbox" name="integration_allow_local_receipt_during_pause" value="1" <?= $integrationAllowLocalReceiptDuringPause ? 'checked' : '' ?> style="margin-top:4px;">
+                    <span><strong>Разрешить локальный приход при паузе</strong> — можно проводить приход с <code>local_only</code> (форма «Только локально», JSON, Центр интеграции). Без этой галочки при паузе новые рулоны из прихода не создаются.</span>
                 </label>
                 <p style="margin-top:12px;">
                     <button class="btn btn-warning" type="submit">Сохранить переключатель</button>
@@ -320,7 +328,7 @@ $integrationSyncPaused = integrationAllSyncPaused($db);
                 Формат как у <code>api/create_receipt_json.php</code>. По умолчанию локальный документ и синхронизация с Битрикс24.
                 Для большого прихода включите ниже опцию «только локально» — один документ в приложении без вызовов Б24 (меньше вероятность 504 и дробления из‑за повторов после таймаута).
                 В JSON можно добавить ключ <code>&quot;local_only&quot;: true</code>; галочка тоже задаёт режим локально только.
-                Если включена <strong>пауза синхронизации</strong>, запись в Б24 может быть заблокирована — без «только локально» локальная часть может выполниться или откатиться в зависимости от ошибки Б24.
+                При <strong>паузе синхронизации</strong> приход создаёт рулоны только если в блоке «Пауза» включено <strong>«Разрешить локальный приход при паузе»</strong> и здесь отмечено «только локально» (или в JSON есть <code>local_only</code>).
             </p>
             <?php if ($stockReceiptSecretStored === ''): ?>
                 <div class="alert alert-warning">Секрет прихода ещё не задан — сначала сохраните его в блоке «Склады и синк».</div>

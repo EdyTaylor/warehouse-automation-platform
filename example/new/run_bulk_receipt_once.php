@@ -9,7 +9,8 @@
  *   php example/new/run_bulk_receipt_once.php
  *   php example/new/run_bulk_receipt_once.php --force
  *   php example/new/run_bulk_receipt_once.php --input="example/new/bulk_receipt_from_llumar.generated.json"
- *   php example/new/run_bulk_receipt_once.php --local-only   (или "local_only": true в JSON — нужно при паузе синхронизации)
+ *   php example/new/run_bulk_receipt_once.php --local-only
+ *   При паузе в app_settings: включите «Разрешить локальный приход при паузе» в sync_monitor или временно снимите паузу.
  */
 
 if (php_sapi_name() !== 'cli') {

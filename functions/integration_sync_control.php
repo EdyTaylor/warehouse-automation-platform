@@ -13,9 +13,23 @@ function integrationAllSyncPaused(PDO $db)
     return trim((string)getAppSetting($db, integrationAllSyncPausedSettingsKey(), '0')) === '1';
 }
 
+/** @return string */
+function integrationAllowLocalReceiptDuringPauseSettingsKey()
+{
+    return 'integration_allow_local_receipt_during_pause';
+}
+
 /**
- * При паузе синхронизации не создаём рулоны «в обход» через UI и обычный приход.
- * Исключение: stockOperationsProcessCreateReceiptPayload(..., ['local_only' => true]) — явный локальный приход без Б24.
+ * Явное разрешение прихода с local_only, пока включена пауза синхронизации (по умолчанию выключено).
+ */
+function integrationAllowsLocalReceiptDuringPause(PDO $db)
+{
+    return trim((string)getAppSetting($db, integrationAllowLocalReceiptDuringPauseSettingsKey(), '0')) === '1';
+}
+
+/**
+ * При паузе синхронизации не создаём рулоны через обычные формы склада/дашборда.
+ * Приход документом — только при integrationAllowsLocalReceiptDuringPause + local_only.
  *
  * @return string пустая строка = можно, иначе текст ошибки для пользователя
  */
@@ -24,9 +38,8 @@ function integrationStockRollCreationBlockedMessage(PDO $db)
     if (!integrationAllSyncPaused($db)) {
         return '';
     }
-    return 'Синхронизация отключена в Центре интеграции: добавление рулонов через эту форму недоступно. '
-        . 'Для оприходования при паузе используйте режим «только локально» в приходе (складские операции, JSON-приход) '
-        . 'или снова включите синхронизацию.';
+    return 'Синхронизация отключена: добавление рулонов через эту страницу недоступно. '
+        . 'Включите синхронизацию или в Центре интеграции отметьте «Разрешить локальный приход при паузе» и проведите приход в режиме «только локально» (форма / JSON).';
 }
 
 /**
