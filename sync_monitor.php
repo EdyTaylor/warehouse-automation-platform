@@ -9,6 +9,7 @@ require_once __DIR__ . '/functions/webhook_log_schema.php';
 require_once __DIR__ . '/functions/integration_workflow_gates.php';
 require_once __DIR__ . '/functions/integration_bitrix_funnels.php';
 require_once __DIR__ . '/functions/integration_sync_control.php';
+require_once __DIR__ . '/functions/stock_emergency_kill.php';
 $db = getDB();
 webhookLogEnsureSchema($db);
 
@@ -25,6 +26,8 @@ $syncConflicts = array();
 $cycleLastRun = '';
 $successMsg = '';
 $errorMsg = '';
+
+$stockEmergencyStopMsg = stockEmergencyRollCreationStoppedMessage();
 
 $funnelSnap = integrationLoadFunnelsSnapshotDecoded($db);
 $reserveGateMerged = integrationMergedReserveGate($db, $bitrixCfg);
@@ -303,6 +306,16 @@ $integrationStockAbortEpoch = integrationGetStockAbortEpoch($db);
         <div class="alert alert-danger"><?= htmlspecialchars($errorMsg) ?></div>
     <?php endif; ?>
 
+    <?php if ($stockEmergencyStopMsg !== ''): ?>
+        <div class="alert alert-danger" role="alert" style="border-left:4px solid #c00;">
+            <strong>Аварийная остановка складских приходов активна.</strong>
+            <?= htmlspecialchars($stockEmergencyStopMsg) ?>
+            <div class="text-muted" style="margin-top:8px;font-size:0.92rem;">
+                Удалите файл <code>STOCK_CREATES_OFF</code> или <code>STOCK_CREATES_OFF.txt</code> в корне сайта через FTP/панель хостинга, затем обновите страницу.
+            </div>
+        </div>
+    <?php endif; ?>
+
     <?php if ($integrationSyncPaused): ?>
         <div class="alert alert-danger" role="alert">
             <strong>Пауза синхронизации включена.</strong>
@@ -343,6 +356,11 @@ $integrationStockAbortEpoch = integrationGetStockAbortEpoch($db);
                 <button class="btn btn-danger" type="submit">Только прервать выполняющийся приход</button>
                 <span class="text-muted" style="margin-left:10px;">Без смены галочек паузы — только остановить «залипший» прогон.</span>
             </form>
+            <div class="alert alert-secondary" role="note" style="margin-top:16px;">
+                <strong>Жёсткий стоп (FTP):</strong> в корень сайта (папка с <code>index.php</code>) положите пустой файл
+                <code>STOCK_CREATES_OFF</code> — приложение перестанет создавать рулоны (приход API/форма, склад, дашборд, конфликты продаж).
+                Удалите файл, когда всё восстановите.
+            </div>
         </div>
     </details>
 

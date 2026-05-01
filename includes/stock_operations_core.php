@@ -1312,6 +1312,14 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
         'receipt_currency' => $receiptCurrency
     );
 
+    require_once __DIR__ . '/../functions/stock_emergency_kill.php';
+    $emergencyStopCreates = stockEmergencyRollCreationStoppedMessage();
+    if ($emergencyStopCreates !== '') {
+        $outBase['error_message'] = $emergencyStopCreates;
+        $outBase['emergency_blocked'] = true;
+        return $outBase;
+    }
+
     if (empty($linesIn)) {
         $outBase['error_message'] = 'Пустой список строк прихода.';
         return $outBase;

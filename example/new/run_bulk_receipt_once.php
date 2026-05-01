@@ -71,6 +71,14 @@ if (hasArg('local-only')) {
 }
 
 $db = getDB();
+
+require_once dirname(__DIR__, 2) . '/functions/stock_emergency_kill.php';
+$killMsg = stockEmergencyRollCreationStoppedMessage();
+if ($killMsg !== '') {
+    echo 'BLOCKED emergency: ' . $killMsg . "\nRemove STOCK_CREATES_OFF in site root.\n";
+    exit(91);
+}
+
 ensureStockOperationTables($db);
 $usdRate = getUsdToKgsRate($db);
 $docNumber = isset($payload['doc_number']) ? trim((string)$payload['doc_number']) : '';

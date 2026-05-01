@@ -34,6 +34,18 @@ if (function_exists('set_time_limit')) {
 }
 header('Content-Type: application/json; charset=utf-8');
 
+require_once dirname(__DIR__) . '/functions/stock_emergency_kill.php';
+$emergencyKillCreates = stockEmergencyRollCreationStoppedMessage();
+if ($emergencyKillCreates !== '') {
+    http_response_code(503);
+    echo json_encode(array(
+        'ok' => false,
+        'emergency_blocked' => true,
+        'error_message' => $emergencyKillCreates,
+    ));
+    exit;
+}
+
 require_once dirname(__DIR__) . '/db.php';
 require_once dirname(__DIR__) . '/functions/stock_movements.php';
 require_once dirname(__DIR__) . '/api/bitrix/send.php';

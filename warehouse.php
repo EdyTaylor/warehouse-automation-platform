@@ -10,6 +10,7 @@ require_once __DIR__ . '/functions/stock_movements.php';
 require_once __DIR__ . '/functions/pricing.php';
 require_once __DIR__ . '/functions/app_settings.php';
 require_once __DIR__ . '/functions/integration_sync_control.php';
+require_once __DIR__ . '/functions/stock_emergency_kill.php';
 require_once __DIR__ . '/api/bitrix/send.php';
 
 // Compatibility wrapper for legacy calls in this file.
@@ -117,7 +118,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST'
     && !isset($_POST['delete_roll'])
     && (!isset($_POST['action']) || $_POST['action'] !== 'writeoff')
 ) {
-    $blockMsg = integrationStockRollCreationBlockedMessage($db);
+    $emOff = stockEmergencyRollCreationStoppedMessage();
+    $blockMsg = ($emOff !== '') ? $emOff : integrationStockRollCreationBlockedMessage($db);
     if ($blockMsg !== '') {
         $error_msg = $blockMsg;
     } else {

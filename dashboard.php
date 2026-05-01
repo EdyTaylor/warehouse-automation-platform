@@ -8,6 +8,7 @@ $db = getDB();
 require_once __DIR__ . '/functions/stock_movements.php';
 require_once __DIR__ . '/functions/app_settings.php';
 require_once __DIR__ . '/functions/integration_sync_control.php';
+require_once __DIR__ . '/functions/stock_emergency_kill.php';
 require_once __DIR__ . '/api/bitrix/send.php';
 
 $dashboardMessage = '';
@@ -27,7 +28,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if ($action === 'receipt_quick') {
-        $blockRoll = integrationStockRollCreationBlockedMessage($db);
+        $emOffDash = stockEmergencyRollCreationStoppedMessage();
+        $blockRoll = ($emOffDash !== '') ? $emOffDash : integrationStockRollCreationBlockedMessage($db);
         if ($blockRoll !== '') {
             $dashboardError = $blockRoll;
         } else {
