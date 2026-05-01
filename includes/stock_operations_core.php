@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 /** Shared: stock tables, Bitrix document sync, receipt product helpers. */
 
 require_once __DIR__ . '/../functions/stock_movements.php';
@@ -1012,9 +1012,23 @@ function localizeOperationType($operationType) {
     return isset($map[$key]) ? $map[$key] : $key;
 }
 
-function ensureProductForReceipt($db, $productId, $productName, $rollLength, $pricePerRoll, $deliveryPricePerRoll) {
+/**
+ * Если задан &$deferBitrixProductPrices — HTTP к Битриксу (crm.product.*) выполняется ПОСЛЕ commit транзакции прихода,
+ * иначе MySQL рвёт idle-сессию во время HTTP к Bitrix («MySQL server has gone away», wait_timeout на шаринге).
+ *
+ * При передаче массива: product_id → price_per_meter (последняя строка прихода по товару перезапишет число для Б24).
+ *
+ * @param PDO $db
+ * @param float $rollLength
+ * @param float $pricePerRoll
+ * @param float $deliveryPricePerRoll
+ * @param array|null $deferBitrixProductPrices передать array(); иначе null — прежнее поведение внутри транзакции
+ * @return array запись продукта (локальная)
+ */
+function ensureProductForReceipt($db, $productId, $productName, $rollLength, $pricePerRoll, $deliveryPricePerRoll, &$deferBitrixProductPrices = null) {
     $baseRollPrice = $deliveryPricePerRoll > 0 ? $deliveryPricePerRoll : $pricePerRoll;
     $pricePerMeter = ($baseRollPrice > 0 && $rollLength > 0) ? ($baseRollPrice / $rollLength) : 0;
+    $useDefer = ($deferBitrixProductPrices !== null);
 
     if ($productId > 0) {
         $stmt = $db->prepare("SELECT * FROM products WHERE id = ? LIMIT 1");
@@ -1029,6 +1043,10 @@ function ensureProductForReceipt($db, $productId, $productName, $rollLength, $pr
             $p['delivery_price'] = $deliveryPricePerRoll;
             $p['roll_length'] = $rollLength;
             $p['price_per_meter'] = $pricePerMeter;
+            if ($useDefer) {
+                $deferBitrixProductPrices[intval($p['id'])] = $pricePerMeter;
+                return $p;
+            }
             return ensureProductInBitrix($db, $p, $pricePerMeter);
         }
     }
@@ -1048,6 +1066,10 @@ function ensureProductForReceipt($db, $productId, $productName, $rollLength, $pr
         $existing['delivery_price'] = $deliveryPricePerRoll;
         $existing['roll_length'] = $rollLength;
         $existing['price_per_meter'] = $pricePerMeter;
+        if ($useDefer) {
+            $deferBitrixProductPrices[intval($existing['id'])] = $pricePerMeter;
+            return $existing;
+        }
         return ensureProductInBitrix($db, $existing, $pricePerMeter);
     }
 
@@ -1059,7 +1081,32 @@ function ensureProductForReceipt($db, $productId, $productName, $rollLength, $pr
     $newId = intval($db->lastInsertId());
 
     $created = array('id' => $newId, 'name' => $name, 'b24_product_id' => 0);
+    if ($useDefer) {
+        $deferBitrixProductPrices[$newId] = $pricePerMeter;
+        return $created;
+    }
     return ensureProductInBitrix($db, $created, $pricePerMeter);
+}
+
+/**
+ * Выполнить отложенные при приходе вызовы ensureProductInBitrix (после commit).
+ *
+ * @param PDO $db
+ * @param array $productIdToPriceMeter int => float price per meter для crm.product
+ */
+function stockOperationsFlushDeferredEnsureProductBitrix($db, array $productIdToPriceMeter) {
+    foreach ($productIdToPriceMeter as $prodId => $ppm) {
+        $prodId = intval($prodId);
+        if ($prodId <= 0) {
+            continue;
+        }
+        $st = $db->prepare('SELECT * FROM products WHERE id = ? LIMIT 1');
+        $st->execute(array($prodId));
+        $row = $st->fetch(PDO::FETCH_ASSOC);
+        if (is_array($row)) {
+            ensureProductInBitrix($db, $row, floatval($ppm));
+        }
+    }
 }
 
 function ensureProductInBitrix($db, $product, $pricePerMeter) {
@@ -1403,6 +1450,8 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
 
         $totalAmount = 0.0;
         $addedAny = false;
+        /** crm.product add/update только после commit — см. ensureProductForReceipt(..., &$defer…) */
+        $deferBitrixProductPrices = array();
         /** @var array локальные product_id для одного синка каталога/склада после commit (иначе на каждый рулон — десятки вызовов Б24 → «зависание») */
         $receiptProductIdsNeedCatalogPush = array();
 
@@ -1464,7 +1513,7 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
                 continue;
             }
 
-            $product = ensureProductForReceipt($db, $productId, $productName, $rollLength, $pricePerRoll, $deliveryPricePerRoll);
+            $product = ensureProductForReceipt($db, $productId, $productName, $rollLength, $pricePerRoll, $deliveryPricePerRoll, $deferBitrixProductPrices);
             $localProductId = intval($product['id']);
             $localProductName = isset($product['name']) ? $product['name'] : $productName;
 
@@ -1553,6 +1602,10 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
         $db->prepare("UPDATE stock_operation_docs SET total_amount = ? WHERE id = ?")
             ->execute(array($totalAmount, $docId));
         $db->commit();
+
+        if (!empty($deferBitrixProductPrices)) {
+            stockOperationsFlushDeferredEnsureProductBitrix($db, $deferBitrixProductPrices);
+        }
 
         if (!$localOnly && !empty($receiptProductIdsNeedCatalogPush)) {
             foreach (array_keys($receiptProductIdsNeedCatalogPush) as $pidForCatalog) {
