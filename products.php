@@ -1981,12 +1981,13 @@ require 'includes/header.php';
                     <th>5-9</th>
                     <th>10-19</th>
                     <th>20+</th>
+                    <th>Синхр.</th>
                     <th class="sticky-col sticky-col-actions">Действия</th>
                 </tr>
             </thead>
             <tbody>
                 <?php if (empty($products)): ?>
-                    <tr><td colspan="13" class="text-center text-muted">Ничего не найдено по текущим фильтрам.</td></tr>
+                    <tr><td colspan="14" class="text-center text-muted">Ничего не найдено по текущим фильтрам.</td></tr>
                 <?php endif; ?>
                 <?php foreach ($products as $p): ?>
                     <?php
@@ -1995,6 +1996,10 @@ require 'includes/header.php';
                         ? (isset($catalogLabels[$catalogId]) ? $catalogLabels[$catalogId] : ('#' . $catalogId))
                         : '—';
                     $b24Id = isset($p['b24_product_id']) ? intval($p['b24_product_id']) : 0;
+                    $syncStatus = isset($p['sync_status']) ? trim((string)$p['sync_status']) : '';
+                    $isSynced = ($syncStatus === 'sent');
+                    $syncLabel = $isSynced ? 'Синхронизированы' : 'Не синхр.';
+                    $syncClass = $isSynced ? 'text-success' : 'text-danger';
                     ?>
                     <tr class="product-row" data-product-id="<?php echo intval($p['id']); ?>" data-product-name="<?php echo htmlspecialchars(isset($p['name']) ? $p['name'] : '', ENT_QUOTES, 'UTF-8'); ?>">
                         <td class="sticky-col sticky-col-select"><input type="checkbox" class="row-selector" name="selected_ids[]" form="bulk-sync-form" value="<?php echo intval($p['id']); ?>"></td>
@@ -2035,6 +2040,11 @@ require 'includes/header.php';
                         <td>
                             <span class="cell-view"><?php echo htmlspecialchars((string)$p['price_20_plus']); ?></span>
                             <input class="form-control cell-edit" data-field="price_20_plus" type="text" value="<?php echo htmlspecialchars((string)$p['price_20_plus']); ?>">
+                        </td>
+                        <td>
+                            <span class="<?php echo $syncClass; ?>" title="Последний sync_status: <?php echo htmlspecialchars($syncStatus !== '' ? $syncStatus : 'pending', ENT_QUOTES, 'UTF-8'); ?>">
+                                <?php echo $syncLabel; ?>
+                            </span>
                         </td>
                         <td class="sticky-col sticky-col-actions">
                             <div class="products-row-actions">
