@@ -249,9 +249,19 @@ try {
             <?php foreach ($webhookRows as $row): ?>
                 <?php
                 $wid = (int)$row['id'];
-                $snippet = preg_replace('/\s+/', ' ', (string)(isset($row['data_preview']) ? $row['data_preview'] : ''));
-                if (strlen($snippet) > 1000) {
-                    $snippet = substr($snippet, 0, 1000) . '…';
+                $snippet = '';
+                $rawPrev = isset($row['data_preview']) ? trim((string)$row['data_preview']) : '';
+                if ($rawPrev !== '') {
+                    $decoded = json_decode($rawPrev, true);
+                    if (function_exists('json_last_error') && json_last_error() === JSON_ERROR_NONE) {
+                        $snippet = json_encode($decoded, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                    }
+                    if ($snippet === '') {
+                        $snippet = $rawPrev;
+                    }
+                    if (strlen($snippet) > 2000) {
+                        $snippet = substr($snippet, 0, 2000) . '…';
+                    }
                 }
                 ?>
                 <tr class="webhook-event-row">
@@ -272,7 +282,7 @@ try {
                 <tr class="webhook-json-row">
                     <td colspan="7" style="max-width:100%;vertical-align:top;">
                         <details>
-                            <summary style="cursor:pointer;">Показать JSON (до 1500 символов)</summary>
+                            <summary style="cursor:pointer;">Показать тело события (до 1500 симв.; форматирование JSON)</summary>
                             <div style="max-width:100%;margin-top:8px;overflow-x:auto;overflow-y:hidden;box-sizing:border-box;">
                                 <pre style="margin:0;white-space:pre-wrap;overflow-wrap:anywhere;word-wrap:break-word;word-break:break-word;font-size:12px;padding:10px;background:var(--bs-body-bg,#f8f9fa);border-radius:6px;border:1px solid rgba(127,127,127,0.2);"><?= htmlspecialchars($snippet) ?></pre>
                             </div>
