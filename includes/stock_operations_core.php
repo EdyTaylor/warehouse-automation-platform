@@ -1600,6 +1600,7 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
                 $outBase['success_message'] = 'Повторный запрос игнорирован: приход с номером «'
                     . $docNumber . '» уже есть (документ #' . $extId . '). Дубликаты не созданы.';
                 $outBase['error_message'] = '';
+                stockReceiptMysqlReleaseLock($db, $advisoryLockName);
                 return $outBase;
             }
         }
