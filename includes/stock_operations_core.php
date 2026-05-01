@@ -1386,6 +1386,8 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
         $abortEpochStmt = $db->prepare('SELECT `value` FROM app_settings WHERE `key` = ? LIMIT 1');
         integrationAssertReceiptAbortEpochUnchanged($db, $receiptAbortEpoch, $abortEpochStmt);
 
+        $heartbeatRollCounter = 0;
+
         $insDoc = $db->prepare("
             INSERT INTO stock_operation_docs (operation_type, doc_number, supplier, comment_text, total_amount, status)
             VALUES ('receipt', ?, ?, ?, 0, 'posted')
@@ -1488,6 +1490,14 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
 
             for ($r = 0; $r < $qtyRolls; $r++) {
                 integrationAssertReceiptAbortEpochUnchanged($db, $receiptAbortEpoch, $abortEpochStmt);
+
+                $heartbeatRollCounter++;
+                if ($heartbeatRollCounter % 60 === 0) {
+                    try {
+                        $db->query('SELECT 1');
+                    } catch (Exception $eHb) {
+                    }
+                }
 
                 $effectiveRollPrice = ($deliveryPricePerRoll > 0 ? $deliveryPricePerRoll : $pricePerRoll);
                 $costPerMeter = $rollLength > 0 ? ($effectiveRollPrice / $rollLength) : 0;
@@ -1612,18 +1622,27 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
 
         return $outBase;
     } catch (Exception $e) {
-        if ($db->inTransaction()) {
-            $db->rollBack();
+        try {
+            if ($db->inTransaction()) {
+                $db->rollBack();
+            }
+        } catch (Exception $eRb) {
         }
         $outBase['error_message'] = $e->getMessage();
         return $outBase;
     } finally {
         if ($isoTweakedForReceipt) {
-            @$db->exec('SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE-READ');
+            try {
+                $db->exec('SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE-READ');
+            } catch (Exception $eIso) {
+            }
         }
     }
     } finally {
-        stockReceiptMysqlReleaseLock($db, $advisoryLockName);
+        try {
+            stockReceiptMysqlReleaseLock($db, $advisoryLockName);
+        } catch (Exception $eLock) {
+        }
     }
 }
 
@@ -1844,7 +1863,7 @@ function stockReceiptTruncateDocNumber($s) {
 /**
  * Несколько последовательных приходов с общим телом JSON, чтобы уменьшить 504.
  *
- * @param PDO $db
+ * @param PDO $db по ссылке: после 1-й части переподключается к MySQL (Beget рвёт wait_timeout на длинных приходах).
  * @param array $template doc_number может быть временным для seed; задаёт supplier, comment_text, receipt_currency, min_full, local_only
  * @param array $lines
  * @param int $linesPerChunk
@@ -1853,7 +1872,7 @@ function stockReceiptTruncateDocNumber($s) {
  *
  * @return array ok, chunked, chunks_total, results[], doc_ids[], error_message, aggregate duplicate_receipt_skip только если всё было skip...
  */
-function stockOperationsRunChunkedReceiptFromPayload(PDO $db, array $template, array $lines, $linesPerChunk, $maxRollUnitsPerChunk, $canonicalSeed) {
+function stockOperationsRunChunkedReceiptFromPayload(&$db, array $template, array $lines, $linesPerChunk, $maxRollUnitsPerChunk, $canonicalSeed) {
     $norm = stockOperationsReceiptNormalizeChunkOptions($linesPerChunk, $maxRollUnitsPerChunk);
     $outWrap = array(
         'ok' => false,
@@ -1890,6 +1909,11 @@ function stockOperationsRunChunkedReceiptFromPayload(PDO $db, array $template, a
     $seed = trim((string)$canonicalSeed);
 
     foreach ($chunks as $ci => $chunkLines) {
+        if (intval($ci) > 0) {
+            require_once __DIR__ . '/../db.php';
+            $db = getDB();
+        }
+
         $chunkTotal = count($chunks);
         $docNum = stockReceiptDocNumberForChunk($baseDn, intval($ci), $chunkTotal, $seed !== '' ? $seed : $baseDn . '|' . $chunkTotal);
 

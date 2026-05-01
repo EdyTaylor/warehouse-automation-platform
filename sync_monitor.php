@@ -476,7 +476,7 @@ $dbEmergencyRollBlockOn = (trim((string)getAppSetting($db, stockEmergencyRollCre
                 <li>
                     <strong>Запустить приход:</strong>
                     <a class="btn btn-primary btn-sm" href="sync_monitor.php?bulk=1#sec-receipt-json" style="margin-left:8px;">Форма прихода с «Только локально» по умолчанию</a>
-                    <span class="text-muted">В форме включены <strong>чанки</strong> (≈30 строк и до ~400 рулонов на документ): получится несколько документов прихода подряд, короче ответ браузера/прокси, меньше 504.</span>
+                    <span class="text-muted">В форме с <code>?bulk=1</code> стоят <strong>чанки</strong> (меньшие партии строк/рулонов на документ — меньше 504 и разрыва MySQL <code>server has gone away</code>). При ошибке 2006 уменьшайте оба числа или повторите — уже созданные части идемпотентны по <code>doc_number</code>.</span>
                     Через API то же самое — в корне JSON: <code>&quot;lines_per_chunk&quot;: 30</code>,
                     опционально <code>&quot;max_roll_units_per_chunk&quot;: 400</code>. Склад в Б24 после <code>local_only</code> можно подтянуть «Синхронизировать остатки».
                 </li>
@@ -535,15 +535,15 @@ $dbEmergencyRollBlockOn = (trim((string)getAppSetting($db, stockEmergencyRollCre
                     <div>
                         <label>Чанки: строк <code>lines</code> на один документ прихода</label>
                         <input class="input" type="number" name="receipt_lines_per_chunk" min="0" max="200" step="1"
-                            value="<?= $bulkReceiptUiDefault ? '30' : '0' ?>"
-                            title="0 — один документ на весь JSON (как раньше). 25–40 — меньше 504.">
+                            value="<?= $bulkReceiptUiDefault ? '22' : '0' ?>"
+                            title="0 — один документ на весь JSON (как раньше). 15–25 — безопаснее для Beget (MySQL gone away на длинном одном сеансе).">
                         <div class="text-muted" style="font-size:0.88rem;margin-top:4px;">или в JSON ключ <code>lines_per_chunk</code></div>
                     </div>
                     <div>
                         <label>Макс. сумма <code>qty_rolls</code> в партии</label>
                         <input class="input" type="number" name="receipt_max_roll_units" min="0" max="20000" step="1"
-                            value="<?= $bulkReceiptUiDefault ? '400' : '0' ?>"
-                            title="0 при ненулевых чанках = взять безопасный дефолт (~400). Длинные строки режутся под этот лимит.">
+                            value="<?= $bulkReceiptUiDefault ? '280' : '0' ?>"
+                            title="0 при ненулевых чанках = дефолт ~400 и дробление длинной строки. На Beget ставьте 200–320 при ошибке gone away / 504.">
                         <div class="text-muted" style="font-size:0.88rem;margin-top:4px;">или <code>max_roll_units_per_chunk</code></div>
                     </div>
                 </div>
