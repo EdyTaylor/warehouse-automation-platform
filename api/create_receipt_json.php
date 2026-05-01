@@ -8,9 +8,11 @@
  * Безопасность: ключ app_settings stock_receipt_api_secret (задаётся в sync_monitor.php), заголовок
  * X-Stock-Receipt-Secret или для отладки тот же ключ в query ?secret=
  *
- * Для больших приходов добавьте в корень JSON: "local_only": true — один локальный документ без вызовов Б24
- * (быстрее, меньше 504). При паузе синхронизации нужны и local_only, и опция в Центре интеграции «Разрешить локальный приход при паузе».
- * Без doc_number подставится AUTOAPI-<sha256 RAW body>; повтор того же POST даёт duplicate_receipt_skip без дублей рулонов.
+ * Для больших приходов добавьте в корень JSON: "local_only": true — меньше 504 при обращении к Б24.
+ * Чанковый режим (несколько документов подряд, короче один HTTP-ответ): "lines_per_chunk": 28 (или 25–80),
+ * опционально "max_roll_units_per_chunk": 350 (не более суммы qty_rolls в партии); 0 там = брать безопасный дефолт.
+ * При чанках doc_number пустой → стабильные ACHK-…-C1ofN по хешу тела; заданный doc_number → суффиксы -C1ofN (до 64 символов).
+ * Без чанков и без doc_number подставится AUTOAPI-<sha256 RAW body>. Повтор того же POST — идемпотентность по номеру.
  *
  * Важно: только POST с телом JSON. Обычный GET из адресной строки не выполнит приход (будет 405).
  *
@@ -88,10 +90,15 @@ if (!is_array($data)) {
     exit;
 }
 
+$lpc = isset($data['lines_per_chunk']) ? intval($data['lines_per_chunk']) : 0;
+$mruChunk = isset($data['max_roll_units_per_chunk']) ? intval($data['max_roll_units_per_chunk']) : 0;
+$wantChunkPreview = stockOperationsReceiptNormalizeChunkOptions($lpc, $mruChunk);
+
 $dnIn = isset($data['doc_number']) ? trim((string)$data['doc_number']) : '';
-if ($dnIn === '') {
-    // Повтор того же тела POST после 504 → тот же номер → идемпотентность в stock_operations_core
+if ($dnIn === '' && !$wantChunkPreview['active']) {
     $data['doc_number'] = 'AUTOAPI-' . substr(hash('sha256', $raw), 0, 40);
+} elseif ($dnIn === '' && $wantChunkPreview['active']) {
+    $data['doc_number'] = '';
 }
 
 $params = array(
@@ -104,22 +111,63 @@ $params = array(
     'local_only' => !empty($data['local_only']),
 );
 
-$result = stockOperationsProcessCreateReceiptPayload($db, $params);
+$response = array();
 
-$response = array(
-    'ok' => !empty($result['ok']),
-    'doc_id' => isset($result['doc_id']) ? $result['doc_id'] : null,
-    'b24_document_id' => isset($result['b24_document_id']) ? $result['b24_document_id'] : null,
-    'sync_status' => isset($result['sync_status']) ? $result['sync_status'] : null,
-    'duplicate_receipt_skip' => !empty($result['duplicate_receipt_skip']),
-    'usd_to_kgs_rate' => isset($result['usd_to_kgs_rate']) ? $result['usd_to_kgs_rate'] : null,
-    'total_amount_kgs' => isset($result['total_amount_kgs']) ? $result['total_amount_kgs'] : null,
-    'success_message' => isset($result['success_message']) ? $result['success_message'] : '',
-    'error_message' => isset($result['error_message']) ? $result['error_message'] : '',
-);
+if ($wantChunkPreview['active']) {
+    $templateChunk = array(
+        'doc_number' => $params['doc_number'],
+        'supplier' => $params['supplier'],
+        'comment_text' => $params['comment_text'],
+        'receipt_currency' => $params['receipt_currency'],
+        'min_full' => $params['min_full'],
+        'local_only' => $params['local_only'],
+    );
+    $wrap = stockOperationsRunChunkedReceiptFromPayload(
+        $db,
+        $templateChunk,
+        $params['lines'],
+        $lpc,
+        $mruChunk,
+        $raw
+    );
+    $response['ok'] = !empty($wrap['ok']);
+    $response['chunked'] = true;
+    $response['chunks_total'] = isset($wrap['chunks_total']) ? (int)$wrap['chunks_total'] : 0;
+    $response['chunks_completed'] = isset($wrap['chunks_completed']) ? (int)$wrap['chunks_completed'] : 0;
+    $response['doc_ids'] = isset($wrap['doc_ids']) && is_array($wrap['doc_ids']) ? $wrap['doc_ids'] : array();
+    $response['duplicate_receipt_skips'] = isset($wrap['duplicate_receipt_skips']) ? (int)$wrap['duplicate_receipt_skips'] : 0;
+    $response['chunk_results'] = isset($wrap['results']) ? $wrap['results'] : array();
+    $response['error_message'] = isset($wrap['error_message']) ? (string)$wrap['error_message'] : '';
+    $lastIdx = count($response['chunk_results']) - 1;
+    $lastUsd = ($lastIdx >= 0 && isset($response['chunk_results'][$lastIdx]['usd_to_kgs_rate']))
+        ? $response['chunk_results'][$lastIdx]['usd_to_kgs_rate'] : null;
+    $response['usd_to_kgs_rate'] = $lastUsd;
+    $response['success_message'] = $response['ok']
+        ? ('Приход выполнен частями: ' . $response['chunks_completed'] . ' документ(ов); id: ' . implode(', ', array_map('intval', $response['doc_ids'])) . '.')
+        : '';
+    $response['doc_id'] = !empty($response['doc_ids']) ? intval($response['doc_ids'][0]) : null;
+    $response['duplicate_receipt_skip'] = ($response['duplicate_receipt_skips'] > 0
+        && (int)$response['duplicate_receipt_skips'] === (int)$response['chunks_completed']
+        && (int)$response['chunks_completed'] > 0);
+} else {
+    $result = stockOperationsProcessCreateReceiptPayload($db, $params);
 
-if (!$response['ok'] && isset($result['sync_result'])) {
-    $response['sync_result'] = $result['sync_result'];
+    $response = array(
+        'ok' => !empty($result['ok']),
+        'chunked' => false,
+        'doc_id' => isset($result['doc_id']) ? $result['doc_id'] : null,
+        'b24_document_id' => isset($result['b24_document_id']) ? $result['b24_document_id'] : null,
+        'sync_status' => isset($result['sync_status']) ? $result['sync_status'] : null,
+        'duplicate_receipt_skip' => !empty($result['duplicate_receipt_skip']),
+        'usd_to_kgs_rate' => isset($result['usd_to_kgs_rate']) ? $result['usd_to_kgs_rate'] : null,
+        'total_amount_kgs' => isset($result['total_amount_kgs']) ? $result['total_amount_kgs'] : null,
+        'success_message' => isset($result['success_message']) ? $result['success_message'] : '',
+        'error_message' => isset($result['error_message']) ? $result['error_message'] : '',
+    );
+
+    if (!$response['ok'] && isset($result['sync_result'])) {
+        $response['sync_result'] = $result['sync_result'];
+    }
 }
 
 echo json_encode($response, JSON_UNESCAPED_UNICODE);

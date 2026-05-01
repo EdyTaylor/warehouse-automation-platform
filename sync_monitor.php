@@ -200,9 +200,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     }
                     $errorMsg = 'Некорректный JSON' . ($jem !== '' ? (': ' . $jem) : '') . '.';
                 } else {
+                    $linesPerChunkForm = isset($_POST['receipt_lines_per_chunk']) ? intval($_POST['receipt_lines_per_chunk']) : 0;
+                    $maxRollUnitsForm = isset($_POST['receipt_max_roll_units']) ? intval($_POST['receipt_max_roll_units']) : 0;
+                    if (isset($dataRec['lines_per_chunk'])) {
+                        $linesPerChunkForm = intval($dataRec['lines_per_chunk']);
+                    }
+                    if (isset($dataRec['max_roll_units_per_chunk'])) {
+                        $maxRollUnitsForm = intval($dataRec['max_roll_units_per_chunk']);
+                    }
+                    $chunkOptGui = stockOperationsReceiptNormalizeChunkOptions($linesPerChunkForm, $maxRollUnitsForm);
+
                     $dnRec = isset($dataRec['doc_number']) ? trim((string)$dataRec['doc_number']) : '';
-                    if ($dnRec === '') {
+                    if ($dnRec === '' && !$chunkOptGui['active']) {
                         $dataRec['doc_number'] = 'AUTOGUI-' . substr(hash('sha256', $jsonRaw), 0, 40);
+                    } elseif ($dnRec === '' && $chunkOptGui['active']) {
+                        $dataRec['doc_number'] = '';
                     }
                     $paramsRec = array(
                         'doc_number' => isset($dataRec['doc_number']) ? $dataRec['doc_number'] : '',
@@ -213,21 +225,68 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                         'lines' => isset($dataRec['lines']) && is_array($dataRec['lines']) ? $dataRec['lines'] : array(),
                         'local_only' => (!empty($_POST['receipt_local_only']) || !empty($dataRec['local_only'])),
                     );
-                    $resultRec = stockOperationsProcessCreateReceiptPayload($db, $paramsRec);
-                    if (!empty($resultRec['ok'])) {
-                        $parts = array();
-                        $parts[] = 'локальный документ #' . (isset($resultRec['doc_id']) ? (int)$resultRec['doc_id'] : 0);
-                        if (isset($resultRec['b24_document_id']) && $resultRec['b24_document_id'] !== null && (string)$resultRec['b24_document_id'] !== '') {
-                            $parts[] = 'Б24 документ: ' . $resultRec['b24_document_id'];
+
+                    if ($chunkOptGui['active']) {
+                        $templateBulk = array(
+                            'doc_number' => $paramsRec['doc_number'],
+                            'supplier' => $paramsRec['supplier'],
+                            'comment_text' => $paramsRec['comment_text'],
+                            'receipt_currency' => $paramsRec['receipt_currency'],
+                            'min_full' => $paramsRec['min_full'],
+                            'local_only' => $paramsRec['local_only'],
+                        );
+                        $wrapRec = stockOperationsRunChunkedReceiptFromPayload(
+                            $db,
+                            $templateBulk,
+                            $paramsRec['lines'],
+                            $linesPerChunkForm,
+                            $maxRollUnitsForm,
+                            $jsonRaw
+                        );
+                        if (!empty($wrapRec['ok'])) {
+                            $idList = isset($wrapRec['doc_ids']) && is_array($wrapRec['doc_ids'])
+                                ? array_map('intval', $wrapRec['doc_ids']) : array();
+                            $successMsg = 'Приход из JSON выполнен частями: '
+                                . 'документов ' . intval($wrapRec['chunks_total'])
+                                . ' (локальные id: ' . (empty($idList) ? '—' : '#' . implode(', #', $idList)) . '). ';
+                            $successMsg .= 'Строк партии до ' . intval($chunkOptGui['lines_per_chunk'])
+                                . ', рулонов в партии до ' . intval($chunkOptGui['max_roll_units']) . '. ';
+                            $tailMsg = '';
+                            foreach ($wrapRec['results'] as $ri => $oner) {
+                                if (!empty($oner['duplicate_receipt_skip'])) {
+                                    $tailMsg .= 'Часть ' . ($ri + 1) . ': пропуск дубликата. ';
+                                    continue;
+                                }
+                                $stOne = isset($oner['sync_status']) ? trim((string)$oner['sync_status']) : '';
+                                $b24One = isset($oner['b24_document_id']) ? (string)$oner['b24_document_id'] : '';
+                                if ($b24One !== '' && $stOne !== '') {
+                                    $tailMsg .= 'Часть ' . ($ri + 1) . ': Б24=' . $b24One . ' (' . $stOne . '). ';
+                                }
+                            }
+                            $successMsg .= trim($tailMsg);
+                        } else {
+                            $errorMsg = trim(isset($wrapRec['error_message']) ? $wrapRec['error_message'] : 'ошибка чанкового прихода');
+                            if ($errorMsg === '') {
+                                $errorMsg = 'Приход не выполнен (чанки).';
+                            }
                         }
-                        if (isset($resultRec['sync_status']) && trim((string)$resultRec['sync_status']) !== '') {
-                            $parts[] = 'синхронизация Б24: ' . $resultRec['sync_status'];
-                        }
-                        $smExtra = trim(isset($resultRec['success_message']) ? $resultRec['success_message'] : '');
-                        $successMsg = 'Приход из JSON выполнен (' . implode(', ', $parts) . ')'
-                            . ($smExtra !== '' ? '. ' . $smExtra : '') . '.';
                     } else {
-                        $errorMsg = 'Приход не выполнен: ' . trim(isset($resultRec['error_message']) ? $resultRec['error_message'] : 'ошибка');
+                        $resultRec = stockOperationsProcessCreateReceiptPayload($db, $paramsRec);
+                        if (!empty($resultRec['ok'])) {
+                            $parts = array();
+                            $parts[] = 'локальный документ #' . (isset($resultRec['doc_id']) ? (int)$resultRec['doc_id'] : 0);
+                            if (isset($resultRec['b24_document_id']) && $resultRec['b24_document_id'] !== null && (string)$resultRec['b24_document_id'] !== '') {
+                                $parts[] = 'Б24 документ: ' . $resultRec['b24_document_id'];
+                            }
+                            if (isset($resultRec['sync_status']) && trim((string)$resultRec['sync_status']) !== '') {
+                                $parts[] = 'синхронизация Б24: ' . $resultRec['sync_status'];
+                            }
+                            $smExtra = trim(isset($resultRec['success_message']) ? $resultRec['success_message'] : '');
+                            $successMsg = 'Приход из JSON выполнен (' . implode(', ', $parts) . ')'
+                                . ($smExtra !== '' ? '. ' . $smExtra : '') . '.';
+                        } else {
+                            $errorMsg = 'Приход не выполнен: ' . trim(isset($resultRec['error_message']) ? $resultRec['error_message'] : 'ошибка');
+                        }
                     }
                 }
             }
@@ -417,7 +476,9 @@ $dbEmergencyRollBlockOn = (trim((string)getAppSetting($db, stockEmergencyRollCre
                 <li>
                     <strong>Запустить приход:</strong>
                     <a class="btn btn-primary btn-sm" href="sync_monitor.php?bulk=1#sec-receipt-json" style="margin-left:8px;">Форма прихода с «Только локально» по умолчанию</a>
-                    <span class="text-muted"> — меньше 504 и нагрузки на Б24; склад в портале потом можно подтянуть отдельной синхронизацией остатков.</span>
+                    <span class="text-muted">В форме включены <strong>чанки</strong> (≈30 строк и до ~400 рулонов на документ): получится несколько документов прихода подряд, короче ответ браузера/прокси, меньше 504.</span>
+                    Через API то же самое — в корне JSON: <code>&quot;lines_per_chunk&quot;: 30</code>,
+                    опционально <code>&quot;max_roll_units_per_chunk&quot;: 400</code>. Склад в Б24 после <code>local_only</code> можно подтянуть «Синхронизировать остатки».
                 </li>
                 <li>Снимите аварийные блокировки рулонов (флаг в БД / триггер / <code>STOCK_CREATES_OFF</code>), если включали для остановки дублей.</li>
                 <li>
@@ -469,6 +530,22 @@ $dbEmergencyRollBlockOn = (trim((string)getAppSetting($db, stockEmergencyRollCre
                         <input type="checkbox" name="receipt_local_only" value="1" <?= $bulkReceiptUiDefault ? 'checked' : '' ?> style="margin-top:4px;">
                         <span><strong>Только локально</strong> — не звать Битрикс24 при этом приходе (<code>local_only</code>).</span>
                     </label>
+                </div>
+                <div class="form-group" style="display:flex;gap:18px;flex-wrap:wrap;align-items:flex-end;">
+                    <div>
+                        <label>Чанки: строк <code>lines</code> на один документ прихода</label>
+                        <input class="input" type="number" name="receipt_lines_per_chunk" min="0" max="200" step="1"
+                            value="<?= $bulkReceiptUiDefault ? '30' : '0' ?>"
+                            title="0 — один документ на весь JSON (как раньше). 25–40 — меньше 504.">
+                        <div class="text-muted" style="font-size:0.88rem;margin-top:4px;">или в JSON ключ <code>lines_per_chunk</code></div>
+                    </div>
+                    <div>
+                        <label>Макс. сумма <code>qty_rolls</code> в партии</label>
+                        <input class="input" type="number" name="receipt_max_roll_units" min="0" max="20000" step="1"
+                            value="<?= $bulkReceiptUiDefault ? '400' : '0' ?>"
+                            title="0 при ненулевых чанках = взять безопасный дефолт (~400). Длинные строки режутся под этот лимит.">
+                        <div class="text-muted" style="font-size:0.88rem;margin-top:4px;">или <code>max_roll_units_per_chunk</code></div>
+                    </div>
                 </div>
                 <button class="btn btn-primary" type="submit" <?= $stockReceiptSecretStored === '' ? 'disabled' : '' ?>>Запустить приход</button>
             </form>

@@ -1626,3 +1626,308 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
         stockReceiptMysqlReleaseLock($db, $advisoryLockName);
     }
 }
+
+/**
+ * Кол-во рулонов из строки JSON прихода.
+ *
+ * @param array $line
+ * @return int
+ */
+function stockOperationsReceiptLineQtyRolls(array $line) {
+    $q = intval(isset($line['qty_rolls']) ? $line['qty_rolls'] : (isset($line['qtyRolls']) ? $line['qtyRolls'] : 0));
+    if ($q < 0) {
+        return 0;
+    }
+    return $q;
+}
+
+/**
+ * Копия строки с указанным qty_rolls (для дробления длинной строки).
+ *
+ * @param array $line
+ * @param int $qtyRolls
+ * @return array
+ */
+function stockOperationsReceiptLineCloneQty(array $line, $qtyRolls) {
+    $out = $line;
+    $out['qty_rolls'] = intval($qtyRolls);
+    if (isset($out['qtyRolls'])) {
+        unset($out['qtyRolls']);
+    }
+    return $out;
+}
+
+/**
+ * Разбивает строки так, чтобы каждый кусок был не более $maxRollsPerPiece рулонов (если лимит задан).
+ *
+ * @param array $lines
+ * @param int $maxRollsPerPiece 0 или меньше = не дробить внутри строки
+ * @return array массив сегментов: line + rolls
+ */
+function stockOperationsReceiptFlattenLineSegments(array $lines, $maxRollsPerPiece) {
+    $segments = array();
+    $cap = intval($maxRollsPerPiece);
+    foreach ($lines as $line) {
+        if (!is_array($line)) {
+            continue;
+        }
+        $qty = stockOperationsReceiptLineQtyRolls($line);
+        if ($qty <= 0) {
+            continue;
+        }
+        if ($cap <= 0) {
+            $segments[] = array(
+                'line' => stockOperationsReceiptLineCloneQty($line, $qty),
+                'rolls' => $qty
+            );
+            continue;
+        }
+        $left = $qty;
+        while ($left > 0) {
+            $take = min($left, $cap);
+            $segments[] = array(
+                'line' => stockOperationsReceiptLineCloneQty($line, $take),
+                'rolls' => $take
+            );
+            $left -= $take;
+        }
+    }
+    return $segments;
+}
+
+/**
+ * Упаковка сегментов в партии прихода по числу строк и сумме рулонов в партии.
+ *
+ * @param array $segments результат stockOperationsReceiptFlattenLineSegments
+ * @param int $maxLinesPerChunk
+ * @param int $maxRollsPerChunk 0 = без лимита рулонов (только лимит строк)
+ * @return array массив чанков, каждый — список строк lines[]
+ */
+function stockOperationsReceiptPackSegmentsIntoChunks(array $segments, $maxLinesPerChunk, $maxRollsPerChunk) {
+    $maxLinesPerChunk = max(1, min(300, intval($maxLinesPerChunk)));
+    $chunkRollCap = intval($maxRollsPerChunk);
+    if ($chunkRollCap <= 0) {
+        $chunkRollCap = 2147483647;
+    } else {
+        $chunkRollCap = max(10, min(50000, $chunkRollCap));
+    }
+
+    $chunks = array();
+    $curLines = array();
+    $curRolls = 0;
+    $curLineCount = 0;
+
+    $flush = function () use (&$chunks, &$curLines, &$curRolls, &$curLineCount) {
+        if (!empty($curLines)) {
+            $chunks[] = $curLines;
+        }
+        $curLines = array();
+        $curRolls = 0;
+        $curLineCount = 0;
+    };
+
+    foreach ($segments as $seg) {
+        if (!is_array($seg) || !isset($seg['line']) || !isset($seg['rolls'])) {
+            continue;
+        }
+        $r = intval($seg['rolls']);
+        if ($r <= 0) {
+            continue;
+        }
+
+        while ($curLineCount > 0 && ($curLineCount >= $maxLinesPerChunk || $curRolls + $r > $chunkRollCap)) {
+            $flush();
+        }
+
+        $curLines[] = $seg['line'];
+        $curRolls += $r;
+        $curLineCount++;
+
+        if ($curLineCount >= $maxLinesPerChunk || $curRolls >= $chunkRollCap) {
+            $flush();
+        }
+    }
+    $flush();
+
+    return $chunks;
+}
+
+/**
+ * Настройки чанков из UI/API.
+ *
+ * @param int $linesPerChunk 0 = не использовать чанки
+ * @param int $maxRollUnits при чанках 0 означает «взять лимит по умолчанию» (разбиение длинных строк)
+ *
+ * @return array active, lines_per_chunk, max_roll_units (для упаковки партии), max_roll_piece (для дробления длинной строки)
+ */
+function stockOperationsReceiptNormalizeChunkOptions($linesPerChunk, $maxRollUnits) {
+    $lpc = intval($linesPerChunk);
+    if ($lpc <= 0) {
+        return array(
+            'active' => false,
+            'lines_per_chunk' => 0,
+            'max_roll_units' => 0,
+            'max_roll_piece' => 0
+        );
+    }
+    $lpc = max(5, min(200, $lpc));
+    $mru = intval($maxRollUnits);
+    if ($mru <= 0) {
+        $mru = 400;
+    }
+    $mru = max(50, min(20000, $mru));
+    $piece = min($mru, 500);
+    if ($piece < 50) {
+        $piece = 50;
+    }
+    return array(
+        'active' => true,
+        'lines_per_chunk' => $lpc,
+        'max_roll_units' => $mru,
+        'max_roll_piece' => $piece
+    );
+}
+
+/**
+ * Номер документа для части n из N (длина ≤ 64).
+ *
+ * @param string $baseDoc
+ * @param int $chunkIndex 0-based
+ * @param int $chunkTotal
+ * @param string $hashSeed соль для автогенерации при пустом baseDoc
+ *
+ * @return string
+ */
+function stockReceiptDocNumberForChunk($baseDoc, $chunkIndex, $chunkTotal, $hashSeed) {
+    $base = trim((string)$baseDoc);
+    $n = intval($chunkIndex);
+    $t = intval($chunkTotal);
+    if ($t <= 1 && $base !== '') {
+        $s = stockReceiptTruncateDocNumber($base);
+        return $s;
+    }
+
+    $suffix = '-C' . ($n + 1) . 'of' . $t;
+
+    if ($base === '') {
+        $seed = trim((string)$hashSeed);
+        $auto = 'ACHK-' . substr(hash('sha256', $seed !== '' ? ($seed . '|' . ($n + 1)) : (string)$n), 0, 40);
+        if (strlen($auto) + strlen($suffix) <= 64) {
+            return stockReceiptTruncateDocNumber($auto . $suffix);
+        }
+        return stockReceiptTruncateDocNumber(substr($auto, 0, 64 - strlen($suffix)) . $suffix);
+    }
+
+    if (strlen($base) + strlen($suffix) <= 64) {
+        return stockReceiptTruncateDocNumber($base . $suffix);
+    }
+    $room = 64 - strlen($suffix);
+    if ($room < 12) {
+        return stockReceiptTruncateDocNumber(substr(hash('sha256', $base . $suffix), 0, 48) . $suffix);
+    }
+    return stockReceiptTruncateDocNumber(substr($base, 0, $room) . $suffix);
+}
+
+/**
+ * @param string $s
+ *
+ * @return string
+ */
+function stockReceiptTruncateDocNumber($s) {
+    $s = trim((string)$s);
+    if (strlen($s) <= 64) {
+        return $s;
+    }
+    return substr($s, 0, 64);
+}
+
+/**
+ * Несколько последовательных приходов с общим телом JSON, чтобы уменьшить 504.
+ *
+ * @param PDO $db
+ * @param array $template doc_number может быть временным для seed; задаёт supplier, comment_text, receipt_currency, min_full, local_only
+ * @param array $lines
+ * @param int $linesPerChunk
+ * @param int $maxRollUnitsPerChunk
+ * @param string $canonicalSeed хешируется в номера ACHK если doc_number не задан
+ *
+ * @return array ok, chunked, chunks_total, results[], doc_ids[], error_message, aggregate duplicate_receipt_skip только если всё было skip...
+ */
+function stockOperationsRunChunkedReceiptFromPayload(PDO $db, array $template, array $lines, $linesPerChunk, $maxRollUnitsPerChunk, $canonicalSeed) {
+    $norm = stockOperationsReceiptNormalizeChunkOptions($linesPerChunk, $maxRollUnitsPerChunk);
+    $outWrap = array(
+        'ok' => false,
+        'chunked' => false,
+        'chunks_total' => 0,
+        'chunks_completed' => 0,
+        'results' => array(),
+        'doc_ids' => array(),
+        'error_message' => '',
+        'duplicate_receipt_skips' => 0,
+    );
+
+    if (!$norm['active']) {
+        $outWrap['error_message'] = 'Внутренняя ошибка: режим частей прихода не активирован.';
+        return $outWrap;
+    }
+
+    $segments = stockOperationsReceiptFlattenLineSegments($lines, $norm['max_roll_piece']);
+    $chunks = stockOperationsReceiptPackSegmentsIntoChunks(
+        $segments,
+        $norm['lines_per_chunk'],
+        $norm['max_roll_units']
+    );
+
+    if (empty($chunks)) {
+        $outWrap['error_message'] = 'Нет строк прихода для обработки (пустые или неверные qty_rolls).';
+        return $outWrap;
+    }
+
+    $outWrap['chunked'] = true;
+    $outWrap['chunks_total'] = count($chunks);
+
+    $baseDn = isset($template['doc_number']) ? trim((string)$template['doc_number']) : '';
+    $seed = trim((string)$canonicalSeed);
+
+    foreach ($chunks as $ci => $chunkLines) {
+        $chunkTotal = count($chunks);
+        $docNum = stockReceiptDocNumberForChunk($baseDn, intval($ci), $chunkTotal, $seed !== '' ? $seed : $baseDn . '|' . $chunkTotal);
+
+        $commentBase = isset($template['comment_text']) ? trim((string)$template['comment_text']) : '';
+        $partNote = '[Часть ' . ($ci + 1) . '/' . $chunkTotal . ' массового прихода в ' . gmdate('Y-m-d\\TH:i:s\\Z') . '] ';
+        $commentMerged = trim($commentBase !== '' ? ($commentBase . ' ' . $partNote) : $partNote);
+
+        $paramsChunk = array(
+            'doc_number' => $docNum,
+            'supplier' => isset($template['supplier']) ? $template['supplier'] : '',
+            'comment_text' => $commentMerged,
+            'receipt_currency' => isset($template['receipt_currency']) ? $template['receipt_currency'] : 'USD',
+            'min_full' => isset($template['min_full']) ? $template['min_full'] : 0.5,
+            'lines' => $chunkLines,
+            'local_only' => !empty($template['local_only']),
+        );
+
+        $res = stockOperationsProcessCreateReceiptPayload($db, $paramsChunk);
+        $outWrap['results'][] = $res;
+        $outWrap['chunks_completed'] = intval($ci) + 1;
+
+        if (!empty($res['duplicate_receipt_skip'])) {
+            $outWrap['duplicate_receipt_skips']++;
+        }
+
+        if (empty($res['ok'])) {
+            $outWrap['ok'] = false;
+            $outWrap['error_message'] = 'Ошибка в части ' . ($ci + 1) . '/' . $chunkTotal . ': '
+                . trim(isset($res['error_message']) ? (string)$res['error_message'] : 'ошибка');
+            return $outWrap;
+        }
+        if (!empty($res['doc_id'])) {
+            $outWrap['doc_ids'][] = (int)$res['doc_id'];
+        }
+    }
+
+    $outWrap['ok'] = true;
+    $outWrap['error_message'] = '';
+
+    return $outWrap;
+}
