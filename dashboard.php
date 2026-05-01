@@ -28,7 +28,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if ($action === 'receipt_quick') {
-        $emOffDash = stockEmergencyRollCreationStoppedMessage();
+        $emOffDash = stockEmergencyRollCreationStoppedMessage($db);
         $blockRoll = ($emOffDash !== '') ? $emOffDash : integrationStockRollCreationBlockedMessage($db);
         if ($blockRoll !== '') {
             $dashboardError = $blockRoll;

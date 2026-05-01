@@ -1313,7 +1313,7 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
     );
 
     require_once __DIR__ . '/../functions/stock_emergency_kill.php';
-    $emergencyStopCreates = stockEmergencyRollCreationStoppedMessage();
+    $emergencyStopCreates = stockEmergencyRollCreationStoppedMessage($db);
     if ($emergencyStopCreates !== '') {
         $outBase['error_message'] = $emergencyStopCreates;
         $outBase['emergency_blocked'] = true;

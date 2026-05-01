@@ -90,7 +90,7 @@ function resolveConflictStatus($db, $conflictId, $status, $detailsSuffix) {
 }
 
 function addMetersToLocalStock($db, $productId, $meters, $comment) {
-    $emOff = stockEmergencyRollCreationStoppedMessage();
+    $emOff = stockEmergencyRollCreationStoppedMessage($db);
     $blockMsg = ($emOff !== '') ? $emOff : integrationStockRollCreationBlockedMessage($db);
     if ($blockMsg !== '') {
         throw new Exception($blockMsg);

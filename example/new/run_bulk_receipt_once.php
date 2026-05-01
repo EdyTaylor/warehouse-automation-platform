@@ -73,9 +73,9 @@ if (hasArg('local-only')) {
 $db = getDB();
 
 require_once dirname(__DIR__, 2) . '/functions/stock_emergency_kill.php';
-$killMsg = stockEmergencyRollCreationStoppedMessage();
+$killMsg = stockEmergencyRollCreationStoppedMessage($db);
 if ($killMsg !== '') {
-    echo 'BLOCKED emergency: ' . $killMsg . "\nRemove STOCK_CREATES_OFF in site root.\n";
+    echo 'BLOCKED emergency: ' . $killMsg . "\nСнимите флаг STOCK_CREATES_OFF / emergency_block_roll_creates.\n";
     exit(91);
 }
 

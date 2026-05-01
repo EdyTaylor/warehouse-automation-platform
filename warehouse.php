@@ -118,7 +118,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST'
     && !isset($_POST['delete_roll'])
     && (!isset($_POST['action']) || $_POST['action'] !== 'writeoff')
 ) {
-    $emOff = stockEmergencyRollCreationStoppedMessage();
+    $emOff = stockEmergencyRollCreationStoppedMessage($db);
     $blockMsg = ($emOff !== '') ? $emOff : integrationStockRollCreationBlockedMessage($db);
     if ($blockMsg !== '') {
         $error_msg = $blockMsg;

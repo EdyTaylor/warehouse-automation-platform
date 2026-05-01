@@ -1,17 +1,22 @@
 <?php
 
+require_once __DIR__ . '/app_settings.php';
+
 /**
- * Аварийная остановка создания рулонов без захода в БД админкой.
+ * Аварийная остановка создания рулонов — два способа:
  *
- * FTP/SSH в корень сайта (рядом с index.php и sync_monitor.php):
- *   создайте ПУСТОЙ файл  STOCK_CREATES_OFF   или  STOCK_CREATES_OFF.txt
- *   необязательно: первая строка — текст для пользователей/API.
+ * 1) Файл в корне сайта (рядом с index.php): STOCK_CREATES_OFF или STOCK_CREATES_OFF.txt
+ * 2) В БД app_settings ключ emergency_block_roll_creates = 1 (кнопка в Центре интеграции или SQL в phpMyAdmin)
  *
- * Что блокируется: приход (JSON/UI/ядро), добавление рулонов склад/дашборд/add_stock,
- * принятие остатка из конфликтов через addMetersToLocalStock (см. точки подключения).
+ * Что блокируется: приход (JSON/UI/ядро), склад/add_stock/дашборд, конфликты продаж (addMetersToLocalStock).
  *
- * После этого удалите файл, чтобы включить обратно.
+ * @param PDO|null $db если передан — учитывается флаг из app_settings (надёжно, если старый PHP не видит файл).
+ * @return string сообщение блокировки или ''
  */
+function stockEmergencyRollCreationDbKey()
+{
+    return 'emergency_block_roll_creates';
+}
 
 function stockEmergencyCreatesOffFilePaths()
 {
@@ -22,30 +27,29 @@ function stockEmergencyCreatesOffFilePaths()
     );
 }
 
-/**
- * @return string сообщение блокировки или пустая строка если всё включено
- */
-function stockEmergencyRollCreationStoppedMessage()
+function stockEmergencyRollCreationStoppedMessage(PDO $db = null)
 {
-    static $evaluated = false;
-    static $message = '';
-
-    if ($evaluated) {
-        return $message;
-    }
-    $evaluated = true;
-
     foreach (stockEmergencyCreatesOffFilePaths() as $path) {
         if (is_file($path)) {
             $raw = @file_get_contents($path);
             $text = (is_string($raw) ? trim($raw) : '');
             if ($text !== '') {
-                $message = $text;
-            } else {
-                $message = 'Аварийно: добавление рулонов отключено (файл STOCK_CREATES_OFF в корне сайта). '
-                    . 'Чтобы возобновить — удалите этот файл на хостинге.';
+                return $text;
             }
-            return $message;
+            return 'Аварийно: добавление рулонов отключено (файл STOCK_CREATES_OFF в корне сайта). '
+                . 'Чтобы возобновить — удалите этот файл на хостинге.';
+        }
+    }
+
+    if ($db instanceof PDO) {
+        try {
+            ensureAppSettingsTable($db);
+            if (trim((string)getAppSetting($db, stockEmergencyRollCreationDbKey(), '0')) === '1') {
+                return 'Аварийно: создание рулонов отключено в базе (emergency_block_roll_creates). '
+                    . 'Снимите в Центре интеграции (чекбокс) или выполните: UPDATE app_settings SET value=\'0\' WHERE `key`=\''
+                    . stockEmergencyRollCreationDbKey() . '\';';
+            }
+        } catch (Exception $eDb) {
         }
     }
 

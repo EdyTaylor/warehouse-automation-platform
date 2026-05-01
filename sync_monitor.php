@@ -27,8 +27,6 @@ $cycleLastRun = '';
 $successMsg = '';
 $errorMsg = '';
 
-$stockEmergencyStopMsg = stockEmergencyRollCreationStoppedMessage();
-
 $funnelSnap = integrationLoadFunnelsSnapshotDecoded($db);
 $reserveGateMerged = integrationMergedReserveGate($db, $bitrixCfg);
 $realGateMerged = integrationMergedRealizationGate($db, $bitrixCfg);
@@ -64,6 +62,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $successMsg = 'Сигнал прерывания отправлен: выполняющийся приход должен откатиться в течение нескольких секунд, если он ещё добавлял рулоны.';
         } catch (Exception $e) {
             $errorMsg = 'Не удалось отправить прерывание: ' . $e->getMessage();
+        }
+    }
+
+    if ($action === 'save_emergency_roll_block') {
+        try {
+            require_once __DIR__ . '/functions/stock_emergency_kill.php';
+            $block = isset($_POST['db_emergency_block_roll_creates']) ? '1' : '0';
+            setAppSetting($db, stockEmergencyRollCreationDbKey(), $block);
+            integrationBumpStockAbortEpoch($db);
+            $successMsg = ($block === '1')
+                ? 'Включён запрет создания новых рулонов через базу (не нужен FTP-файл).'
+                : 'Запрет создания рулонов через базу снят.';
+        } catch (Exception $e) {
+            $errorMsg = 'Не удалось сохранить аварийный переключатель: ' . $e->getMessage();
         }
     }
 
@@ -160,6 +172,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         } elseif ($secretIn !== $expectedRec) {
             $errorMsg = 'Неверный секрет прихода.';
         } else {
+            require_once __DIR__ . '/functions/stock_emergency_kill.php';
+            $guiEm = stockEmergencyRollCreationStoppedMessage($db);
+            if ($guiEm !== '') {
+                $errorMsg = $guiEm;
+            } else {
             $jsonRaw = '';
             if (isset($_FILES['receipt_json_file']) && isset($_FILES['receipt_json_file']['tmp_name'])
                 && isset($_FILES['receipt_json_file']['error']) && (int)$_FILES['receipt_json_file']['error'] === UPLOAD_ERR_OK
@@ -212,9 +229,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     }
                 }
             }
+            }
         }
     }
 }
+
+$stockEmergencyStopMsg = stockEmergencyRollCreationStoppedMessage($db);
 
 $stockReceiptSecretStored = trim((string)getAppSetting($db, 'stock_receipt_api_secret', ''));
 
@@ -294,6 +314,7 @@ $storedRealRaw = getAppSetting($db, integrationWarehouseRealizationGateSettingsK
 $integrationSyncPaused = integrationAllSyncPaused($db);
 $integrationAllowLocalReceiptDuringPause = integrationAllowsLocalReceiptDuringPause($db);
 $integrationStockAbortEpoch = integrationGetStockAbortEpoch($db);
+$dbEmergencyRollBlockOn = (trim((string)getAppSetting($db, stockEmergencyRollCreationDbKey(), '0')) === '1');
 ?>
 
 <main class="container">
@@ -311,7 +332,8 @@ $integrationStockAbortEpoch = integrationGetStockAbortEpoch($db);
             <strong>Аварийная остановка складских приходов активна.</strong>
             <?= htmlspecialchars($stockEmergencyStopMsg) ?>
             <div class="text-muted" style="margin-top:8px;font-size:0.92rem;">
-                Удалите файл <code>STOCK_CREATES_OFF</code> или <code>STOCK_CREATES_OFF.txt</code> в корне сайта через FTP/панель хостинга, затем обновите страницу.
+                Файловый стоп: удалите <code>STOCK_CREATES_OFF</code> / <code>STOCK_CREATES_OFF.txt</code> в корне сайта (рядом с <code>index.php</code>).
+                Если включён запрет через БД — отключите галочку ниже в блоке паузы или выполните <code>UPDATE app_settings SET value=&apos;0&apos; WHERE `key`=&apos;emergency_block_roll_creates&apos;;</code> в phpMyAdmin.
             </div>
         </div>
     <?php endif; ?>
@@ -357,9 +379,20 @@ $integrationStockAbortEpoch = integrationGetStockAbortEpoch($db);
                 <span class="text-muted" style="margin-left:10px;">Без смены галочек паузы — только остановить «залипший» прогон.</span>
             </form>
             <div class="alert alert-secondary" role="note" style="margin-top:16px;">
-                <strong>Жёсткий стоп (FTP):</strong> в корень сайта (папка с <code>index.php</code>) положите пустой файл
-                <code>STOCK_CREATES_OFF</code> — приложение перестанет создавать рулоны (приход API/форма, склад, дашборд, конфликты продаж).
-                Удалите файл, когда всё восстановите.
+                <strong>Жёсткий стоп создания рулонов:</strong> без FTP можно включить блокировку в базе —
+                приложение перестанет создавать рулоны через приход (в т.ч. форму «Приход из JSON» ниже, даже если <code>api/create_receipt_json.php</code> удалён или переименован), склад, дашборд, конфликты продаж.
+                <form method="POST" style="margin-top:10px;display:flex;align-items:center;flex-wrap:wrap;gap:10px;">
+                    <input type="hidden" name="action" value="save_emergency_roll_block">
+                    <label style="display:flex;gap:8px;align-items:center;cursor:pointer;">
+                        <input type="checkbox" name="db_emergency_block_roll_creates" value="1" <?= $dbEmergencyRollBlockOn ? 'checked' : '' ?>>
+                        Запретить создание новых рулонов (ключ <code>emergency_block_roll_creates</code> в app_settings)
+                    </label>
+                    <button type="submit" class="btn btn-outline-danger btn-sm">Сохранить</button>
+                </form>
+                <p class="text-muted" style="margin-top:12px;margin-bottom:0;">
+                    По FTP: положите пустой файл <code>STOCK_CREATES_OFF</code> или <code>STOCK_CREATES_OFF.txt</code> рядом с <code>index.php</code> — действует тем же кодом приоритетно перед проверкой БД.
+                    Уберите файл/галочку, когда нужно продолжить приходы.
+                </p>
             </div>
         </div>
     </details>

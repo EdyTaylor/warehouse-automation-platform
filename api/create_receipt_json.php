@@ -34,8 +34,16 @@ if (function_exists('set_time_limit')) {
 }
 header('Content-Type: application/json; charset=utf-8');
 
+require_once dirname(__DIR__) . '/db.php';
+require_once dirname(__DIR__) . '/functions/stock_movements.php';
+require_once dirname(__DIR__) . '/api/bitrix/send.php';
+require_once dirname(__DIR__) . '/functions/app_settings.php';
+require_once dirname(__DIR__) . '/includes/stock_operations_core.php';
+
+$db = getDB();
+
 require_once dirname(__DIR__) . '/functions/stock_emergency_kill.php';
-$emergencyKillCreates = stockEmergencyRollCreationStoppedMessage();
+$emergencyKillCreates = stockEmergencyRollCreationStoppedMessage($db);
 if ($emergencyKillCreates !== '') {
     http_response_code(503);
     echo json_encode(array(
@@ -45,14 +53,6 @@ if ($emergencyKillCreates !== '') {
     ));
     exit;
 }
-
-require_once dirname(__DIR__) . '/db.php';
-require_once dirname(__DIR__) . '/functions/stock_movements.php';
-require_once dirname(__DIR__) . '/api/bitrix/send.php';
-require_once dirname(__DIR__) . '/functions/app_settings.php';
-require_once dirname(__DIR__) . '/includes/stock_operations_core.php';
-
-$db = getDB();
 ensureStockOperationTables($db);
 
 $expected = trim((string)getAppSetting($db, 'stock_receipt_api_secret', ''));

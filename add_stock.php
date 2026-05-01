@@ -28,7 +28,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $purchasePrice = floatval(isset($_POST['purchase_price']) ? $_POST['purchase_price'] : 0);
     
     if ($quantity > 0) {
-        $emOff = stockEmergencyRollCreationStoppedMessage();
+        $emOff = stockEmergencyRollCreationStoppedMessage($db);
         $blockMsg = ($emOff !== '') ? $emOff : integrationStockRollCreationBlockedMessage($db);
         if ($blockMsg !== '') {
             $error = $blockMsg;
