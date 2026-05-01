@@ -1,4 +1,4 @@
-﻿    <details class="card integration-section" id="sec-sync-master">
+    <details class="card integration-section" id="sec-sync-master">
         <summary class="integration-section-summary">Пауза всей синхронизации с Битрикс24</summary>
         <div class="integration-section-body">
             <p class="text-muted">
