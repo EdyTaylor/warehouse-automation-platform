@@ -8,6 +8,9 @@
  * Безопасность: ключ app_settings stock_receipt_api_secret (задаётся в sync_monitor.php), заголовок
  * X-Stock-Receipt-Secret или для отладки тот же ключ в query ?secret=
  *
+ * Для больших приходов добавьте в корень JSON: "local_only": true — тогда создаётся один локальный документ
+ * без вызовов Битрикс24 (быстрее, меньше 504). Позже можно синхронизировать склад отдельно.
+ *
  * Важно: только POST с телом JSON. Обычный GET из адресной строки не выполнит приход (будет 405).
  *
  * Пример curl (Linux / Git Bash):
@@ -24,6 +27,10 @@
  */
 
 ini_set('display_errors', 0);
+@ini_set('max_execution_time', '0');
+if (function_exists('set_time_limit')) {
+    @set_time_limit(0);
+}
 header('Content-Type: application/json; charset=utf-8');
 
 require_once dirname(__DIR__) . '/db.php';
@@ -75,6 +82,7 @@ $params = array(
     'receipt_currency' => isset($data['receipt_currency']) ? $data['receipt_currency'] : 'USD',
     'min_full' => isset($data['min_full']) ? $data['min_full'] : 0.5,
     'lines' => isset($data['lines']) && is_array($data['lines']) ? $data['lines'] : array(),
+    'local_only' => !empty($data['local_only']),
 );
 
 $result = stockOperationsProcessCreateReceiptPayload($db, $params);

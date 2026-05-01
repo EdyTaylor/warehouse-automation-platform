@@ -990,6 +990,9 @@ function validateFormToken($name, $token) {
 }
 
 function resolveB24SyncStatus($syncResult) {
+    if (is_array($syncResult) && !empty($syncResult['local_only'])) {
+        return 'skipped';
+    }
     if (is_array($syncResult) && isset($syncResult['ok']) && $syncResult['ok']) {
         return 'sent';
     }
@@ -1227,9 +1230,20 @@ function consumeWriteoffFromRoll($db, $rollId, $meters) {
  *
  * Совместимые алиасы в строке: price_per_roll, delivery_price_per_roll, line_price_per_roll_usd, line_delivery_price_per_roll_usd.
  *
+ * Параметры:
+ *   local_only (bool) — если true: один локальный документ + рулоны + движения, без документа Б24 и без
+ *     syncProductAvailable/logAndSyncMovement по Б24 (быстрее, без 504 на больших партиях).
+ *
  * Возвращает массив: ok, doc_id, b24_document_id, sync_status, success_message, error_message, sync_result, usd_to_kgs_rate, total_amount_kgs, receipt_currency
  */
 function stockOperationsProcessCreateReceiptPayload($db, array $params) {
+    @ini_set('max_execution_time', '0');
+    if (function_exists('set_time_limit')) {
+        @set_time_limit(0);
+    }
+
+    $localOnly = !empty($params['local_only']);
+
     $docNumber = trim(isset($params['doc_number']) ? (string)$params['doc_number'] : '');
     $supplier = trim(isset($params['supplier']) ? (string)$params['supplier'] : '');
     $commentText = trim(isset($params['comment_text']) ? (string)$params['comment_text'] : '');
@@ -1367,7 +1381,7 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
                 $insRoll->execute(array($localProductId, $rollLength, $rollLength, $minFull, $docId, $costPerMeter));
                 $rollId = intval($db->lastInsertId());
 
-                logAndSyncMovement($db, array(
+                $movPayload = array(
                     'product_id' => $localProductId,
                     'roll_id' => $rollId,
                     'movement_type' => 'receipt',
@@ -1376,7 +1390,19 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
                     'price_per_unit' => ($deliveryPricePerRoll > 0 ? $deliveryPricePerRoll : $pricePerRoll),
                     'total' => ($deliveryPricePerRoll > 0 ? $deliveryPricePerRoll : $pricePerRoll),
                     'comment' => 'Оприходование через документ #' . $docId
-                ));
+                );
+
+                if ($localOnly) {
+                    $movIdLocal = logStockMovement($db, $movPayload);
+                    $updM = $db->prepare('UPDATE stock_movements SET bitrix_status = ?, bitrix_response = ? WHERE id = ?');
+                    $updM->execute(array(
+                        'sent',
+                        json_encode(array('skipped' => 'local_only_receipt', 'hint' => 'Битрикс24 не вызывался (local_only).')),
+                        $movIdLocal
+                    ));
+                } else {
+                    logAndSyncMovement($db, $movPayload);
+                }
             }
         }
 
@@ -1389,6 +1415,34 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
         $db->commit();
 
         $lineRowsForSync = $db->query("SELECT product_id, qty_rolls, quantity_m, roll_length, price_per_roll, delivery_price_per_roll, line_total FROM stock_operation_lines WHERE doc_id=" . intval($docId))->fetchAll(PDO::FETCH_ASSOC);
+
+        if ($localOnly) {
+            $syncResult = array(
+                'ok' => true,
+                'local_only' => true,
+                'reason' => 'Режим только локальный склад (local_only): документ прихода в Битрикс24 не создавался.'
+            );
+            $syncStatus = 'skipped';
+
+            $db->prepare("UPDATE stock_operation_docs SET b24_document_id = NULL, b24_sync_status = ?, b24_sync_response = ? WHERE id = ?")
+                ->execute(array($syncStatus, json_encode($syncResult, JSON_UNESCAPED_UNICODE), $docId));
+
+            $successMessage = 'Документ прихода #' . $docId . ' проведён только в приложении. Валюта: ' . $receiptCurrency
+                . '. Курс USD: ' . number_format($usdToKgsRate, 2, '.', ' ') . ' | Сумма: ' . number_format($totalAmount, 2, '.', ' ') . ' KGS'
+                . ' | Битрикс24 пропущен (local_only).';
+
+            $outBase['ok'] = true;
+            $outBase['doc_id'] = $docId;
+            $outBase['sync_result'] = $syncResult;
+            $outBase['sync_status'] = $syncStatus;
+            $outBase['total_amount_kgs'] = $totalAmount;
+            $outBase['success_message'] = $successMessage;
+            $outBase['b24_document_id'] = null;
+            $outBase['error_message'] = '';
+
+            return $outBase;
+        }
+
         $syncResult = syncOperationDocumentToBitrix($db, $docId, 'receipt', $docNumber, $commentText, $lineRowsForSync, $supplier);
         $syncResult = tryFinalizePartialDocument($db, 'receipt', $syncResult, $lineRowsForSync, $supplier);
         $syncStatus = resolveB24SyncStatus($syncResult);

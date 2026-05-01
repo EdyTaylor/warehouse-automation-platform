@@ -132,6 +132,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 
     if ($action === 'run_stock_receipt_json') {
         require_once __DIR__ . '/includes/stock_operations_core.php';
+        @ini_set('max_execution_time', '0');
+        if (function_exists('set_time_limit')) {
+            @set_time_limit(0);
+        }
         ensureStockOperationTables($db);
         $expectedRec = trim((string)getAppSetting($db, 'stock_receipt_api_secret', ''));
         $secretIn = isset($_POST['receipt_run_secret']) ? trim((string)$_POST['receipt_run_secret']) : '';
@@ -168,6 +172,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                         'receipt_currency' => isset($dataRec['receipt_currency']) ? $dataRec['receipt_currency'] : 'USD',
                         'min_full' => isset($dataRec['min_full']) ? $dataRec['min_full'] : 0.5,
                         'lines' => isset($dataRec['lines']) && is_array($dataRec['lines']) ? $dataRec['lines'] : array(),
+                        'local_only' => (!empty($_POST['receipt_local_only']) || !empty($dataRec['local_only'])),
                     );
                     $resultRec = stockOperationsProcessCreateReceiptPayload($db, $paramsRec);
                     if (!empty($resultRec['ok'])) {
@@ -299,7 +304,7 @@ $integrationSyncPaused = integrationAllSyncPaused($db);
                 <input type="hidden" name="action" value="save_sync_master_switch">
                 <label style="display:flex;gap:10px;align-items:flex-start;max-width:42rem;cursor:pointer;">
                     <input type="checkbox" name="integration_all_sync_paused" value="1" <?= $integrationSyncPaused ? 'checked' : '' ?> style="margin-top:4px;">
-                    <span><strong>Отключить синхронизацию</strong> — блокировка обработки вебхуков, cron-скриптов и записи в Б24 через <code>sendToBitrix</code> (импорт/цены/остатки/исходящие обновления).</span>
+                    <span><strong>Отключить синхронизацию</strong> — вебхуки Б24 получают ответ <code>integration_sync_paused</code> <em>без</em> записи в <code>webhook_log</code>; cron/импорт и исходящие вызовы Б24 через <code>sendToBitrix</code> блокируются. Ручные действия в приложении (приход JSON, правки товаров и т.д.) по-прежнему пишут в локальную БД.</span>
                 </label>
                 <p style="margin-top:12px;">
                     <button class="btn btn-warning" type="submit">Сохранить переключатель</button>
@@ -312,8 +317,10 @@ $integrationSyncPaused = integrationAllSyncPaused($db);
         <summary class="integration-section-summary">Приход из JSON (без Postman)</summary>
         <div class="integration-section-body">
             <p class="text-muted">
-                Тот же формат, что для <code>api/create_receipt_json.php</code>: формируется локальный складской документ и отправка прихода в Битрикс24.
-                Если включена <strong>пауза синхронизации</strong>, запись в Б24 может быть заблокирована — локальная часть всё равно может выполниться или откатиться в зависимости от ошибки Б24.
+                Формат как у <code>api/create_receipt_json.php</code>. По умолчанию локальный документ и синхронизация с Битрикс24.
+                Для большого прихода включите ниже опцию «только локально» — один документ в приложении без вызовов Б24 (меньше вероятность 504 и дробления из‑за повторов после таймаута).
+                В JSON можно добавить ключ <code>&quot;local_only&quot;: true</code>; галочка тоже задаёт режим локально только.
+                Если включена <strong>пауза синхронизации</strong>, запись в Б24 может быть заблокирована — без «только локально» локальная часть может выполниться или откатиться в зависимости от ошибки Б24.
             </p>
             <?php if ($stockReceiptSecretStored === ''): ?>
                 <div class="alert alert-warning">Секрет прихода ещё не задан — сначала сохраните его в блоке «Склады и синк».</div>
@@ -332,6 +339,12 @@ $integrationSyncPaused = integrationAllSyncPaused($db);
                     <label>Секрет (<code>stock_receipt_api_secret</code>)</label>
                     <input class="input" type="password" name="receipt_run_secret" autocomplete="off" style="max-width:28rem;"
                         <?= $stockReceiptSecretStored !== '' ? 'required' : '' ?>>
+                </div>
+                <div class="form-group">
+                    <label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;">
+                        <input type="checkbox" name="receipt_local_only" value="1" style="margin-top:4px;">
+                        <span><strong>Только локально</strong> — не звать Битрикс24 при этом приходе (<code>local_only</code>).</span>
+                    </label>
                 </div>
                 <button class="btn btn-primary" type="submit" <?= $stockReceiptSecretStored === '' ? 'disabled' : '' ?>>Запустить приход</button>
             </form>

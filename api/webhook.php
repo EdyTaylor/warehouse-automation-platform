@@ -100,11 +100,20 @@ function ensureDynamicItemInboxTable($db) {
     ");
 }
 
-// Получаем данные от Битрикс24 (сначала лог в БД — до тяжёлых require)
+// Получаем данные от Битрикс24. При паузе синхронизации — ответ без записи в БД (см. integration_all_sync_paused).
 $input = file_get_contents('php://input');
 $data = bitrixWebhookDecodeRequestBody($input);
 
 webhookLogEnsureSchema($db);
+require_once __DIR__ . '/../functions/integration_sync_control.php';
+
+if (integrationAllSyncPaused($db)) {
+    echo json_encode(array(
+        'status' => 'integration_sync_paused',
+        'hint' => 'Включите синхронизацию в Центре интеграции (sync_monitor.php), чтобы обрабатывать события Б24.',
+    ));
+    exit;
+}
 
 if (!is_array($data)) {
     $raw = mb_substr((string)$input, 0, 60000);
@@ -147,16 +156,6 @@ $GLOBALS['webhook_log_id'] = webhookLogInsertIncoming($db, $event === '' ? 'EMPT
 webhookRegisterFatalOutcomeGuard($db);
 
 webhookLoadHandlers();
-
-require_once __DIR__ . '/../functions/integration_sync_control.php';
-if (integrationAllSyncPaused($db)) {
-    webhookLogFinish($db, 'integration_sync_paused');
-    echo json_encode(array(
-        'status' => 'integration_sync_paused',
-        'hint' => 'Включите синхронизацию в Центре интеграции (sync_monitor.php), чтобы обрабатывать события Б24.',
-    ));
-    exit;
-}
 
 ensureWebhookLockTable($db);
 $lockStmt = $db->prepare("INSERT IGNORE INTO webhook_event_lock (event_hash, event_name) VALUES (?, ?)");
