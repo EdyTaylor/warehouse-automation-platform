@@ -224,8 +224,8 @@ try {
             Каждая строка — один POST от исходящего вебхука Б24 на <code>api/webhook.php</code>.
             Повторная доставка того же события помечается как <strong>duplicate_delivery_skipped</strong> (видно здесь же).
             Размер: <code>?limit=120</code> в адресной строке (до 500).
-            Колонка <strong>Товар B24</strong> отражает ID товара из тела события (чаще только у <code>ONCRMPRODUCT*</code>). Для <code>ONCRMDEAL*</code>
-            там обычно «—»: позиции сделки загружаются отдельно по REST, а результат виден в <strong>Итог обработки</strong>.
+            Колонка <strong>Товар B24</strong>: для <code>ONCRMPRODUCT*</code> — из тела вебхука; для <code>ONCRMDEAL*</code> может подставиться
+            первый каталожный <code>PRODUCT_ID</code>, если строки успешно загружены по REST после события. Итог обработки очереди/ошибки — в <strong>Итог обработки</strong>.
         </p>
         <?php if (empty($webhookRows)): ?>
             <div class="alert alert-warning">
@@ -235,7 +235,8 @@ try {
                 • Если ping показывает строки, а после сделки их нет — до сайта из облака Б24 не добираются запросы (URL, HTTPS, блокировки).
             </div>
         <?php endif; ?>
-        <table class="table">
+        <div class="webhook-log-table-wrap" style="max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;box-sizing:border-box;">
+        <table class="table webhook-log-table" style="margin-bottom:0;">
             <tr>
                 <th>ID</th>
                 <th>Событие</th>
@@ -269,16 +270,19 @@ try {
                 </tr>
                 <?php if ($snippet !== ''): ?>
                 <tr class="webhook-json-row">
-                    <td colspan="7">
+                    <td colspan="7" style="max-width:100%;vertical-align:top;">
                         <details>
                             <summary style="cursor:pointer;">Показать JSON (до 1500 символов)</summary>
-                            <pre style="white-space:pre-wrap;font-size:12px;margin:8px 0 0;padding:10px;background:var(--bs-body-bg,#f8f9fa);border-radius:6px;"><?= htmlspecialchars($snippet) ?></pre>
+                            <div style="max-width:100%;margin-top:8px;overflow-x:auto;overflow-y:hidden;box-sizing:border-box;">
+                                <pre style="margin:0;white-space:pre-wrap;overflow-wrap:anywhere;word-wrap:break-word;word-break:break-word;font-size:12px;padding:10px;background:var(--bs-body-bg,#f8f9fa);border-radius:6px;border:1px solid rgba(127,127,127,0.2);"><?= htmlspecialchars($snippet) ?></pre>
+                            </div>
                         </details>
                     </td>
                 </tr>
                 <?php endif; ?>
             <?php endforeach; ?>
         </table>
+        </div>
     </div>
 
     <div class="card">

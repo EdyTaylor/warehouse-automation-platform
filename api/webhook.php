@@ -130,6 +130,8 @@ $eventHash = hash('sha256', $event . '|' . json_encode($eventDataForHash, JSON_U
 list($incomingDealId, $incomingProductId) = webhookLogExtractEntityIds($event, $data);
 $GLOBALS['webhook_log_id'] = webhookLogInsertIncoming($db, $event === '' ? 'EMPTY_EVENT_FIELD' : $event, $data, $incomingDealId, $incomingProductId);
 
+webhookRegisterFatalOutcomeGuard($db);
+
 webhookLoadHandlers();
 
 ensureWebhookLockTable($db);
@@ -221,6 +223,8 @@ function handleNewDeal($db, $data) {
     
     // Получаем товары в сделке
     $products = getDealProducts($db, $dealId);
+    $firstPidNew = (!empty($products) && isset($products[0]['id'])) ? intval($products[0]['id']) : 0;
+    $logProductId = ($firstPidNew > 0 ? $firstPidNew : null);
     
     if (!empty($products)) {
         $dealData = [
@@ -231,9 +235,9 @@ function handleNewDeal($db, $data) {
         ];
         $result = queueDealForWarehouse($db, $dealData);
         if (isset($result['error'])) {
-            webhookLogFinish($db, 'queue_error', $dealId, null);
+            webhookLogFinish($db, 'queue_error', $dealId, $logProductId);
         } else {
-            webhookLogFinish($db, 'deal_processed', $dealId, null);
+            webhookLogFinish($db, 'deal_processed', $dealId, $logProductId);
         }
         echo json_encode(isset($result['error'])
             ? ['status' => 'error', 'deal_id' => $dealId, 'error' => $result['error']]
@@ -258,6 +262,8 @@ function handleDealUpdate($db, $data) {
     // Получаем актуальные товары и пересобираем заявку для кладовщика
     $dealData = getDealDetails($dealId);
     $products = getDealProducts($db, $dealId);
+    $firstPidUpd = (!empty($products) && isset($products[0]['id'])) ? intval($products[0]['id']) : 0;
+    $logProductIdDeal = ($firstPidUpd > 0 ? $firstPidUpd : null);
 
     $cfg = require __DIR__ . '/bitrix/config.php';
     $gate = isset($cfg['warehouse_queue']) && is_array($cfg['warehouse_queue']) ? $cfg['warehouse_queue'] : [];
@@ -271,16 +277,16 @@ function handleDealUpdate($db, $data) {
             'products' => $products
         ]);
         if (isset($result['error'])) {
-            webhookLogFinish($db, 'queue_error', $dealId, null);
+            webhookLogFinish($db, 'queue_error', $dealId, $logProductIdDeal);
         } else {
-            webhookLogFinish($db, 'deal_updated', $dealId, null);
+            webhookLogFinish($db, 'deal_updated', $dealId, $logProductIdDeal);
         }
         echo json_encode(isset($result['error'])
             ? ['status' => 'error', 'deal_id' => $dealId, 'error' => $result['error']]
             : array('status' => 'deal_updated', 'deal_id' => $dealId, 'request_id' => isset($result['request_id']) ? $result['request_id'] : null)
         );
     } elseif (!empty($products)) {
-        webhookLogFinish($db, 'skipped_warehouse_gate', $dealId, null);
+        webhookLogFinish($db, 'skipped_warehouse_gate', $dealId, $logProductIdDeal);
         echo json_encode([
             'status' => 'skipped_warehouse_gate',
             'deal_id' => $dealId,
@@ -562,41 +568,51 @@ function bitrixUnwrapDealProductRows($resp) {
     return $r;
 }
 
-function getDealProducts($db, $dealId) {
-    require_once __DIR__ . '/bitrix/send.php';
-
-    $GLOBALS['webhook_debug_productrows'] = '';
-
-    // method_urls в config опционально подменяет URL; если пуст — sendToBitrix сам строит .../crm.deal.productrows.get.json
-    $payload = array('id' => $dealId);
-    $resp = sendToBitrix('crm.deal.productrows.get', $payload);
-
-    if (!is_array($resp)) {
-        $GLOBALS['webhook_debug_productrows'] = 'productrows_resp_not_array';
+/** Ответ crm.item.productrow.list — универсальный API строк сделки. */
+function bitrixUnwrapItemProductRowList($resp) {
+    if (!is_array($resp) || isset($resp['error']) || !array_key_exists('result', $resp)) {
+        return null;
+    }
+    $r = $resp['result'];
+    if (!is_array($r)) {
         return array();
     }
-    if (isset($resp['error'])) {
-        $GLOBALS['webhook_debug_productrows'] = isset($resp['error_description'])
-            ? (string)$resp['error_description']
-            : (isset($resp['error']) ? (string)$resp['error'] : 'productrows_error');
+    if (isset($r['productRows']) && is_array($r['productRows'])) {
+        return $r['productRows'];
+    }
+    if (isset($r['rows']) && is_array($r['rows'])) {
+        return $r['rows'];
+    }
+    if (isset($r[0]) && is_array($r[0])) {
+        return $r;
+    }
+    if (empty($r)) {
         return array();
     }
-
-    $rows = bitrixUnwrapDealProductRows($resp);
-    if ($rows === null) {
-        $GLOBALS['webhook_debug_productrows'] = 'productrows_bad_result_shape';
-        return array();
+    $vals = array_values($r);
+    if (!empty($vals) && isset($vals[0]) && is_array($vals[0])) {
+        return $vals;
     }
+    return array();
+}
 
+/**
+ * Сырые строки CRM → список для queueDealForWarehouse.
+ * Возвращает массив с ключами products, debug.
+ */
+function bitrixBuildWarehouseProductsFromCrmRows(array $rows) {
+    $debug = '';
     $products = array();
+
     foreach ($rows as $item) {
         if (!is_array($item)) {
             continue;
         }
+
         $productId = 0;
         if (isset($item['PRODUCT_ID']) && $item['PRODUCT_ID'] !== '' && $item['PRODUCT_ID'] !== null) {
             $productId = intval($item['PRODUCT_ID']);
-        } elseif (isset($item['productId'])) {
+        } elseif (isset($item['productId']) && $item['productId'] !== '' && $item['productId'] !== null) {
             $productId = intval($item['productId']);
         }
 
@@ -614,7 +630,6 @@ function getDealProducts($db, $dealId) {
             $quantity = floatval(str_replace(',', '.', (string)$item['quantity']));
         }
         if ($quantity <= 0 && $price > 0) {
-            // У некоторых «услуг» в карточке количество пустое, но есть цена — считаем 1 условную позицию.
             $quantity = 1.0;
         }
 
@@ -630,7 +645,7 @@ function getDealProducts($db, $dealId) {
         }
 
         if ($productId <= 0) {
-            $GLOBALS['webhook_debug_productrows'] = trim($GLOBALS['webhook_debug_productrows'] . ' row_without_product_id');
+            $debug = trim($debug . ' row_without_product_id');
             continue;
         }
 
@@ -642,11 +657,93 @@ function getDealProducts($db, $dealId) {
         );
     }
 
-    if (empty($products) && $GLOBALS['webhook_debug_productrows'] === '') {
-        $GLOBALS['webhook_debug_productrows'] = 'productrows_empty_list';
+    if (empty($products) && $debug === '') {
+        $debug = 'crm_rows_empty_after_filter';
     }
 
-    return $products;
+    return array('products' => $products, 'debug' => $debug);
+}
+
+function getDealProducts($db, $dealId) {
+    require_once __DIR__ . '/bitrix/send.php';
+
+    $GLOBALS['webhook_debug_productrows'] = '';
+
+    $classic = sendToBitrix('crm.deal.productrows.get', array('id' => $dealId));
+    $classicRows = array();
+
+    if (!is_array($classic)) {
+        $GLOBALS['webhook_debug_productrows'] = 'productrows_resp_not_array';
+    } elseif (isset($classic['error'])) {
+        $GLOBALS['webhook_debug_productrows'] = isset($classic['error_description'])
+            ? (string)$classic['error_description']
+            : (isset($classic['error']) ? (string)$classic['error'] : 'productrows_error');
+    } else {
+        $rows = bitrixUnwrapDealProductRows($classic);
+        if ($rows === null) {
+            $GLOBALS['webhook_debug_productrows'] = 'productrows_bad_result_shape';
+        } else {
+            $classicRows = $rows;
+        }
+    }
+
+    $products = array();
+    if (!empty($classicRows)) {
+        $built = bitrixBuildWarehouseProductsFromCrmRows($classicRows);
+        $products = $built['products'];
+        if (!empty($built['debug']) && empty($products)) {
+            $GLOBALS['webhook_debug_productrows'] = trim($GLOBALS['webhook_debug_productrows'] . ' ' . $built['debug']);
+        }
+    }
+
+    if (!empty($products)) {
+        return $products;
+    }
+
+    $dbgClassic = isset($GLOBALS['webhook_debug_productrows']) ? trim((string)$GLOBALS['webhook_debug_productrows']) : '';
+
+    $itemResp = sendToBitrix('crm.item.productrow.list', array(
+        'filter' => array(
+            '=ownerType' => 'D',
+            '=ownerId' => $dealId,
+        ),
+    ));
+
+    $GLOBALS['webhook_debug_productrows'] = '';
+
+    if (!is_array($itemResp)) {
+        $GLOBALS['webhook_debug_productrows'] = 'item_rows_resp_not_array';
+    } elseif (isset($itemResp['error'])) {
+        $GLOBALS['webhook_debug_productrows'] = isset($itemResp['error_description'])
+            ? (string)$itemResp['error_description']
+            : (isset($itemResp['error']) ? (string)$itemResp['error'] : 'item_rows_error');
+    } else {
+        $itemRows = bitrixUnwrapItemProductRowList($itemResp);
+        if ($itemRows === null) {
+            $GLOBALS['webhook_debug_productrows'] = 'item_rows_bad_result_shape';
+        } elseif (empty($itemRows)) {
+            $GLOBALS['webhook_debug_productrows'] = 'item_rows_empty_list';
+        } else {
+            $builtItem = bitrixBuildWarehouseProductsFromCrmRows($itemRows);
+            if (!empty($builtItem['products'])) {
+                return $builtItem['products'];
+            }
+            $GLOBALS['webhook_debug_productrows'] = trim($builtItem['debug'] . ' item_rows_unparsed');
+        }
+    }
+
+    $dbgItem = isset($GLOBALS['webhook_debug_productrows']) ? trim((string)$GLOBALS['webhook_debug_productrows']) : '';
+    if ($dbgClassic !== '' && $dbgItem !== '') {
+        $GLOBALS['webhook_debug_productrows'] = $dbgClassic . ' | ' . $dbgItem;
+    } elseif ($dbgClassic !== '') {
+        $GLOBALS['webhook_debug_productrows'] = $dbgClassic;
+    } elseif ($dbgItem !== '') {
+        $GLOBALS['webhook_debug_productrows'] = $dbgItem;
+    } else {
+        $GLOBALS['webhook_debug_productrows'] = 'no_product_rows_both_methods';
+    }
+
+    return array();
 }
 
 function webhookFinishNoProducts($db, $dealId) {

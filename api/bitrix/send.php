@@ -33,11 +33,26 @@ function sendToBitrix($method, $data = []) {
 
     $result = @file_get_contents($url, false, stream_context_create($options));
     if ($result === false) {
-        return [
+        return array(
             'error' => 'network_error',
             'error_description' => 'Bitrix request failed for method ' . $method
-        ];
+        );
     }
 
-    return json_decode($result, true);
+    $decoded = json_decode((string)$result, true);
+    if (is_array($decoded)) {
+        return $decoded;
+    }
+    $raw = trim((string)$result);
+    if ($raw === '') {
+        return array(
+            'error' => 'empty_response',
+            'error_description' => 'Empty body from Bitrix (' . $method . ')'
+        );
+    }
+    $preview = function_exists('mb_substr') ? mb_substr($raw, 0, 240) : substr($raw, 0, 240);
+    return array(
+        'error' => 'bad_json',
+        'error_description' => 'Invalid JSON from Bitrix (' . $method . '): ' . $preview
+    );
 }
