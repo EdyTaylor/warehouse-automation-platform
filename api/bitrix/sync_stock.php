@@ -7,8 +7,10 @@ header('Content-Type: application/json; charset=utf-8');
 require __DIR__ . '/../../db.php';
 require __DIR__ . '/send.php';
 require_once __DIR__ . '/../../functions/app_settings.php';
+require_once __DIR__ . '/../../functions/integration_sync_control.php';
 
 $db = getDB();
+integrationAbortJsonIfAllSyncPaused($db);
 $cfg = require __DIR__ . '/config.php';
 
 function b24ExtractListRows($resp) {

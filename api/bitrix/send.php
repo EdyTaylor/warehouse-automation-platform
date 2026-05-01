@@ -1,7 +1,32 @@
 <?php
 
-function sendToBitrix($method, $data = []) {
+function sendToBitrix($method, $data = array()) {
     static $config = null;
+    static $pausedResolveDone = false;
+    static $pausedWritesBlock = false;
+    static $syncCtlLoaded = false;
+    if (!$syncCtlLoaded) {
+        $syncCtlLoaded = true;
+        require_once __DIR__ . '/../../functions/integration_sync_control.php';
+    }
+    if (integrationBitrixMethodLooksLikeWriteMutation((string)$method)) {
+        if (!$pausedResolveDone) {
+            $pausedResolveDone = true;
+            try {
+                require_once __DIR__ . '/../../db.php';
+                $pausedWritesBlock = integrationAllSyncPaused(getDB());
+            } catch (Exception $e) {
+                $pausedWritesBlock = false;
+            }
+        }
+        if ($pausedWritesBlock) {
+            return array(
+                'error' => 'integration_sync_paused',
+                'error_description' => 'Отправка изменений в Битрикс24 отключена (Центр интеграции → пауза синхронизации).',
+            );
+        }
+    }
+
     if ($config === null) {
         $config = require __DIR__ . '/config.php';
     }

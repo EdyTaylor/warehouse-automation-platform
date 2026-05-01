@@ -6,8 +6,10 @@ header('Content-Type: application/json; charset=utf-8');
 
 require '../db.php';
 require_once 'bitrix/send.php';
+require_once __DIR__ . '/../functions/integration_sync_control.php';
 
 $db = getDB();
+integrationAbortJsonIfAllSyncPaused($db);
 $cfg = require 'bitrix/config.php';
 
 $action = isset($_GET['action']) ? $_GET['action'] : 'to_app'; // to_app | to_b24

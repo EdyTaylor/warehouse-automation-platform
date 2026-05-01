@@ -6,8 +6,10 @@ header('Content-Type: application/json; charset=utf-8');
 require __DIR__ . '/../../db.php';
 require __DIR__ . '/send.php';
 require_once __DIR__ . '/../../functions/stock_movements.php';
+require_once __DIR__ . '/../../functions/integration_sync_control.php';
 
 $db = getDB();
+integrationAbortJsonIfAllSyncPaused($db);
 
 $limit = isset($_GET['limit']) ? intval($_GET['limit']) : 1000;
 if ($limit <= 0) {

@@ -8,6 +8,7 @@ require_once __DIR__ . '/functions/app_settings.php';
 require_once __DIR__ . '/functions/webhook_log_schema.php';
 require_once __DIR__ . '/functions/integration_workflow_gates.php';
 require_once __DIR__ . '/functions/integration_bitrix_funnels.php';
+require_once __DIR__ . '/functions/integration_sync_control.php';
 $db = getDB();
 webhookLogEnsureSchema($db);
 
@@ -37,6 +38,18 @@ $realStageMap = integrationStagesSelectedMapFromRules(
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     $action = (string)$_POST['action'];
+
+    if ($action === 'save_sync_master_switch') {
+        try {
+            $on = isset($_POST['integration_all_sync_paused']) ? '1' : '0';
+            setAppSetting($db, integrationAllSyncPausedSettingsKey(), $on);
+            $successMsg = ($on === '1')
+                ? 'Синхронизация отключена: вебхуки не обрабатываются, cron-скрипты и запись в Б24 заблокированы. Можно безопасно чистить локальную БД.'
+                : 'Синхронизация снова включена.';
+        } catch (Exception $e) {
+            $errorMsg = 'Не удалось сохранить переключатель: ' . $e->getMessage();
+        }
+    }
 
     if ($action === 'refresh_b24_funnels') {
         try {
@@ -186,6 +199,7 @@ try {
 
 $storedReserveRaw = getAppSetting($db, integrationWarehouseReserveGateSettingsKey(), '');
 $storedRealRaw = getAppSetting($db, integrationWarehouseRealizationGateSettingsKey(), '');
+$integrationSyncPaused = integrationAllSyncPaused($db);
 ?>
 
 <main class="container">
@@ -198,10 +212,41 @@ $storedRealRaw = getAppSetting($db, integrationWarehouseRealizationGateSettingsK
         <div class="alert alert-danger"><?= htmlspecialchars($errorMsg) ?></div>
     <?php endif; ?>
 
+    <?php if ($integrationSyncPaused): ?>
+        <div class="alert alert-danger" role="alert">
+            <strong>Пауза синхронизации включена.</strong>
+            Исходящие вебхуки получают ответ без изменения складских данных в приложении.
+            Изменения в Битрикс24 из этого приложения (остатки, цены, приходные документы, комментарии к сделкам) не отправляются.
+            Импорт товаров, цикл автосинка и ручные кнопки синка из этого раздела возвращают JSON с <code>integration_sync_paused</code>.
+        </div>
+    <?php endif; ?>
+
+    <details class="card integration-section" id="sec-sync-master" open>
+        <summary class="integration-section-summary">Пауза всей синхронизации с Битрикс24</summary>
+        <div class="integration-section-body">
+            <p class="text-muted">
+                Включите перед массовой очисткой таблиц (товары, рулоны, заявки B24, движения). После работы обязательно выключите,
+                иначе склад и портал перестанут обмениваться данными. Обновление справочника воронок (только чтение из Б24) при паузе по-прежнему работает.
+            </p>
+            <form method="POST">
+                <input type="hidden" name="action" value="save_sync_master_switch">
+                <label style="display:flex;gap:10px;align-items:flex-start;max-width:42rem;cursor:pointer;">
+                    <input type="checkbox" name="integration_all_sync_paused" value="1" <?= $integrationSyncPaused ? 'checked' : '' ?> style="margin-top:4px;">
+                    <span><strong>Отключить синхронизацию</strong> — блокировка обработки вебхуков, cron-скриптов и записи в Б24 через <code>sendToBitrix</code> (импорт/цены/остатки/исходящие обновления).</span>
+                </label>
+                <p style="margin-top:12px;">
+                    <button class="btn btn-warning" type="submit">Сохранить переключатель</button>
+                </p>
+            </form>
+        </div>
+    </details>
+
     <div class="card">
         <h3 style="margin-top:0;">Разделы</h3>
         <p class="text-muted">Перейти к нужному блоку. Ниже секции можно сворачивать, чтобы убрать лишнее с экрана.</p>
         <nav class="integration-nav" aria-label="Разделы интеграции">
+            <a href="#sec-sync-master">Пауза синхронизации</a>
+            <span class="text-muted">·</span>
             <a href="#sec-quick">Быстрые действия</a>
             <span class="text-muted">·</span>
             <a href="#sec-tech">Техраздел Б24</a>

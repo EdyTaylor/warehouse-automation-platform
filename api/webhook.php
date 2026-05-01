@@ -148,6 +148,16 @@ webhookRegisterFatalOutcomeGuard($db);
 
 webhookLoadHandlers();
 
+require_once __DIR__ . '/../functions/integration_sync_control.php';
+if (integrationAllSyncPaused($db)) {
+    webhookLogFinish($db, 'integration_sync_paused');
+    echo json_encode(array(
+        'status' => 'integration_sync_paused',
+        'hint' => 'Включите синхронизацию в Центре интеграции (sync_monitor.php), чтобы обрабатывать события Б24.',
+    ));
+    exit;
+}
+
 ensureWebhookLockTable($db);
 $lockStmt = $db->prepare("INSERT IGNORE INTO webhook_event_lock (event_hash, event_name) VALUES (?, ?)");
 $lockStmt->execute([$eventHash, $event]);
