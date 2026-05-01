@@ -125,7 +125,19 @@ if (!is_array($data)) {
 $event = isset($data['event']) ? $data['event'] : '';
 $auth = (isset($data['auth']) && is_array($data['auth'])) ? $data['auth'] : array();
 $eventDataForHash = (isset($data['data']) && is_array($data['data'])) ? $data['data'] : array();
-$eventHash = hash('sha256', $event . '|' . json_encode($eventDataForHash, JSON_UNESCAPED_UNICODE));
+/**
+ * Частый кейс outbound: в data только {"FIELDS":{"ID":"..."}} без стадии — хеш данных одинаковый
+ * для каждого обновления сделки, и второй переход уже не обрабатывается. Учитываем ts/event_handler_id.
+ */
+$saltPieces = array();
+if (isset($data['ts']) && $data['ts'] !== null && $data['ts'] !== '') {
+    $saltPieces[] = (string)$data['ts'];
+}
+if (isset($data['event_handler_id']) && $data['event_handler_id'] !== null && $data['event_handler_id'] !== '') {
+    $saltPieces[] = (string)$data['event_handler_id'];
+}
+$eventHashSalt = implode('|', $saltPieces);
+$eventHash = hash('sha256', $event . '|' . json_encode($eventDataForHash, JSON_UNESCAPED_UNICODE) . '|' . $eventHashSalt);
 
 list($incomingDealId, $incomingProductId) = webhookLogExtractEntityIds($event, $data);
 $GLOBALS['webhook_log_id'] = webhookLogInsertIncoming($db, $event === '' ? 'EMPTY_EVENT_FIELD' : $event, $data, $incomingDealId, $incomingProductId);
