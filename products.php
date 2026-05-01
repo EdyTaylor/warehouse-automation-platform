@@ -552,6 +552,63 @@ function b24ResolveOfferIblockIdByParentIblock($parentIblockId) {
     return isset($map[$parentIblockId]) ? intval($map[$parentIblockId]) : 0;
 }
 
+function b24CatalogIdByIblockId($iblockId) {
+    $iblockId = intval($iblockId);
+    if ($iblockId <= 0) {
+        return 0;
+    }
+    static $map = null;
+    if ($map === null) {
+        $map = array();
+        $resp = sendToBitrix('catalog.catalog.list', array(
+            'select' => array('id', 'iblockId')
+        ));
+        if (is_array($resp) && !isset($resp['error']) && isset($resp['result']['catalogs']) && is_array($resp['result']['catalogs'])) {
+            foreach ($resp['result']['catalogs'] as $cat) {
+                if (!is_array($cat)) {
+                    continue;
+                }
+                $cid = intval(isset($cat['id']) ? $cat['id'] : 0);
+                $iid = intval(isset($cat['iblockId']) ? $cat['iblockId'] : 0);
+                if ($cid > 0 && $iid > 0) {
+                    $map[$iid] = $cid;
+                }
+            }
+        }
+    }
+
+    return isset($map[$iblockId]) ? intval($map[$iblockId]) : 0;
+}
+
+/**
+ * Возвращает true/false если каталог offers/не offers, null если не удалось проверить.
+ */
+function b24CatalogIsOffersByIblockId($iblockId) {
+    $catalogId = b24CatalogIdByIblockId($iblockId);
+    if ($catalogId <= 0) {
+        return null;
+    }
+    static $cache = array();
+    if (array_key_exists($catalogId, $cache)) {
+        return $cache[$catalogId];
+    }
+    $resp = sendToBitrix('catalog.catalog.isOffers', array('id' => $catalogId));
+    if (!is_array($resp) || isset($resp['error'])) {
+        $cache[$catalogId] = null;
+        return null;
+    }
+    $result = false;
+    if (isset($resp['result']['isOffers'])) {
+        $v = $resp['result']['isOffers'];
+        $result = ($v === true || $v === 'Y' || intval($v) === 1);
+    } elseif (isset($resp['result'])) {
+        $v = $resp['result'];
+        $result = ($v === true || $v === 'Y' || intval($v) === 1);
+    }
+    $cache[$catalogId] = $result;
+    return $result;
+}
+
 /**
  * У товара «с вариациями» (таблица Метр/рулон в карточке Б24) цена хранится на торговом предложении (offer),
  * а не на родителе. Возвращаем ID офферов каталога; если офферов нет — одиночный простой товар = сам id.
@@ -566,6 +623,7 @@ function b24ResolveRetailPriceCatalogTargetIdsMeta($catalogProductId) {
             'parent_type' => 0,
             'parent_iblock_id' => 0,
             'offer_iblock_id' => 0,
+            'offer_catalog_is_offers' => null,
             'expected_offers' => false
         );
     }
@@ -580,10 +638,12 @@ function b24ResolveRetailPriceCatalogTargetIdsMeta($catalogProductId) {
     }
 
     $offerIblockId = 0;
+    $offerCatalogIsOffers = null;
     $filterAttempts = array();
     if ($iblockId > 0) {
         $offerIblockId = b24ResolveOfferIblockIdByParentIblock($iblockId);
         if ($offerIblockId > 0) {
+            $offerCatalogIsOffers = b24CatalogIsOffersByIblockId($offerIblockId);
             $filterAttempts[] = array('parentId' => $catalogProductId, 'iblockId' => $offerIblockId);
         }
     }
@@ -620,6 +680,7 @@ function b24ResolveRetailPriceCatalogTargetIdsMeta($catalogProductId) {
             'parent_type' => $parentType,
             'parent_iblock_id' => $iblockId,
             'offer_iblock_id' => $offerIblockId,
+            'offer_catalog_is_offers' => $offerCatalogIsOffers,
             'expected_offers' => ($parentType === 3)
         );
     }
@@ -629,6 +690,7 @@ function b24ResolveRetailPriceCatalogTargetIdsMeta($catalogProductId) {
         'parent_type' => $parentType,
         'parent_iblock_id' => $iblockId,
         'offer_iblock_id' => $offerIblockId,
+        'offer_catalog_is_offers' => $offerCatalogIsOffers,
         'expected_offers' => ($parentType === 3)
     );
 }
@@ -899,7 +961,9 @@ function syncProductPriceToB24($db, $productId) {
     $targetsMeta = b24ResolveRetailPriceCatalogTargetIdsMeta($b24Id);
     $targets = isset($targetsMeta['targets']) && is_array($targetsMeta['targets']) ? $targetsMeta['targets'] : array();
     $parentType = intval(isset($targetsMeta['parent_type']) ? $targetsMeta['parent_type'] : 0);
+    $parentIblockId = intval(isset($targetsMeta['parent_iblock_id']) ? $targetsMeta['parent_iblock_id'] : 0);
     $offerIblockId = intval(isset($targetsMeta['offer_iblock_id']) ? $targetsMeta['offer_iblock_id'] : 0);
+    $offerCatalogIsOffers = isset($targetsMeta['offer_catalog_is_offers']) ? $targetsMeta['offer_catalog_is_offers'] : null;
     $expectedOffers = !empty($targetsMeta['expected_offers']);
     $usedFallbackParentOnly = (count($targets) === 1 && intval($targets[0]) === $b24Id);
     if (count($targets) > 50) {
@@ -910,6 +974,17 @@ function syncProductPriceToB24($db, $productId) {
     if ($expectedOffers && $usedFallbackParentOnly) {
         $err = 'Для SKU-товара не найдены торговые предложения (offers) по parentId=' . $b24Id
             . ', offerIblockId=' . $offerIblockId . '. Цена в строке вариации Б24 не обновится.';
+        updateProductSyncState($db, $productId, 'error', $err, $attemptAt);
+        return array(
+            'ok' => false,
+            'message' => $err,
+            'sync_report_bucket' => 'errors',
+            'sync_report_row' => makeB24PriceSyncListRow($pid, $pName, $b24Id, $err)
+        );
+    }
+    if ($expectedOffers && $offerIblockId > 0 && $offerCatalogIsOffers === false) {
+        $err = 'Найден iblock предложений=' . $offerIblockId . ', но catalog.catalog.isOffers=false.'
+            . ' Проверьте структуру каталога Б24.';
         updateProductSyncState($db, $productId, 'error', $err, $attemptAt);
         return array(
             'ok' => false,
@@ -994,6 +1069,10 @@ function syncProductPriceToB24($db, $productId) {
                 . '(' . (count($targets) <= 1
                     ? 'каталог id ' . (isset($targets[0]) ? intval($targets[0]) : $b24Id)
                     : ('офферы каталога: ' . implode(', ', array_map('intval', $targets)) . '; родитель ' . $b24Id))
+                . '; parent_iblock=' . $parentIblockId
+                . '; offer_iblock=' . $offerIblockId
+                . '; is_offers=' . ($offerCatalogIsOffers === null ? 'unknown' : ($offerCatalogIsOffers ? 'Y' : 'N'))
+                . '; target_offer_ids=' . implode(',', array_map('intval', $targets))
                 . '; type=' . $parentType . '), подтверждено чтением после записи'
             )
         );
