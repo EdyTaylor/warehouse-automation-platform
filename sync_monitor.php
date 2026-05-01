@@ -16,7 +16,7 @@ webhookLogEnsureSchema($db);
 $bitrixCfg = require __DIR__ . '/api/bitrix/config.php';
 
 $webhookLimit = isset($_GET['limit']) ? max(10, min(500, intval($_GET['limit']))) : 80;
-$page_title = 'Центр интеграции';
+$page_title = 'Настройки';
 require 'includes/header.php';
 
 $webhookRows = array();
@@ -28,6 +28,8 @@ $successMsg = '';
 $errorMsg = '';
 
 $bulkReceiptUiDefault = isset($_GET['bulk']) && (string)$_GET['bulk'] === '1';
+$integrationUiOpenDevBlocks = $bulkReceiptUiDefault
+    || (isset($_GET['dev']) && (string)$_GET['dev'] === '1');
 
 $funnelSnap = integrationLoadFunnelsSnapshotDecoded($db);
 $reserveGateMerged = integrationMergedReserveGate($db, $bitrixCfg);
@@ -170,7 +172,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         $expectedRec = trim((string)getAppSetting($db, 'stock_receipt_api_secret', ''));
         $secretIn = isset($_POST['receipt_run_secret']) ? trim((string)$_POST['receipt_run_secret']) : '';
         if ($expectedRec === '') {
-            $errorMsg = 'Сначала задайте и сохраните секрет JSON-прихода в блоке «Склады и синк» ниже.';
+            $errorMsg = 'Сначала задайте и сохраните секрет JSON-прихода: страница «Настройки» → включите режим разработчика («</>» в шапке) → блок «Склады, курс…».';
         } elseif ($secretIn !== $expectedRec) {
             $errorMsg = 'Неверный секрет прихода.';
         } else {
@@ -378,8 +380,21 @@ $integrationStockAbortEpoch = integrationGetStockAbortEpoch($db);
 $dbEmergencyRollBlockOn = (trim((string)getAppSetting($db, stockEmergencyRollCreationDbKey(), '0')) === '1');
 ?>
 
-<main class="container">
-    <h2 id="sec-top">Центр интеграции</h2>
+<main class="container integration-main-stack">
+    <h2 id="sec-top">Настройки</h2>
+    <p class="text-muted integration-flow-subtitle">Битрикс24, параметры складов и обмен данными.</p>
+
+    <?php if (!empty($integrationUiOpenDevBlocks)): ?>
+    <script>
+    try {
+        localStorage.setItem('friendcrm_dev_tools', '1');
+        document.documentElement.setAttribute('data-dev-tools', '1');
+        if (typeof window.setFriendcrmDevTools === 'function') {
+            window.setFriendcrmDevTools(true);
+        }
+    } catch (_eOpenDev) {}
+    </script>
+    <?php endif; ?>
 
     <?php if ($successMsg !== ''): ?>
         <div class="alert alert-success"><?= htmlspecialchars($successMsg) ?></div>
@@ -394,7 +409,7 @@ $dbEmergencyRollBlockOn = (trim((string)getAppSetting($db, stockEmergencyRollCre
             <?= htmlspecialchars($stockEmergencyStopMsg) ?>
             <div class="text-muted" style="margin-top:8px;font-size:0.92rem;">
                 Файловый стоп: удалите <code>STOCK_CREATES_OFF</code> / <code>STOCK_CREATES_OFF.txt</code> в корне сайта (рядом с <code>index.php</code>).
-                Если включён запрет через БД — отключите галочку ниже в блоке паузы или выполните <code>UPDATE app_settings SET value=&apos;0&apos; WHERE `key`=&apos;emergency_block_roll_creates&apos;;</code> в phpMyAdmin.
+                Если включён запрет через БД — отключите галочку в режиме разработчика («</>» в шапке, блок «Разработчикам» → пауза) или выполните <code>UPDATE app_settings SET value=&apos;0&apos; WHERE `key`=&apos;emergency_block_roll_creates&apos;;</code> в phpMyAdmin.
             </div>
         </div>
     <?php endif; ?>
@@ -409,7 +424,183 @@ $dbEmergencyRollBlockOn = (trim((string)getAppSetting($db, stockEmergencyRollCre
         </div>
     <?php endif; ?>
 
-    <details class="card integration-section" id="sec-sync-master" open>
+    <p class="friendcrm-dev-tools-hint integration-flow-hint card" style="padding:12px 16px;margin-bottom:1rem;margin-top:0;">
+        Раздел <strong>«Разработчикам»</strong> (пауза синхронизации, приход JSON, воронки, вебхуки, секрет API) скрыт.
+        Чтобы показать или спрятать его на любой странице, используйте кнопку <kbd class="nav-dev-icon-copy">&lt;/&gt;</kbd> справа в шапке.
+        Прямая ссылка с открытой панелью: <a href="sync_monitor.php?dev=1">sync_monitor.php?dev=1</a>.
+    </p>
+
+    <details class="card integration-section integration-flow-quick" id="sec-quick" open>
+        <summary class="integration-section-summary">Быстрые действия</summary>
+        <div class="integration-section-body">
+            <p class="text-muted">Кнопки запускают синк через модальное окно, без открытия новых вкладок.
+                Массовый приход из JSON — только в режиме <strong>Разработчикам</strong>:
+                «Массовый приход», «Приход из JSON» или по ссылке
+                <a href="sync_monitor.php?bulk=1&amp;dev=1#sec-receipt-json"><code>?bulk=1&amp;dev=1</code></a>.</p>
+            <div style="display:flex;gap:10px;flex-wrap:wrap;">
+                <a class="btn btn-primary b24-sync-link" href="api/bitrix/import_products.php">Импортировать товары из Б24</a>
+                <a class="btn btn-primary b24-sync-link" href="api/bitrix/sync_stock.php?push=1">Синхронизировать остатки</a>
+                <a class="btn btn-secondary b24-sync-link" href="api/sync_prices.php?action=to_b24">Синхронизировать цены</a>
+                <a class="btn btn-secondary b24-sync-link" href="api/bitrix/sync_cycle.php?chunk=<?= (int)$integrationSettings['sync_cycle_chunk'] ?>">Запустить 1 цикл автосинка</a>
+            </div>
+        </div>
+    </details>
+
+    <div class="integration-flow-section-nav card">
+        <h3 style="margin-top:0;">На странице</h3>
+        <p class="text-muted">Переход по якорям. Секции «Разработчикам» видны только при включённой кнопке <kbd class="nav-dev-icon-copy">&lt;/&gt;</kbd> в шапке.</p>
+        <nav class="integration-nav" aria-label="Разделы страницы настроек">
+            <a href="#sec-quick">Быстрые действия</a>
+            <span class="text-muted">·</span>
+            <a href="#sec-settings">Склады, курс и лимиты</a>
+            <span class="text-muted">·</span>
+            <a href="#sec-mov-errors">Ошибки Б24</a>
+            <span class="text-muted">·</span>
+            <a href="#sec-pending">Ожидают отправки</a>
+            <span class="text-muted">·</span>
+            <a href="#sec-conflicts">Расхождения</a>
+            <span class="friendcrm-dev-only"><span class="text-muted">·</span></span>
+            <a href="#friendcrm-dev-blocks" class="friendcrm-dev-only">Разработчикам</a>
+        </nav>
+    </div>
+
+    <details class="card integration-section integration-flow-settings" id="sec-settings" open>
+        <summary class="integration-section-summary">Склады, курс и параметры синхронизации</summary>
+        <div class="integration-section-body">
+            <form method="POST">
+                <input type="hidden" name="action" value="save_integration_settings">
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label>Склад списания (storeFrom)</label>
+                        <input class="input" type="number" min="1" name="default_store_from_id" value="<?= (int)$integrationSettings['default_store_from_id'] ?>">
+                    </div>
+                    <div class="form-group">
+                        <label>Склад прихода (storeTo)</label>
+                        <input class="input" type="number" min="1" name="default_store_to_id" value="<?= (int)$integrationSettings['default_store_to_id'] ?>">
+                    </div>
+                    <div class="form-group">
+                        <label>Ответственный (responsibleId)</label>
+                        <input class="input" type="number" min="1" name="default_responsible_id" value="<?= (int)$integrationSettings['default_responsible_id'] ?>">
+                    </div>
+                    <div class="form-group">
+                        <label>Валюта</label>
+                        <input class="input" type="text" maxlength="3" name="default_currency" value="<?= htmlspecialchars((string)$integrationSettings['default_currency']) ?>">
+                    </div>
+                    <div class="form-group">
+                        <label>Скорость синка (batch limit)</label>
+                        <input class="input" type="number" min="10" max="500" name="sync_batch_limit" value="<?= (int)$integrationSettings['sync_batch_limit'] ?>">
+                    </div>
+                    <div class="form-group">
+                        <label>Задержка перед проведением документа Б24 (мс)</label>
+                        <input class="input" type="number" min="0" max="5000" name="b24_doc_delay_ms" value="<?= (int)$integrationSettings['b24_doc_delay_ms'] ?>">
+                    </div>
+                    <div class="form-group">
+                        <label>Проверок статуса проведения (attempts)</label>
+                        <input class="input" type="number" min="1" max="20" name="b24_conduct_check_attempts" value="<?= (int)$integrationSettings['b24_conduct_check_attempts'] ?>">
+                    </div>
+                    <div class="form-group">
+                        <label>Курс USD → KGS (для прихода)</label>
+                        <input class="input" type="number" min="0.01" step="0.01" name="usd_to_kgs_rate" value="<?= htmlspecialchars((string)$integrationSettings['usd_to_kgs_rate']) ?>">
+                    </div>
+                    <div class="form-group">
+                        <label>ID склада Б24 для синка остатков</label>
+                        <input class="input" type="number" min="1" name="stock_sync_store_id" value="<?= (int)$integrationSettings['stock_sync_store_id'] ?>">
+                    </div>
+                    <div class="form-group">
+                        <label>Размер шага автосинка (5-100)</label>
+                        <input class="input" type="number" min="5" max="100" name="sync_cycle_chunk" value="<?= (int)$integrationSettings['sync_cycle_chunk'] ?>">
+                    </div>
+                    <div class="form-group warehouse-filter-item-wide friendcrm-dev-only">
+                        <label>Секрет JSON-прихода (<code>stock_receipt_api_secret</code>)</label>
+                        <input class="input" type="password" name="stock_receipt_api_secret" value="" autocomplete="new-password"
+                            placeholder="<?= !empty($integrationSettings['stock_receipt_secret_set']) ? 'Оставьте пустым, чтобы не менять текущий ключ' : 'Задайте длинную случайную строку и сохраните' ?>">
+                        <p class="text-muted" style="margin-top:6px;margin-bottom:0;">
+                            Нужен для <code>api/create_receipt_json.php</code>: один <strong>POST</strong> с телом JSON прихода → запись в приложение + документ в Б24.
+                            <?php if (!empty($integrationSettings['stock_receipt_secret_set'])): ?>
+                                Ключ уже задан; новое значение перезапишет его.
+                            <?php else: ?>
+                                Пока не задан — API прихода отвечает 503.
+                            <?php endif; ?>
+                        </p>
+                        <pre style="margin-top:10px;white-space:pre-wrap;font-size:12px;padding:10px;background:var(--background-color,#f5f6fa);border-radius:6px;border:1px solid var(--border-color);">curl -X POST "<?= htmlspecialchars((isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 'https' : 'http') . '://' . (isset($_SERVER['HTTP_HOST']) ? $_SERVER['HTTP_HOST'] : 'ваш-хост')) ?>/api/create_receipt_json.php" \
+  -H "Content-Type: application/json; charset=utf-8" \
+  -H "X-Stock-Receipt-Secret: ВАШ_СЕКРЕТ_ИЗ_ПОЛЯ_ВЫШЕ" \
+  --data-binary @example/new/bulk_receipt_from_llumar.generated.json</pre>
+                    </div>
+                </div>
+                <button class="btn btn-success" type="submit">Сохранить настройки</button>
+            </form>
+        </div>
+    </details>
+
+    <details class="card integration-section integration-flow-monitor" id="sec-mov-errors" open>
+        <summary class="integration-section-summary">Ошибки отправки в Б24</summary>
+        <div class="integration-section-body">
+            <table class="table">
+                <tr><th>ID</th><th>Product</th><th>Тип</th><th>Deal</th><th>Статус</th><th>Ответ</th><th>Время</th></tr>
+                <?php foreach ($movementErrors as $row): ?>
+                    <tr>
+                        <td><?= (int)$row['id'] ?></td>
+                        <td><?= (int)$row['product_id'] ?></td>
+                        <td><?= htmlspecialchars($row['movement_type']) ?></td>
+                        <td><?= (int)$row['deal_id'] ?></td>
+                        <td><?= htmlspecialchars($row['bitrix_status']) ?></td>
+                        <td><pre style="white-space:pre-wrap;max-width:420px;"><?= htmlspecialchars((string)$row['bitrix_response']) ?></pre></td>
+                        <td><?= htmlspecialchars($row['created_at']) ?></td>
+                    </tr>
+                <?php endforeach; ?>
+            </table>
+        </div>
+    </details>
+
+    <details class="card integration-section integration-flow-monitor" id="sec-pending" open>
+        <summary class="integration-section-summary">Ожидают отправки</summary>
+        <div class="integration-section-body">
+            <table class="table">
+                <tr><th>ID</th><th>Product</th><th>Тип</th><th>Deal</th><th>Статус</th><th>Время</th></tr>
+                <?php foreach ($movementPending as $row): ?>
+                    <tr>
+                        <td><?= (int)$row['id'] ?></td>
+                        <td><?= (int)$row['product_id'] ?></td>
+                        <td><?= htmlspecialchars($row['movement_type']) ?></td>
+                        <td><?= (int)$row['deal_id'] ?></td>
+                        <td><?= htmlspecialchars($row['bitrix_status']) ?></td>
+                        <td><?= htmlspecialchars($row['created_at']) ?></td>
+                    </tr>
+                <?php endforeach; ?>
+            </table>
+        </div>
+    </details>
+
+    <details class="card integration-section integration-flow-monitor" id="sec-conflicts" open>
+        <summary class="integration-section-summary">Найденные расхождения с Б24</summary>
+        <div class="integration-section-body">
+            <p class="text-muted">Если здесь есть строки, нужно проверить товар и понять, где фактическая истина (приложение или Б24).</p>
+            <table class="table">
+                <tr><th>ID</th><th>Тип</th><th>B24 товар</th><th>Локальный товар</th><th>Локально</th><th>В Б24</th><th>Комментарий</th><th>Время</th></tr>
+                <?php foreach ($syncConflicts as $row): ?>
+                    <tr>
+                        <td><?= (int)$row['id'] ?></td>
+                        <td><?= htmlspecialchars((string)$row['conflict_type']) ?></td>
+                        <td><?= (int)$row['b24_product_id'] ?></td>
+                        <td><?= (int)$row['local_product_id'] ?></td>
+                        <td><?= htmlspecialchars((string)$row['local_value']) ?></td>
+                        <td><?= htmlspecialchars((string)$row['b24_value']) ?></td>
+                        <td><?= htmlspecialchars((string)$row['details']) ?></td>
+                        <td><?= htmlspecialchars($row['created_at']) ?></td>
+                    </tr>
+                <?php endforeach; ?>
+            </table>
+        </div>
+    </details>
+
+    <div id="friendcrm-dev-blocks" class="friendcrm-dev-only integration-flow-dev">
+        <div class="card" style="padding:14px 16px;margin-bottom:1rem;">
+            <h3 style="margin:0 0 6px;font-size:1.08rem;">Разработчикам</h3>
+            <p class="text-muted" style="margin:0;font-size:0.92rem;">Пауза обмена с Битрикс24, приход из JSON/Llumar, технический раздел, воронки, правила резерва, журнал автосинка и вебхуков.</p>
+        </div>
+
+    <details class="card integration-section" id="sec-sync-master">
         <summary class="integration-section-summary">Пауза всей синхронизации с Битрикс24</summary>
         <div class="integration-section-body">
             <p class="text-muted">
@@ -424,7 +615,7 @@ $dbEmergencyRollBlockOn = (trim((string)getAppSetting($db, stockEmergencyRollCre
                 </label>
                 <label style="display:flex;gap:10px;align-items:flex-start;max-width:42rem;cursor:pointer;margin-top:14px;">
                     <input type="checkbox" name="integration_allow_local_receipt_during_pause" value="1" <?= $integrationAllowLocalReceiptDuringPause ? 'checked' : '' ?> style="margin-top:4px;">
-                    <span><strong>Разрешить локальный приход при паузе</strong> — можно проводить приход с <code>local_only</code> (форма «Только локально», JSON, Центр интеграции). Без этой галочки при паузе новые рулоны из прихода не создаются.</span>
+                    <span><strong>Разрешить локальный приход при паузе</strong> — можно проводить приход с <code>local_only</code> (форма «Только локально», JSON; раздел ниже для разработчиков). Без этой галочки при паузе новые рулоны из прихода не создаются.</span>
                 </label>
                 <p style="margin-top:12px;">
                     <button class="btn btn-warning" type="submit">Сохранить переключатель</button>
@@ -458,7 +649,7 @@ $dbEmergencyRollBlockOn = (trim((string)getAppSetting($db, stockEmergencyRollCre
         </div>
     </details>
 
-    <details class="card integration-section" id="sec-bulk-receipt" open>
+    <details class="card integration-section" id="sec-bulk-receipt">
         <summary class="integration-section-summary">Массовый приход из прайса (Llumar / большой JSON)</summary>
         <div class="integration-section-body">
             <p class="text-muted" style="margin-top:0;">
@@ -475,14 +666,14 @@ $dbEmergencyRollBlockOn = (trim((string)getAppSetting($db, stockEmergencyRollCre
                 <li><strong>Товары в Б24:</strong> заранее импорт из каталога (<a href="#sec-quick">«Импортировать товары из Б24»</a> ниже), чтобы совпали <code>b24_product_id</code> из JSON.</li>
                 <li>
                     <strong>Запустить приход:</strong>
-                    <a class="btn btn-primary btn-sm" href="sync_monitor.php?bulk=1#sec-receipt-json" style="margin-left:8px;">Форма прихода с «Только локально» по умолчанию</a>
+                    <a class="btn btn-primary btn-sm" href="sync_monitor.php?bulk=1&amp;dev=1#sec-receipt-json" style="margin-left:8px;">Форма прихода с «Только локально» по умолчанию</a>
                     <span class="text-muted">В форме с <code>?bulk=1</code> стоят <strong>чанки</strong> (меньшие партии строк/рулонов на документ — меньше 504 и разрыва MySQL <code>server has gone away</code>). При ошибке 2006 уменьшайте оба числа или повторите — уже созданные части идемпотентны по <code>doc_number</code>.</span>
                     Через API то же самое — в корне JSON: <code>&quot;lines_per_chunk&quot;: 30</code>,
                     опционально <code>&quot;max_roll_units_per_chunk&quot;: 400</code>. Склад в Б24 после <code>local_only</code> можно подтянуть «Синхронизировать остатки».
                 </li>
                 <li>Снимите аварийные блокировки рулонов (флаг в БД / триггер / <code>STOCK_CREATES_OFF</code>), если включали для остановки дублей.</li>
                 <li>
-                    Один запрос, дождитесь сообщения об успехе. Если вкладка «крутится» долго без ответа: откройте Центр интеграции <strong>в другой вкладке</strong> и нажмите
+                    Один запрос, дождитесь сообщения об успехе. Если вкладка «крутится» долго без ответа: откройте страницу «Настройки» <strong>в другой вкладке</strong>, включите «</>», и нажмите
                     «<strong>Прервать выполняющийся приход</strong>» в блоке паузы — долгая транзакция откатится (ещё несколько секунд).
                     При обрыве по 504 проверьте в БД, создался ли документ прихода; не отправляйте второй раз с тем же <code>doc_number</code>, если первая попытка уже прошла.
                 </li>
@@ -493,7 +684,7 @@ $dbEmergencyRollBlockOn = (trim((string)getAppSetting($db, stockEmergencyRollCre
         </div>
     </details>
 
-    <details class="card integration-section" id="sec-receipt-json" open>
+    <details class="card integration-section" id="sec-receipt-json"<?= $bulkReceiptUiDefault ? ' open' : '' ?>>
         <summary class="integration-section-summary">Приход из JSON (без Postman)</summary>
         <div class="integration-section-body">
             <p class="text-muted">
@@ -508,9 +699,9 @@ $dbEmergencyRollBlockOn = (trim((string)getAppSetting($db, stockEmergencyRollCre
                 </div>
             <?php endif; ?>
             <?php if ($stockReceiptSecretStored === ''): ?>
-                <div class="alert alert-warning">Секрет прихода ещё не задан — сначала сохраните его в блоке «Склады и синк».</div>
+                <div class="alert alert-warning">Секрет прихода ещё не задан — кнопка «</>» в шапке → блок «Склады, курс и параметры…» → секрет или curl.</div>
             <?php endif; ?>
-            <form method="POST" enctype="multipart/form-data">
+            <form id="integration-receipt-json-form" method="POST" enctype="multipart/form-data">
                 <input type="hidden" name="action" value="run_stock_receipt_json">
                 <div class="form-group">
                     <label>Файл JSON</label>
@@ -547,57 +738,15 @@ $dbEmergencyRollBlockOn = (trim((string)getAppSetting($db, stockEmergencyRollCre
                         <div class="text-muted" style="font-size:0.88rem;margin-top:4px;">или <code>max_roll_units_per_chunk</code></div>
                     </div>
                 </div>
-                <button class="btn btn-primary" type="submit" <?= $stockReceiptSecretStored === '' ? 'disabled' : '' ?>>Запустить приход</button>
+                <button class="btn btn-primary" type="submit" id="integration-receipt-json-submit" <?= $stockReceiptSecretStored === '' ? 'disabled' : '' ?>>Запустить приход</button>
             </form>
+            <p class="text-muted" style="margin-top:10px;font-size:0.9rem;">
+                Если <strong>«Чанки: строк…» &gt; 0</strong>, приход в браузере идёт <strong>по одной части за раз</strong> (как модалка у «Импортировать товары из Б24»): виден прогресс, короче один HTTP-ответ, меньше 504 и <code>MySQL server has gone away</code>.
+                Значение <strong>0</strong> — один запрос через эту же форму на сервер (без пошаговой модалки).
+            </p>
             <p class="text-muted" style="margin-top:10px;font-size:0.9rem;">
                 Ограничение размера файла задаётся в PHP (<code>upload_max_filesize</code> / <code>post_max_size</code> на сервере). Большие приходы удобнее грузить через тот же JSON по API после настройки HTTPS.
             </p>
-        </div>
-    </details>
-
-    <div class="card">
-        <h3 style="margin-top:0;">Разделы</h3>
-        <p class="text-muted">Перейти к нужному блоку. Ниже секции можно сворачивать, чтобы убрать лишнее с экрана.</p>
-        <nav class="integration-nav" aria-label="Разделы интеграции">
-            <a href="#sec-sync-master">Пауза синхронизации</a>
-            <span class="text-muted">·</span>
-            <a href="#sec-bulk-receipt">Массовый приход (Llumar)</a>
-            <span class="text-muted">·</span>
-            <a href="#sec-receipt-json">Приход из JSON</a>
-            <span class="text-muted">·</span>
-            <a href="#sec-quick">Быстрые действия</a>
-            <span class="text-muted">·</span>
-            <a href="#sec-tech">Техраздел Б24</a>
-            <span class="text-muted">·</span>
-            <a href="#sec-funnels">Воронки и стадии</a>
-            <span class="text-muted">·</span>
-            <a href="#sec-workflow">Резерв и реализация</a>
-            <span class="text-muted">·</span>
-            <a href="#sec-settings">Склады и синк</a>
-            <span class="text-muted">·</span>
-            <a href="#sec-autosync">Автосинк</a>
-            <span class="text-muted">·</span>
-            <a href="#sec-webhooks">Вебхуки</a>
-            <span class="text-muted">·</span>
-            <a href="#sec-mov-errors">Ошибки Б24</a>
-            <span class="text-muted">·</span>
-            <a href="#sec-pending">Ожидают отправки</a>
-            <span class="text-muted">·</span>
-            <a href="#sec-conflicts">Расхождения</a>
-        </nav>
-        <button type="button" class="btn btn-light btn-sm js-theme-toggle">Переключить тему</button>
-    </div>
-
-    <details class="card integration-section" id="sec-quick" open>
-        <summary class="integration-section-summary">Быстрые действия</summary>
-        <div class="integration-section-body">
-            <p class="text-muted">Кнопки запускают синк через модальное окно, без открытия новых вкладок. Массовый приход из JSON — в разделе <a href="#sec-bulk-receipt">«Массовый приход (Llumar)»</a> и форме <a href="sync_monitor.php?bulk=1#sec-receipt-json">Приход из JSON (?bulk=1)</a>.</p>
-            <div style="display:flex;gap:10px;flex-wrap:wrap;">
-                <a class="btn btn-primary b24-sync-link" href="api/bitrix/import_products.php">Импортировать товары из Б24</a>
-                <a class="btn btn-primary b24-sync-link" href="api/bitrix/sync_stock.php?push=1">Синхронизировать остатки</a>
-                <a class="btn btn-secondary b24-sync-link" href="api/sync_prices.php?action=to_b24">Синхронизировать цены</a>
-                <a class="btn btn-secondary b24-sync-link" href="api/bitrix/sync_cycle.php?chunk=<?= (int)$integrationSettings['sync_cycle_chunk'] ?>">Запустить 1 цикл автосинка</a>
-            </div>
         </div>
     </details>
 
@@ -759,75 +908,6 @@ $dbEmergencyRollBlockOn = (trim((string)getAppSetting($db, stockEmergencyRollCre
         </div>
     </details>
 
-    <details class="card integration-section" id="sec-settings" open>
-        <summary class="integration-section-summary">Настройки интеграции (склады, задержки, курс)</summary>
-        <div class="integration-section-body">
-            <form method="POST">
-                <input type="hidden" name="action" value="save_integration_settings">
-                <div class="form-grid">
-                    <div class="form-group">
-                        <label>Склад списания (storeFrom)</label>
-                        <input class="input" type="number" min="1" name="default_store_from_id" value="<?= (int)$integrationSettings['default_store_from_id'] ?>">
-                    </div>
-                    <div class="form-group">
-                        <label>Склад прихода (storeTo)</label>
-                        <input class="input" type="number" min="1" name="default_store_to_id" value="<?= (int)$integrationSettings['default_store_to_id'] ?>">
-                    </div>
-                    <div class="form-group">
-                        <label>Ответственный (responsibleId)</label>
-                        <input class="input" type="number" min="1" name="default_responsible_id" value="<?= (int)$integrationSettings['default_responsible_id'] ?>">
-                    </div>
-                    <div class="form-group">
-                        <label>Валюта</label>
-                        <input class="input" type="text" maxlength="3" name="default_currency" value="<?= htmlspecialchars((string)$integrationSettings['default_currency']) ?>">
-                    </div>
-                    <div class="form-group">
-                        <label>Скорость синка (batch limit)</label>
-                        <input class="input" type="number" min="10" max="500" name="sync_batch_limit" value="<?= (int)$integrationSettings['sync_batch_limit'] ?>">
-                    </div>
-                    <div class="form-group">
-                        <label>Задержка перед проведением документа Б24 (мс)</label>
-                        <input class="input" type="number" min="0" max="5000" name="b24_doc_delay_ms" value="<?= (int)$integrationSettings['b24_doc_delay_ms'] ?>">
-                    </div>
-                    <div class="form-group">
-                        <label>Проверок статуса проведения (attempts)</label>
-                        <input class="input" type="number" min="1" max="20" name="b24_conduct_check_attempts" value="<?= (int)$integrationSettings['b24_conduct_check_attempts'] ?>">
-                    </div>
-                    <div class="form-group">
-                        <label>Курс USD → KGS (для прихода)</label>
-                        <input class="input" type="number" min="0.01" step="0.01" name="usd_to_kgs_rate" value="<?= htmlspecialchars((string)$integrationSettings['usd_to_kgs_rate']) ?>">
-                    </div>
-                    <div class="form-group">
-                        <label>ID склада Б24 для синка остатков</label>
-                        <input class="input" type="number" min="1" name="stock_sync_store_id" value="<?= (int)$integrationSettings['stock_sync_store_id'] ?>">
-                    </div>
-                    <div class="form-group">
-                        <label>Размер шага автосинка (5-100)</label>
-                        <input class="input" type="number" min="5" max="100" name="sync_cycle_chunk" value="<?= (int)$integrationSettings['sync_cycle_chunk'] ?>">
-                    </div>
-                    <div class="form-group warehouse-filter-item-wide">
-                        <label>Секрет JSON-прихода (<code>stock_receipt_api_secret</code>)</label>
-                        <input class="input" type="password" name="stock_receipt_api_secret" value="" autocomplete="new-password"
-                            placeholder="<?= !empty($integrationSettings['stock_receipt_secret_set']) ? 'Оставьте пустым, чтобы не менять текущий ключ' : 'Задайте длинную случайную строку и сохраните' ?>">
-                        <p class="text-muted" style="margin-top:6px;margin-bottom:0;">
-                            Нужен для <code>api/create_receipt_json.php</code>: один <strong>POST</strong> с телом JSON прихода → запись в приложение + документ в Б24.
-                            <?php if (!empty($integrationSettings['stock_receipt_secret_set'])): ?>
-                                Ключ уже задан; новое значение перезапишет его.
-                            <?php else: ?>
-                                Пока не задан — API прихода отвечает 503.
-                            <?php endif; ?>
-                        </p>
-                        <pre style="margin-top:10px;white-space:pre-wrap;font-size:12px;padding:10px;background:var(--background-color,#f5f6fa);border-radius:6px;border:1px solid var(--border-color);">curl -X POST "<?= htmlspecialchars((isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 'https' : 'http') . '://' . (isset($_SERVER['HTTP_HOST']) ? $_SERVER['HTTP_HOST'] : 'ваш-хост')) ?>/api/create_receipt_json.php" \
-  -H "Content-Type: application/json; charset=utf-8" \
-  -H "X-Stock-Receipt-Secret: ВАШ_СЕКРЕТ_ИЗ_ПОЛЯ_ВЫШЕ" \
-  --data-binary @example/new/bulk_receipt_from_llumar.generated.json</pre>
-                    </div>
-                </div>
-                <button class="btn btn-success" type="submit">Сохранить настройки</button>
-            </form>
-        </div>
-    </details>
-
     <details class="card integration-section" id="sec-autosync">
         <summary class="integration-section-summary">Автосинхронизация и контроль расхождений</summary>
         <div class="integration-section-body">
@@ -934,66 +1014,9 @@ $dbEmergencyRollBlockOn = (trim((string)getAppSetting($db, stockEmergencyRollCre
         </div>
     </details>
 
-    <details class="card integration-section" id="sec-mov-errors">
-        <summary class="integration-section-summary">Ошибки отправки в Б24</summary>
-        <div class="integration-section-body">
-            <table class="table">
-                <tr><th>ID</th><th>Product</th><th>Тип</th><th>Deal</th><th>Статус</th><th>Ответ</th><th>Время</th></tr>
-                <?php foreach ($movementErrors as $row): ?>
-                    <tr>
-                        <td><?= (int)$row['id'] ?></td>
-                        <td><?= (int)$row['product_id'] ?></td>
-                        <td><?= htmlspecialchars($row['movement_type']) ?></td>
-                        <td><?= (int)$row['deal_id'] ?></td>
-                        <td><?= htmlspecialchars($row['bitrix_status']) ?></td>
-                        <td><pre style="white-space:pre-wrap;max-width:420px;"><?= htmlspecialchars((string)$row['bitrix_response']) ?></pre></td>
-                        <td><?= htmlspecialchars($row['created_at']) ?></td>
-                    </tr>
-                <?php endforeach; ?>
-            </table>
-        </div>
-    </details>
-
-    <details class="card integration-section" id="sec-pending">
-        <summary class="integration-section-summary">Ожидают отправки</summary>
-        <div class="integration-section-body">
-            <table class="table">
-                <tr><th>ID</th><th>Product</th><th>Тип</th><th>Deal</th><th>Статус</th><th>Время</th></tr>
-                <?php foreach ($movementPending as $row): ?>
-                    <tr>
-                        <td><?= (int)$row['id'] ?></td>
-                        <td><?= (int)$row['product_id'] ?></td>
-                        <td><?= htmlspecialchars($row['movement_type']) ?></td>
-                        <td><?= (int)$row['deal_id'] ?></td>
-                        <td><?= htmlspecialchars($row['bitrix_status']) ?></td>
-                        <td><?= htmlspecialchars($row['created_at']) ?></td>
-                    </tr>
-                <?php endforeach; ?>
-            </table>
-        </div>
-    </details>
-
-    <details class="card integration-section" id="sec-conflicts">
-        <summary class="integration-section-summary">Найденные расхождения с Б24</summary>
-        <div class="integration-section-body">
-            <p class="text-muted">Если здесь есть строки, нужно проверить товар и понять, где фактическая истина (приложение или Б24).</p>
-            <table class="table">
-                <tr><th>ID</th><th>Тип</th><th>B24 товар</th><th>Локальный товар</th><th>Локально</th><th>В Б24</th><th>Комментарий</th><th>Время</th></tr>
-                <?php foreach ($syncConflicts as $row): ?>
-                    <tr>
-                        <td><?= (int)$row['id'] ?></td>
-                        <td><?= htmlspecialchars((string)$row['conflict_type']) ?></td>
-                        <td><?= (int)$row['b24_product_id'] ?></td>
-                        <td><?= (int)$row['local_product_id'] ?></td>
-                        <td><?= htmlspecialchars((string)$row['local_value']) ?></td>
-                        <td><?= htmlspecialchars((string)$row['b24_value']) ?></td>
-                        <td><?= htmlspecialchars((string)$row['details']) ?></td>
-                        <td><?= htmlspecialchars($row['created_at']) ?></td>
-                    </tr>
-                <?php endforeach; ?>
-            </table>
-        </div>
-    </details>
+    </div>
 </main>
 
-<?php require 'includes/footer.php'; ?>
+<?php
+$friendcrm_footer_append_html = '<script src="assets/sync_monitor_receipt_chunks.js?v=1"></script>';
+require 'includes/footer.php';

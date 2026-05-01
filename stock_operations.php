@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 ini_set('display_errors', 1);
 error_reporting(E_ALL);
 header('Content-Type: text/html; charset=utf-8');
@@ -368,7 +368,7 @@ require 'includes/header.php';
                 <label>Комментарий</label>
                 <input type="text" name="comment_text" placeholder="Примечание к приходу">
             </div>
-            <p class="text-muted">Ввод цен в выбранной валюте. Отчет и синк в Б24 всегда в KGS. Курс USD из вкладки "Интеграция": <strong><?= htmlspecialchars(number_format($usdToKgsRate, 2, '.', ' ')) ?></strong>.</p>
+            <p class="text-muted">Ввод цен в выбранной валюте. Отчет и синк в Б24 всегда в KGS. Курс USD из страницы «Настройки»: <strong><?= htmlspecialchars(number_format($usdToKgsRate, 2, '.', ' ')) ?></strong>.</p>
             <?php if ($integrationSyncPaused): ?>
                 <div class="alert alert-warning">Синхронизация <strong>выключена</strong>. Приход с Б24 недоступен. Чтобы при этом создавать рулоны, в Центре интеграции должна быть включена опция <strong>«Разрешить локальный приход при паузе»</strong>, и здесь нужна галочка «Только локально». Иначе приход будет отклонён.</div>
             <?php endif; ?>
@@ -555,7 +555,7 @@ require 'includes/header.php';
     <div class="card">
         <h3>Технические моменты</h3>
         <p>Синк, настройки интеграции и скорость вынесены в отдельную вкладку.</p>
-        <a href="sync_monitor.php" class="btn btn-secondary">⚙️ Открыть центр интеграции</a>
+        <a href="sync_monitor.php" class="btn btn-secondary">⚙️ Открыть настройки</a>
     </div>
 </main>
 
