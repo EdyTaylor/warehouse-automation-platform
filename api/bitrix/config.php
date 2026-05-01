@@ -28,5 +28,20 @@ return [
 
     // Where movement log is sent in Bitrix (usually timeline comment in deal).
     // If deal_id is missing, movement sync will be skipped.
-    'movement_timeline_method' => 'crm.timeline.comment.add'
+    'movement_timeline_method' => 'crm.timeline.comment.add',
+
+    // Очередь склада (api/webhook.php → queueDealForWarehouse): по умолчанию любая сделка с товарами.
+    // Включите filter_enabled и задайте rules, чтобы заявки создавались только на нужных этапах воронок.
+    // CATEGORY_ID и STAGE_ID возьмите из crm.deal.get или из карточки сделки (режим разработчика).
+    //
+    // Пример три воронок:
+    //   'rules' => [
+    //     ['category_ids' => [1], 'stages_exact' => ['C1:UC_READY_SERVICE']],           // продажа услуг → «Готовы»
+    //     ['category_ids' => [2], 'stages_contains' => ['UC_INSPECTION']],              // выполнение — осмотр/работа
+    //     ['category_ids' => [3], 'stages_exact' => ['C3:UC_PAID_OR_SHIP']],           // товары → оплачено/отгрузка
+    //   ],
+    'warehouse_queue' => [
+        'filter_enabled' => false,
+        'rules' => [],
+    ],
 ];

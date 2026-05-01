@@ -5,7 +5,11 @@ header('Content-Type: text/html; charset=utf-8');
 
 require 'db.php';
 require_once __DIR__ . '/functions/app_settings.php';
+require_once __DIR__ . '/functions/webhook_log_schema.php';
 $db = getDB();
+webhookLogEnsureSchema($db);
+
+$webhookLimit = isset($_GET['limit']) ? max(10, min(500, intval($_GET['limit']))) : 80;
 $page_title = 'Центр интеграции';
 require 'includes/header.php';
 
@@ -67,12 +71,18 @@ $integrationSettings = array(
 $cycleLastRun = (string)getAppSetting($db, 'sync_cycle_last_run_json', '');
 
 try {
-    $webhookRows = $db->query("
-        SELECT id, event, created_at
+    $wk = $db->query('
+        SELECT id, event,
+               COALESCE(handler_outcome, \'\') AS handler_outcome,
+               entity_deal_id, entity_product_id,
+               CHAR_LENGTH(data) AS data_chars,
+               LEFT(data, 1500) AS data_preview,
+               created_at
         FROM webhook_log
         ORDER BY id DESC
-        LIMIT 20
-    ")->fetchAll(PDO::FETCH_ASSOC);
+        LIMIT ' . (int)$webhookLimit . '
+    ');
+    $webhookRows = $wk->fetchAll(PDO::FETCH_ASSOC);
 } catch (Exception $e) {
     $webhookRows = [];
 }
@@ -209,15 +219,54 @@ try {
     </div>
 
     <div class="card">
-        <h3>Последние webhook события</h3>
+        <h3>Вебхук-события Битрикс24</h3>
+        <p class="text-muted">
+            Каждая строка — один POST от исходящего вебхука Б24 на <code>api/webhook.php</code>.
+            Повторная доставка того же события помечается как <strong>duplicate_delivery_skipped</strong> (видно здесь же).
+            Размер: <code>?limit=120</code> в адресной строке (до 500).
+        </p>
         <table class="table">
-            <tr><th>ID</th><th>Событие</th><th>Время</th></tr>
+            <tr>
+                <th>ID</th>
+                <th>Событие</th>
+                <th>Итог обработки</th>
+                <th>Сделка</th>
+                <th>Товар B24</th>
+                <th>Payload</th>
+                <th>Время</th>
+            </tr>
             <?php foreach ($webhookRows as $row): ?>
-                <tr>
-                    <td><?= (int)$row['id'] ?></td>
-                    <td><?= htmlspecialchars($row['event']) ?></td>
-                    <td><?= htmlspecialchars($row['created_at']) ?></td>
+                <?php
+                $wid = (int)$row['id'];
+                $snippet = preg_replace('/\s+/', ' ', (string)(isset($row['data_preview']) ? $row['data_preview'] : ''));
+                if (strlen($snippet) > 1000) {
+                    $snippet = substr($snippet, 0, 1000) . '…';
+                }
+                ?>
+                <tr class="webhook-event-row">
+                    <td><?= $wid ?></td>
+                    <td><code><?= htmlspecialchars((string)$row['event']) ?></code></td>
+                    <td>
+                        <?= htmlspecialchars((string)$row['handler_outcome']) !== ''
+                            ? '<code>' . htmlspecialchars((string)$row['handler_outcome']) . '</code>'
+                            : '<span class="text-muted">—</span>'
+                        ?>
+                    </td>
+                    <td><?= isset($row['entity_deal_id']) && intval($row['entity_deal_id']) > 0 ? intval($row['entity_deal_id']) : '—' ?></td>
+                    <td><?= isset($row['entity_product_id']) && intval($row['entity_product_id']) > 0 ? intval($row['entity_product_id']) : '—' ?></td>
+                    <td><?= isset($row['data_chars']) ? intval($row['data_chars']) . ' симв.' : '—' ?></td>
+                    <td><?= htmlspecialchars((string)$row['created_at']) ?></td>
                 </tr>
+                <?php if ($snippet !== ''): ?>
+                <tr class="webhook-json-row">
+                    <td colspan="7">
+                        <details>
+                            <summary style="cursor:pointer;">Показать JSON (до 1500 символов)</summary>
+                            <pre style="white-space:pre-wrap;font-size:12px;margin:8px 0 0;padding:10px;background:var(--bs-body-bg,#f8f9fa);border-radius:6px;"><?= htmlspecialchars($snippet) ?></pre>
+                        </details>
+                    </td>
+                </tr>
+                <?php endif; ?>
             <?php endforeach; ?>
         </table>
     </div>

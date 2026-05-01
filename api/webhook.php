@@ -6,8 +6,72 @@ header('Content-Type: application/json; charset=utf-8');
 require '../db.php';
 $db = getDB();
 require_once __DIR__ . '/bitrix/deal.php';
+require_once __DIR__ . '/bitrix/warehouse_gate.php';
 require_once __DIR__ . '/bitrix/send.php';
 require_once __DIR__ . '/../functions/stock_movements.php';
+require_once __DIR__ . '/../functions/webhook_log_schema.php';
+
+/** @var int|null Строка в webhook_log текущего запроса (для итога обработки). */
+$GLOBALS['webhook_log_id'] = null;
+
+/**
+ * Извлекает ID сделки/товара из тела outbound без доп. запросов в Битрикс.
+ */
+function webhookLogExtractEntityIds($eventName, array $payload) {
+    $dealId = null;
+    $productId = null;
+    $ev = (string)$eventName;
+    if (strpos($ev, 'DEAL') !== false) {
+        $fields = extractDealPayload($payload);
+        $did = intval($fields['ID'] ?? 0);
+        if ($did > 0) {
+            $dealId = $did;
+        }
+    }
+    if (strpos($ev, 'PRODUCT') !== false) {
+        $row = isset($payload['data']) && is_array($payload['data']) ? $payload['data'] : [];
+        $pid = intval($row['ID'] ?? $row['id'] ?? 0);
+        if ($pid > 0) {
+            $productId = $pid;
+        }
+    }
+    return [$dealId, $productId];
+}
+
+function webhookLogInsertIncoming(PDO $db, $eventName, array $data, $dealId = null, $productId = null) {
+    $stmt = $db->prepare('
+        INSERT INTO webhook_log (event, data, processed, created_at, entity_deal_id, entity_product_id)
+        VALUES (?, ?, 0, NOW(), ?, ?)
+    ');
+    $payload = json_encode($data, JSON_UNESCAPED_UNICODE);
+    $stmt->execute([
+        $eventName,
+        $payload === false ? '{}' : $payload,
+        $dealId,
+        $productId,
+    ]);
+    return intval($db->lastInsertId());
+}
+
+function webhookLogFinish(PDO $db, $outcome, $dealId = null, $productId = null) {
+    $lid = isset($GLOBALS['webhook_log_id']) ? intval($GLOBALS['webhook_log_id']) : 0;
+    if ($lid <= 0 || $outcome === null || $outcome === '') {
+        return;
+    }
+    $parts = ['handler_outcome = ?'];
+    $bind = [$outcome];
+    if ($dealId !== null && $dealId > 0) {
+        $parts[] = 'entity_deal_id = ?';
+        $bind[] = intval($dealId);
+    }
+    if ($productId !== null && $productId > 0) {
+        $parts[] = 'entity_product_id = ?';
+        $bind[] = intval($productId);
+    }
+    $bind[] = $lid;
+    $sql = 'UPDATE webhook_log SET ' . implode(', ', $parts) . ' WHERE id = ?';
+    $db->prepare($sql)->execute($bind);
+}
 
 function ensureWebhookLockTable($db) {
     $db->exec("
@@ -55,20 +119,18 @@ $event = $data['event'] ?? '';
 $auth = $data['auth'] ?? [];
 $eventHash = hash('sha256', $event . '|' . json_encode($data['data'] ?? [], JSON_UNESCAPED_UNICODE));
 
+webhookLogEnsureSchema($db);
+list($incomingDealId, $incomingProductId) = webhookLogExtractEntityIds($event, $data);
+$GLOBALS['webhook_log_id'] = webhookLogInsertIncoming($db, $event, $data, $incomingDealId, $incomingProductId);
+
 ensureWebhookLockTable($db);
 $lockStmt = $db->prepare("INSERT IGNORE INTO webhook_event_lock (event_hash, event_name) VALUES (?, ?)");
 $lockStmt->execute([$eventHash, $event]);
 if ($lockStmt->rowCount() === 0) {
+    webhookLogFinish($db, 'duplicate_delivery_skipped');
     echo json_encode(['status' => 'duplicate_event_ignored', 'event' => $event]);
     exit;
 }
-
-// Логируем все входящие вебхуки для отладки
-$stmt = $db->prepare("
-    INSERT INTO webhook_log (event, data, created_at)
-    VALUES (?, ?, NOW())
-");
-$stmt->execute([$event, json_encode($data, JSON_UNESCAPED_UNICODE)]);
 
 switch ($event) {
     case 'ONCRMDEALADD':
@@ -104,6 +166,7 @@ switch ($event) {
         break;
         
     default:
+        webhookLogFinish($db, 'unknown_event:' . substr((string)$event, 0, 110));
         echo json_encode(['status' => 'unknown_event', 'event' => $event]);
         exit;
 }
@@ -112,6 +175,7 @@ function handleNewDeal($db, $data) {
     $deal = extractDealPayload($data);
     
     if (empty($deal)) {
+        webhookLogFinish($db, 'deal_add_empty_payload');
         echo json_encode(['error' => 'No deal data']);
         exit;
     }
@@ -121,7 +185,25 @@ function handleNewDeal($db, $data) {
     $responsibleId = $deal['ASSIGNED_BY_ID'] ?? '';
     
     if ($dealId <= 0) {
+        webhookLogFinish($db, 'deal_add_invalid_id');
         echo json_encode(['error' => 'Invalid deal ID']);
+        exit;
+    }
+
+    $cfg = require __DIR__ . '/bitrix/config.php';
+    $gate = isset($cfg['warehouse_queue']) && is_array($cfg['warehouse_queue']) ? $cfg['warehouse_queue'] : [];
+    $dealCtx = $deal;
+    if (!empty($gate['filter_enabled'])) {
+        $dealCtx = bitrixMergeDealWebhookAndCrm($deal, getDealDetails($dealId));
+    }
+    if (!bitrixWarehouseQueueAllowed($dealCtx, $gate)) {
+        webhookLogFinish($db, 'skipped_warehouse_gate', $dealId, null);
+        echo json_encode([
+            'status' => 'skipped_warehouse_gate',
+            'deal_id' => $dealId,
+            'category_id' => $dealCtx['CATEGORY_ID'] ?? null,
+            'stage_id' => $dealCtx['STAGE_ID'] ?? null,
+        ]);
         exit;
     }
     
@@ -139,11 +221,17 @@ function handleNewDeal($db, $data) {
             'products' => $products
         ];
         $result = queueDealForWarehouse($db, $dealData);
+        if (isset($result['error'])) {
+            webhookLogFinish($db, 'queue_error', $dealId, null);
+        } else {
+            webhookLogFinish($db, 'deal_processed', $dealId, null);
+        }
         echo json_encode(isset($result['error'])
             ? ['status' => 'error', 'deal_id' => $dealId, 'error' => $result['error']]
             : ['status' => 'deal_processed', 'deal_id' => $dealId, 'request_id' => $result['request_id'] ?? null]
         );
     } else {
+        webhookLogFinish($db, 'no_products', $dealId, null);
         echo json_encode(['status' => 'no_products', 'deal_id' => $dealId]);
     }
 }
@@ -153,6 +241,7 @@ function handleDealUpdate($db, $data) {
     $dealId = intval($deal['ID'] ?? 0);
     
     if ($dealId <= 0) {
+        webhookLogFinish($db, 'deal_update_invalid_id');
         echo json_encode(['error' => 'Invalid deal ID']);
         exit;
     }
@@ -160,19 +249,37 @@ function handleDealUpdate($db, $data) {
     // Получаем актуальные товары и пересобираем заявку для кладовщика
     $dealData = getDealDetails($dealId);
     $products = getDealProducts($db, $dealId);
+
+    $cfg = require __DIR__ . '/bitrix/config.php';
+    $gate = isset($cfg['warehouse_queue']) && is_array($cfg['warehouse_queue']) ? $cfg['warehouse_queue'] : [];
+    $dealCtx = bitrixMergeDealWebhookAndCrm($deal, $dealData);
     
-    if (!empty($products)) {
+    if (!empty($products) && bitrixWarehouseQueueAllowed($dealCtx, $gate)) {
         $result = queueDealForWarehouse($db, [
             'deal_id' => $dealId,
             'deal_name' => $dealData['TITLE'] ?? ('Deal #' . $dealId),
             'responsible' => isset($dealData['ASSIGNED_BY_ID']) ? getUserName($db, $dealData['ASSIGNED_BY_ID']) : '',
             'products' => $products
         ]);
+        if (isset($result['error'])) {
+            webhookLogFinish($db, 'queue_error', $dealId, null);
+        } else {
+            webhookLogFinish($db, 'deal_updated', $dealId, null);
+        }
         echo json_encode(isset($result['error'])
             ? ['status' => 'error', 'deal_id' => $dealId, 'error' => $result['error']]
             : ['status' => 'deal_updated', 'deal_id' => $dealId, 'request_id' => $result['request_id'] ?? null]
         );
+    } elseif (!empty($products)) {
+        webhookLogFinish($db, 'skipped_warehouse_gate', $dealId, null);
+        echo json_encode([
+            'status' => 'skipped_warehouse_gate',
+            'deal_id' => $dealId,
+            'category_id' => $dealCtx['CATEGORY_ID'] ?? null,
+            'stage_id' => $dealCtx['STAGE_ID'] ?? null,
+        ]);
     } else {
+        webhookLogFinish($db, 'no_products', $dealId, null);
         echo json_encode(['status' => 'no_products', 'deal_id' => $dealId]);
     }
 
@@ -183,6 +290,7 @@ function handleNewProduct($db, $data) {
     $product = $data['data'] ?? [];
     
     if (empty($product)) {
+        webhookLogFinish($db, 'product_add_empty_payload');
         echo json_encode(['error' => 'No product data']);
         exit;
     }
@@ -192,6 +300,7 @@ function handleNewProduct($db, $data) {
     $productPrice = floatval($product['PRICE'] ?? 0);
     
     if ($productId <= 0) {
+        webhookLogFinish($db, 'product_add_invalid_id');
         echo json_encode(['error' => 'Invalid product ID']);
         exit;
     }
@@ -203,12 +312,14 @@ function handleNewProduct($db, $data) {
     if ($exists) {
         $upd = $db->prepare("UPDATE products SET name = ?, price_per_meter = ? WHERE id = ?");
         $upd->execute([$productName, $productPrice, intval($exists['id'])]);
+        webhookLogFinish($db, 'product_upserted_existing', null, $productId);
     } else {
         $ins = $db->prepare("
             INSERT INTO products (name, roll_length, price_per_meter, b24_product_id)
             VALUES (?, 30, ?, ?)
         ");
         $ins->execute([$productName, $productPrice, $productId]);
+        webhookLogFinish($db, 'product_inserted_local', null, $productId);
     }
     
     echo json_encode(['status' => 'product_added', 'product_id' => $productId]);
@@ -218,6 +329,7 @@ function handleProductUpdate($db, $data) {
     $product = $data['data'] ?? [];
     
     if (empty($product)) {
+        webhookLogFinish($db, 'product_update_empty_payload');
         echo json_encode(['error' => 'No product data']);
         exit;
     }
@@ -227,6 +339,7 @@ function handleProductUpdate($db, $data) {
     $productPrice = floatval($product['PRICE'] ?? 0);
     
     if ($productId <= 0) {
+        webhookLogFinish($db, 'product_update_invalid_id');
         echo json_encode(['error' => 'Invalid product ID']);
         exit;
     }
@@ -239,6 +352,7 @@ function handleProductUpdate($db, $data) {
     ");
     $stmt->execute([$productName, $productPrice, $productId]);
     
+    webhookLogFinish($db, 'product_updated_local', null, $productId);
     echo json_encode(['status' => 'product_updated', 'product_id' => $productId]);
 }
 
@@ -249,6 +363,7 @@ function handleDynamicItemEvent($db, $data, $action) {
     $entityTypeId = intval($ids['entity_type_id']);
     $itemId = intval($ids['item_id']);
     if ($entityTypeId <= 0 || $itemId <= 0) {
+        webhookLogFinish($db, 'dynamic_item_missing_ids');
         echo json_encode([
             'status' => 'dynamic_item_skipped',
             'reason' => 'missing_entity_or_item_id',
@@ -288,6 +403,7 @@ function handleDynamicItemEvent($db, $data, $action) {
         json_encode($data, JSON_UNESCAPED_UNICODE)
     ]);
 
+    webhookLogFinish($db, 'dynamic_item_queued_et' . $entityTypeId);
     echo json_encode([
         'status' => 'dynamic_item_queued',
         'action' => $action,
