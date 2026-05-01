@@ -459,10 +459,7 @@ function fetchB24ProductSnapshot($b24ProductId) {
     if (is_array($crmResp) && !isset($crmResp['error']) && isset($crmResp['result']) && is_array($crmResp['result'])) {
         $crmRow = $crmResp['result'];
     }
-    $catalogRow = null;
-    if (is_array($catalogResp) && !isset($catalogResp['error']) && isset($catalogResp['result']) && is_array($catalogResp['result'])) {
-        $catalogRow = $catalogResp['result'];
-    }
+    $catalogRow = b24CatalogProductRowFromGetResponse($catalogResp);
 
     $price = null;
     $purchasePrice = null;
@@ -515,6 +512,40 @@ function b24CatalogOfferRowsFromListResponse($resp) {
     }
     if (isset($r['offer']) && is_array($r['offer'])) {
         return array($r['offer']);
+    }
+
+    return array();
+}
+
+function b24CatalogProductRowFromGetResponse($resp) {
+    if (!is_array($resp) || isset($resp['error']) || !isset($resp['result']) || !is_array($resp['result'])) {
+        return null;
+    }
+    if (isset($resp['result']['product']) && is_array($resp['result']['product'])) {
+        return $resp['result']['product'];
+    }
+    if (isset($resp['result']['PRODUCT']) && is_array($resp['result']['PRODUCT'])) {
+        return $resp['result']['PRODUCT'];
+    }
+    if (isset($resp['result']['id']) || isset($resp['result']['ID'])) {
+        return $resp['result'];
+    }
+
+    return null;
+}
+
+function b24CatalogPriceRowsFromListResponse($resp) {
+    if (!is_array($resp) || isset($resp['error']) || !isset($resp['result'])) {
+        return array();
+    }
+    if (isset($resp['result']['prices']) && is_array($resp['result']['prices'])) {
+        return array_values($resp['result']['prices']);
+    }
+    if (isset($resp['result']['price']) && is_array($resp['result']['price'])) {
+        return array($resp['result']['price']);
+    }
+    if (is_array($resp['result']) && isset($resp['result'][0]) && is_array($resp['result'][0])) {
+        return array_values($resp['result']);
     }
 
     return array();
@@ -632,9 +663,10 @@ function b24ResolveRetailPriceCatalogTargetIdsMeta($catalogProductId) {
     $iblockId = 0;
     $parentType = 0;
     $catGet = sendToBitrix('catalog.product.get', array('id' => $catalogProductId));
-    if (is_array($catGet) && !isset($catGet['error']) && isset($catGet['result']) && is_array($catGet['result'])) {
-        $iblockId = intval(isset($catGet['result']['iblockId']) ? $catGet['result']['iblockId'] : 0);
-        $parentType = intval(isset($catGet['result']['type']) ? $catGet['result']['type'] : 0);
+    $catRow = b24CatalogProductRowFromGetResponse($catGet);
+    if ($catRow !== null) {
+        $iblockId = intval(isset($catRow['iblockId']) ? $catRow['iblockId'] : (isset($catRow['IBLOCK_ID']) ? $catRow['IBLOCK_ID'] : 0));
+        $parentType = intval(isset($catRow['type']) ? $catRow['type'] : (isset($catRow['TYPE']) ? $catRow['TYPE'] : 0));
     }
 
     $offerIblockId = 0;
@@ -780,10 +812,7 @@ function upsertB24RetailPrice($b24ProductId, $retailPrice, $currencyId) {
         'filter' => array('productId' => $b24ProductId)
     ));
 
-    $rows = array();
-    if (is_array($listResp) && !isset($listResp['error']) && isset($listResp['result']) && is_array($listResp['result'])) {
-        $rows = $listResp['result'];
-    }
+    $rows = b24CatalogPriceRowsFromListResponse($listResp);
 
     $pickedRow = pickRetailCatalogPriceRow($rows);
     $priceId = $pickedRow ? b24CatalogPriceRowId($pickedRow) : 0;
@@ -828,11 +857,11 @@ function fetchB24RetailPrice($b24ProductId) {
     $resp = sendToBitrix('catalog.price.list', array(
         'filter' => array('productId' => $b24ProductId)
     ));
-    if (!is_array($resp) || isset($resp['error']) || !isset($resp['result']) || !is_array($resp['result'])) {
+    if (!is_array($resp) || isset($resp['error'])) {
         return array('ok' => false, 'price' => null, 'raw' => $resp);
     }
 
-    $rows = array_values($resp['result']);
+    $rows = b24CatalogPriceRowsFromListResponse($resp);
     if (empty($rows)) {
         return array('ok' => true, 'price' => null, 'raw' => $resp);
     }
