@@ -1313,6 +1313,8 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
 
         $totalAmount = 0.0;
         $addedAny = false;
+        /** @var array локальные product_id для одного синка каталога/склада после commit (иначе на каждый рулон — десятки вызовов Б24 → «зависание») */
+        $receiptProductIdsNeedCatalogPush = array();
 
         foreach ($linesIn as $row) {
             if (!is_array($row)) {
@@ -1430,8 +1432,21 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
                         $movIdLocal
                     ));
                 } else {
-                    logAndSyncMovement($db, $movPayload);
+                    $movBulk = logStockMovement($db, $movPayload);
+                    $updBulk = $db->prepare('UPDATE stock_movements SET bitrix_status = ?, bitrix_response = ? WHERE id = ?');
+                    $updBulk->execute(array(
+                        'sent',
+                        json_encode(array(
+                            'skipped' => 'bulk_receipt_deferred_catalog',
+                            'hint' => 'Остаток в каталоге/магазине Б24 синхронизируется один раз по товару после проведения прихода.'
+                        )),
+                        $movBulk
+                    ));
                 }
+            }
+
+            if (!$localOnly) {
+                $receiptProductIdsNeedCatalogPush[$localProductId] = true;
             }
         }
 
@@ -1442,6 +1457,12 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
         $db->prepare("UPDATE stock_operation_docs SET total_amount = ? WHERE id = ?")
             ->execute(array($totalAmount, $docId));
         $db->commit();
+
+        if (!$localOnly && !empty($receiptProductIdsNeedCatalogPush)) {
+            foreach (array_keys($receiptProductIdsNeedCatalogPush) as $pidForCatalog) {
+                syncProductAvailableToBitrix($db, intval($pidForCatalog));
+            }
+        }
 
         $lineRowsForSync = $db->query("SELECT product_id, qty_rolls, quantity_m, roll_length, price_per_roll, delivery_price_per_roll, line_total FROM stock_operation_lines WHERE doc_id=" . intval($docId))->fetchAll(PDO::FETCH_ASSOC);
 
