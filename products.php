@@ -521,6 +521,38 @@ function b24CatalogOfferRowsFromListResponse($resp) {
 }
 
 /**
+ * Для parent-товара возвращает iblock вариаций (offers), например 19 -> 21.
+ * Кэшируем на время запроса, чтобы не дергать REST каждый товар.
+ */
+function b24ResolveOfferIblockIdByParentIblock($parentIblockId) {
+    $parentIblockId = intval($parentIblockId);
+    if ($parentIblockId <= 0) {
+        return 0;
+    }
+    static $map = null;
+    if ($map === null) {
+        $map = array();
+        $resp = sendToBitrix('catalog.catalog.list', array(
+            'select' => array('id', 'iblockId', 'productIblockId')
+        ));
+        if (is_array($resp) && !isset($resp['error']) && isset($resp['result']['catalogs']) && is_array($resp['result']['catalogs'])) {
+            foreach ($resp['result']['catalogs'] as $cat) {
+                if (!is_array($cat)) {
+                    continue;
+                }
+                $productIblockId = intval(isset($cat['productIblockId']) ? $cat['productIblockId'] : 0);
+                $offerIblockId = intval(isset($cat['iblockId']) ? $cat['iblockId'] : 0);
+                if ($productIblockId > 0 && $offerIblockId > 0) {
+                    $map[$productIblockId] = $offerIblockId;
+                }
+            }
+        }
+    }
+
+    return isset($map[$parentIblockId]) ? intval($map[$parentIblockId]) : 0;
+}
+
+/**
  * У товара «с вариациями» (таблица Метр/рулон в карточке Б24) цена хранится на торговом предложении (offer),
  * а не на родителе. Возвращаем ID офферов каталога; если офферов нет — одиночный простой товар = сам id.
  *
@@ -541,8 +573,12 @@ function b24ResolveRetailPriceCatalogTargetIds($catalogProductId) {
 
     $filterAttempts = array();
     if ($iblockId > 0) {
-        $filterAttempts[] = array('parentId' => $catalogProductId, 'iblockId' => $iblockId);
+        $offerIblockId = b24ResolveOfferIblockIdByParentIblock($iblockId);
+        if ($offerIblockId > 0) {
+            $filterAttempts[] = array('parentId' => $catalogProductId, 'iblockId' => $offerIblockId);
+        }
     }
+    // На порталах Bitrix iblockId часто обязателен; но оставляем запасной вариант.
     $filterAttempts[] = array('parentId' => $catalogProductId);
 
     $offerRows = array();
