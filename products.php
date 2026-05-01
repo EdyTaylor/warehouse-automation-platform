@@ -558,19 +558,28 @@ function b24ResolveOfferIblockIdByParentIblock($parentIblockId) {
  *
  * @return int[]
  */
-function b24ResolveRetailPriceCatalogTargetIds($catalogProductId) {
+function b24ResolveRetailPriceCatalogTargetIdsMeta($catalogProductId) {
     $catalogProductId = intval($catalogProductId);
     if ($catalogProductId <= 0) {
-        return array();
+        return array(
+            'targets' => array(),
+            'parent_type' => 0,
+            'parent_iblock_id' => 0,
+            'offer_iblock_id' => 0,
+            'expected_offers' => false
+        );
     }
     $fallback = array($catalogProductId);
 
     $iblockId = 0;
+    $parentType = 0;
     $catGet = sendToBitrix('catalog.product.get', array('id' => $catalogProductId));
     if (is_array($catGet) && !isset($catGet['error']) && isset($catGet['result']) && is_array($catGet['result'])) {
         $iblockId = intval(isset($catGet['result']['iblockId']) ? $catGet['result']['iblockId'] : 0);
+        $parentType = intval(isset($catGet['result']['type']) ? $catGet['result']['type'] : 0);
     }
 
+    $offerIblockId = 0;
     $filterAttempts = array();
     if ($iblockId > 0) {
         $offerIblockId = b24ResolveOfferIblockIdByParentIblock($iblockId);
@@ -606,10 +615,27 @@ function b24ResolveRetailPriceCatalogTargetIds($catalogProductId) {
     $ids = array_values(array_unique($ids));
 
     if (!empty($ids)) {
-        return $ids;
+        return array(
+            'targets' => $ids,
+            'parent_type' => $parentType,
+            'parent_iblock_id' => $iblockId,
+            'offer_iblock_id' => $offerIblockId,
+            'expected_offers' => ($parentType === 3)
+        );
     }
 
-    return $fallback;
+    return array(
+        'targets' => $fallback,
+        'parent_type' => $parentType,
+        'parent_iblock_id' => $iblockId,
+        'offer_iblock_id' => $offerIblockId,
+        'expected_offers' => ($parentType === 3)
+    );
+}
+
+function b24ResolveRetailPriceCatalogTargetIds($catalogProductId) {
+    $meta = b24ResolveRetailPriceCatalogTargetIdsMeta($catalogProductId);
+    return isset($meta['targets']) && is_array($meta['targets']) ? $meta['targets'] : array();
 }
 
 function b24RetailPriceMatchesOnAllTargets(array $targets, $retailPrice) {
@@ -870,9 +896,27 @@ function syncProductPriceToB24($db, $productId) {
 
     // В Б24 передаём только розничную цену за метр (без закупки и без catalog.product.update — иначе «single price» / диапазоны).
     // Товары с вариациями: цены в интерфейсе идут на торговые предложения (offer), см. catalog.product.offer.list по parentId.
-    $targets = b24ResolveRetailPriceCatalogTargetIds($b24Id);
+    $targetsMeta = b24ResolveRetailPriceCatalogTargetIdsMeta($b24Id);
+    $targets = isset($targetsMeta['targets']) && is_array($targetsMeta['targets']) ? $targetsMeta['targets'] : array();
+    $parentType = intval(isset($targetsMeta['parent_type']) ? $targetsMeta['parent_type'] : 0);
+    $offerIblockId = intval(isset($targetsMeta['offer_iblock_id']) ? $targetsMeta['offer_iblock_id'] : 0);
+    $expectedOffers = !empty($targetsMeta['expected_offers']);
+    $usedFallbackParentOnly = (count($targets) === 1 && intval($targets[0]) === $b24Id);
     if (count($targets) > 50) {
         $targets = array_slice($targets, 0, 50);
+    }
+
+    // Важный стоп-контроль: для parent-SKU (type=3) нельзя считать успехом запись только в родителя.
+    if ($expectedOffers && $usedFallbackParentOnly) {
+        $err = 'Для SKU-товара не найдены торговые предложения (offers) по parentId=' . $b24Id
+            . ', offerIblockId=' . $offerIblockId . '. Цена в строке вариации Б24 не обновится.';
+        updateProductSyncState($db, $productId, 'error', $err, $attemptAt);
+        return array(
+            'ok' => false,
+            'message' => $err,
+            'sync_report_bucket' => 'errors',
+            'sync_report_row' => makeB24PriceSyncListRow($pid, $pName, $b24Id, $err)
+        );
     }
 
     $crmFields = array();
@@ -950,7 +994,7 @@ function syncProductPriceToB24($db, $productId) {
                 . '(' . (count($targets) <= 1
                     ? 'каталог id ' . (isset($targets[0]) ? intval($targets[0]) : $b24Id)
                     : ('офферы каталога: ' . implode(', ', array_map('intval', $targets)) . '; родитель ' . $b24Id))
-                . '), подтверждено чтением после записи'
+                . '; type=' . $parentType . '), подтверждено чтением после записи'
             )
         );
     }
