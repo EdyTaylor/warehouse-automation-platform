@@ -34,6 +34,8 @@
 
 **Базовый URL вашего приложения:** `https://your-domain.com/api/webhook.php`
 
+Обработчик `webhook.php` принимает тело события и в виде **JSON**, и как **`application/x-www-form-urlencoded`** (так часто работает типовой исходящий вебхук Bitrix24: `event=...&data[FIELDS][ID]=...`).
+
 #### События для настройки:
 
 1. **Новая сделка:**

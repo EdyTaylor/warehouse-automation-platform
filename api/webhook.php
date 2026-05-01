@@ -21,6 +21,50 @@ function webhookLoadHandlers() {
     require_once __DIR__ . '/../functions/stock_movements.php';
 }
 
+/**
+ * Исходящий вебхук Битрикс24 часто приходит как application/x-www-form-urlencoded:
+ * event=ONCRMDEALUPDATE&data[FIELDS][ID]=...&auth[domain]=...
+ * вместо JSON. Приводим к той же форме массива, что и у JSON-тела.
+ */
+function bitrixWebhookNormalizeFromParsedForm($parsed) {
+    if (!is_array($parsed) || empty($parsed['event'])) {
+        return null;
+    }
+
+    return array(
+        'event' => $parsed['event'],
+        'data' => (isset($parsed['data']) && is_array($parsed['data'])) ? $parsed['data'] : array(),
+        'auth' => (isset($parsed['auth']) && is_array($parsed['auth'])) ? $parsed['auth'] : array(),
+        'ts' => isset($parsed['ts']) ? $parsed['ts'] : null,
+        'event_handler_id' => isset($parsed['event_handler_id']) ? $parsed['event_handler_id'] : null,
+    );
+}
+
+function bitrixWebhookDecodeRequestBody($rawInput) {
+    $data = json_decode((string)$rawInput, true);
+    if (is_array($data) && isset($data['event'])) {
+        return $data;
+    }
+
+    $parsed = array();
+
+    if (!empty($_POST) && isset($_POST['event'])) {
+        $parsed = $_POST;
+    }
+
+    $trimRaw = trim((string)$rawInput);
+    if (empty($parsed['event']) && $trimRaw !== '') {
+        parse_str((string)$rawInput, $parsed);
+    }
+
+    $normalized = bitrixWebhookNormalizeFromParsedForm($parsed);
+    if ($normalized !== null) {
+        return $normalized;
+    }
+
+    return null;
+}
+
 function ensureWebhookLockTable($db) {
     $db->exec("
         CREATE TABLE IF NOT EXISTS webhook_event_lock (
@@ -54,9 +98,9 @@ function ensureDynamicItemInboxTable($db) {
     ");
 }
 
-// Получаем данные от Битрикс24 (сначала лог в БД — до тяжёлых require, чтобы видеть даже сбои и «пустые» запросы)
+// Получаем данные от Битрикс24 (сначала лог в БД — до тяжёлых require)
 $input = file_get_contents('php://input');
-$data = json_decode((string)$input, true);
+$data = bitrixWebhookDecodeRequestBody($input);
 
 webhookLogEnsureSchema($db);
 
@@ -65,12 +109,16 @@ if (!is_array($data)) {
     $GLOBALS['webhook_log_id'] = webhookLogInsertIncoming(
         $db,
         'INVALID_JSON_OR_BODY',
-        ['hint' => 'json_decode_failed', 'body_chars' => strlen((string)$input), 'body_preview' => $raw],
+        array(
+            'hint' => 'neither_json_nor_form-urlencoded',
+            'body_chars' => strlen((string)$input),
+            'body_preview' => $raw,
+        ),
         null,
         null
     );
     webhookLogFinish($db, 'json_decode_failed_or_empty_body');
-    echo json_encode(['error' => 'No data received']);
+    echo json_encode(array('error' => 'No data received'));
     exit;
 }
 
@@ -89,7 +137,7 @@ $lockStmt = $db->prepare("INSERT IGNORE INTO webhook_event_lock (event_hash, eve
 $lockStmt->execute([$eventHash, $event]);
 if ($lockStmt->rowCount() === 0) {
     webhookLogFinish($db, 'duplicate_delivery_skipped');
-    echo json_encode(['status' => 'duplicate_event_ignored', 'event' => $event]);
+    echo json_encode(array('status' => 'duplicate_event_ignored', 'event' => $event));
     exit;
 }
 
