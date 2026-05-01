@@ -1682,6 +1682,25 @@ $page_title = 'Товары';
 require 'includes/header.php';
 ?>
 
+<style>
+.products-table .sync-status-col {
+    width: 118px;
+    min-width: 118px;
+    white-space: nowrap;
+}
+.products-table .sticky-col-actions {
+    min-width: 232px;
+    width: 232px;
+}
+.products-table .products-row-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: nowrap;
+    gap: 4px;
+}
+</style>
+
 <main class="container products-catalog-page">
     <h2>Каталог товаров</h2>
 
@@ -1981,7 +2000,7 @@ require 'includes/header.php';
                     <th>5-9</th>
                     <th>10-19</th>
                     <th>20+</th>
-                    <th>Синхр.</th>
+                    <th class="sync-status-col">Синхр.</th>
                     <th class="sticky-col sticky-col-actions">Действия</th>
                 </tr>
             </thead>
@@ -2041,7 +2060,7 @@ require 'includes/header.php';
                             <span class="cell-view"><?php echo htmlspecialchars((string)$p['price_20_plus']); ?></span>
                             <input class="form-control cell-edit" data-field="price_20_plus" type="text" value="<?php echo htmlspecialchars((string)$p['price_20_plus']); ?>">
                         </td>
-                        <td>
+                        <td class="sync-status-col">
                             <span class="<?php echo $syncClass; ?>" title="Последний sync_status: <?php echo htmlspecialchars($syncStatus !== '' ? $syncStatus : 'pending', ENT_QUOTES, 'UTF-8'); ?>">
                                 <?php echo $syncLabel; ?>
                             </span>
