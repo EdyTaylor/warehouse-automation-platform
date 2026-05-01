@@ -330,10 +330,14 @@ function processPriceSyncChunk($db, $offset, $limit) {
 
     $ok = 0;
     $err = 0;
+    $errors = array();
     foreach ($rows as $row) {
         $productId = intval(isset($row['id']) ? $row['id'] : 0);
         if ($productId <= 0) {
             $err++;
+            if (count($errors) < 5) {
+                $errors[] = array('product_id' => 0, 'message' => 'Некорректный product_id');
+            }
             continue;
         }
         $res = syncProductPriceToB24($db, $productId);
@@ -341,6 +345,12 @@ function processPriceSyncChunk($db, $offset, $limit) {
             $ok++;
         } else {
             $err++;
+            if (count($errors) < 5) {
+                $errors[] = array(
+                    'product_id' => $productId,
+                    'message' => isset($res['message']) ? (string)$res['message'] : 'Неизвестная ошибка'
+                );
+            }
         }
     }
 
@@ -351,6 +361,7 @@ function processPriceSyncChunk($db, $offset, $limit) {
         'processed' => $processed,
         'ok' => $ok,
         'err' => $err,
+        'errors' => $errors,
         'next_offset' => $nextOffset,
         'done' => ($nextOffset >= $total || $processed === 0)
     );
@@ -910,9 +921,17 @@ if (isset($_GET['sync_job']) && $_GET['sync_job'] === 'prices') {
     $errAcc += intval(isset($chunk['err']) ? $chunk['err'] : 0);
     $nextOffset = intval(isset($chunk['next_offset']) ? $chunk['next_offset'] : $offset);
     $total = intval(isset($chunk['total']) ? $chunk['total'] : 0);
+    $chunkErrors = isset($chunk['errors']) && is_array($chunk['errors']) ? $chunk['errors'] : array();
+    $lastChunkError = '';
+    if (!empty($chunkErrors)) {
+        $firstErr = $chunkErrors[0];
+        $errPid = intval(isset($firstErr['product_id']) ? $firstErr['product_id'] : 0);
+        $errText = isset($firstErr['message']) ? trim((string)$firstErr['message']) : 'Неизвестная ошибка';
+        $lastChunkError = ($errPid > 0 ? ('#' . $errPid . ': ') : '') . $errText;
+    }
 
     if (!empty($chunk['done'])) {
-        header("Location: products.php?sync_msg=" . urlencode("Отправить в Б24: обновлено {$okAcc}, ошибок {$errAcc}, всего {$total}"));
+        header("Location: products.php?sync_msg=" . urlencode("Отправить в Б24: обновлено {$okAcc}, ошибок {$errAcc}, всего {$total}") . "&sync_show_errors=1");
         exit;
     }
     $nextUrl = "products.php?sync_job=prices&sync_offset={$nextOffset}&sync_ok={$okAcc}&sync_err={$errAcc}";
@@ -924,6 +943,9 @@ if (isset($_GET['sync_job']) && $_GET['sync_job'] === 'prices') {
     echo '</head><body><div class="box">';
     echo '<h3 style="margin-top:0">Синхронизация цен с Б24...</h3>';
     echo '<p class="muted">Обработано: <strong>' . intval($nextOffset) . '</strong> из <strong>' . intval($total) . '</strong>. Успешно: <strong>' . intval($okAcc) . '</strong>, ошибок: <strong>' . intval($errAcc) . '</strong>.</p>';
+    if ($lastChunkError !== '') {
+        echo '<p class="muted" style="color:#b91c1c"><strong>Последняя ошибка:</strong> ' . htmlspecialchars($lastChunkError, ENT_QUOTES, 'UTF-8') . '</p>';
+    }
     echo '<div class="bar"><div class="fill"></div></div>';
     echo '<p class="muted" style="margin-bottom:0;margin-top:14px">Страница обновится автоматически. Не закрывайте вкладку.</p>';
     echo '</div><script>setTimeout(function(){ window.location.href = ' . json_encode($nextUrl) . '; }, 120);</script></body></html>';
@@ -932,6 +954,18 @@ if (isset($_GET['sync_job']) && $_GET['sync_job'] === 'prices') {
 
 $hasCatalogId = hasColumn($db, 'products', 'catalog_id');
 $syncMsg = isset($_GET['sync_msg']) ? $_GET['sync_msg'] : '';
+$showSyncErrors = isset($_GET['sync_show_errors']) && $_GET['sync_show_errors'] === '1';
+$recentSyncErrors = array();
+if ($showSyncErrors) {
+    $recentSyncErrors = $db->query("
+        SELECT id, name, b24_product_id, last_error, last_attempt_at
+        FROM products
+        WHERE sync_status = 'error'
+          AND last_attempt_at IS NOT NULL
+        ORDER BY last_attempt_at DESC, id DESC
+        LIMIT 20
+    ")->fetchAll(PDO::FETCH_ASSOC);
+}
 $b24Config = require __DIR__ . '/api/bitrix/config.php';
 $catalogLabels = array();
 if (isset($b24Config['catalog_labels']) && is_array($b24Config['catalog_labels'])) {
@@ -1034,6 +1068,29 @@ require 'includes/header.php';
 
     <?php if ($syncMsg): ?>
         <div class="alert alert-info"><?php echo htmlspecialchars($syncMsg); ?></div>
+    <?php endif; ?>
+    <?php if ($showSyncErrors && !empty($recentSyncErrors)): ?>
+        <div class="card">
+            <h3>Причины ошибок синхронизации (последние 20)</h3>
+            <table class="table">
+                <tr>
+                    <th>ID</th>
+                    <th>Товар</th>
+                    <th>B24 ID</th>
+                    <th>Ошибка</th>
+                    <th>Когда</th>
+                </tr>
+                <?php foreach ($recentSyncErrors as $errRow): ?>
+                    <tr>
+                        <td><?php echo intval(isset($errRow['id']) ? $errRow['id'] : 0); ?></td>
+                        <td><?php echo htmlspecialchars(isset($errRow['name']) ? (string)$errRow['name'] : ''); ?></td>
+                        <td><?php echo intval(isset($errRow['b24_product_id']) ? $errRow['b24_product_id'] : 0); ?></td>
+                        <td><?php echo htmlspecialchars(isset($errRow['last_error']) ? (string)$errRow['last_error'] : ''); ?></td>
+                        <td><?php echo htmlspecialchars(isset($errRow['last_attempt_at']) ? (string)$errRow['last_attempt_at'] : ''); ?></td>
+                    </tr>
+                <?php endforeach; ?>
+            </table>
+        </div>
     <?php endif; ?>
     <?php if (!empty($formErrors)): ?>
         <div class="alert alert-danger">
