@@ -1383,7 +1383,8 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
 
         $receiptAbortEpoch = integrationGetStockAbortEpoch($db);
         $db->beginTransaction();
-        integrationAssertReceiptAbortEpochUnchanged($db, $receiptAbortEpoch);
+        $abortEpochStmt = $db->prepare('SELECT `value` FROM app_settings WHERE `key` = ? LIMIT 1');
+        integrationAssertReceiptAbortEpochUnchanged($db, $receiptAbortEpoch, $abortEpochStmt);
 
         $insDoc = $db->prepare("
             INSERT INTO stock_operation_docs (operation_type, doc_number, supplier, comment_text, total_amount, status)
@@ -1407,7 +1408,7 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
             if (!is_array($row)) {
                 continue;
             }
-            integrationAssertReceiptAbortEpochUnchanged($db, $receiptAbortEpoch);
+            integrationAssertReceiptAbortEpochUnchanged($db, $receiptAbortEpoch, $abortEpochStmt);
 
             $qtyRolls = intval(isset($row['qty_rolls']) ? $row['qty_rolls'] : (isset($row['qtyRolls']) ? $row['qtyRolls'] : 0));
             $rollLength = floatval(isset($row['roll_length']) ? $row['roll_length'] : (isset($row['rollLength']) ? $row['rollLength'] : 0));
@@ -1486,9 +1487,7 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
             ));
 
             for ($r = 0; $r < $qtyRolls; $r++) {
-                if ($r === 0 || ($r % 10) === 0) {
-                    integrationAssertReceiptAbortEpochUnchanged($db, $receiptAbortEpoch);
-                }
+                integrationAssertReceiptAbortEpochUnchanged($db, $receiptAbortEpoch, $abortEpochStmt);
 
                 $effectiveRollPrice = ($deliveryPricePerRoll > 0 ? $deliveryPricePerRoll : $pricePerRoll);
                 $costPerMeter = $rollLength > 0 ? ($effectiveRollPrice / $rollLength) : 0;

@@ -51,14 +51,39 @@ function integrationBumpStockAbortEpoch(PDO $db)
 }
 
 /**
+ * Быстрое чтение счётчика прерывания без ensureAppSettingsTable (иначе в цикле на тысячи рулонов
+ * тысячи раз выполняются CREATE TABLE IF NOT EXISTS из getAppSetting — «залипание»).
+ *
+ * @return int
+ */
+function integrationReceiptAbortEpochReadBare(PDO $db)
+{
+    $stmt = $db->prepare('SELECT `value` FROM app_settings WHERE `key` = ? LIMIT 1');
+    $stmt->execute(array(integrationStockAbortEpochSettingsKey()));
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$row || !isset($row['value'])) {
+        return 0;
+    }
+    return (int)trim((string)$row['value']);
+}
+
+/**
  * Вызвать из долгого прихода: если эпоха изменилась (настройки сохранили в другом запросе) — прервать и откатить транзакцию.
  *
+ * @param PDOStatement|null $prepared если передан уже prepare('SELECT …') — переиспользуем (ещё меньше накладных расходов на рулон).
  * @param int $epochAtStart
  * @throws Exception
  */
-function integrationAssertReceiptAbortEpochUnchanged(PDO $db, $epochAtStart)
+function integrationAssertReceiptAbortEpochUnchanged(PDO $db, $epochAtStart, $prepared = null)
 {
-    $now = integrationGetStockAbortEpoch($db);
+    if ($prepared !== null && is_object($prepared)) {
+        $prepared->execute(array(integrationStockAbortEpochSettingsKey()));
+        $row = $prepared->fetch(PDO::FETCH_ASSOC);
+        $now = (!$row || !isset($row['value'])) ? 0 : (int)trim((string)$row['value']);
+        $prepared->closeCursor();
+    } else {
+        $now = integrationReceiptAbortEpochReadBare($db);
+    }
     if ($now !== (int)$epochAtStart) {
         throw new Exception('Приход прерван: изменены настройки интеграции (пауза / разрешение прихода) или нажато «Прервать приход». Повторите при необходимости.');
     }
