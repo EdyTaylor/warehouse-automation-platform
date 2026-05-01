@@ -357,9 +357,51 @@ function queueDealForWarehouse($db, $data) {
                 continue;
             }
 
-            $stmt = $db->prepare("SELECT id FROM products WHERE b24_product_id = ?");
-            $stmt->execute([$b24_id]);
-            $product = $stmt->fetch(PDO::FETCH_ASSOC);
+            $product = null;
+            if ($b24_id > 0) {
+                $stmt = $db->prepare("
+                    SELECT id, b24_product_id, roll_length, price_per_meter, price_1_4, price_5_9, price_10_19, price_20_plus
+                    FROM products
+                    WHERE b24_product_id = ?
+                    LIMIT 1
+                ");
+                $stmt->execute([$b24_id]);
+                $product = $stmt->fetch(PDO::FETCH_ASSOC);
+            }
+
+            if (!$product && trim((string)$name) !== '') {
+                // Фолбэк: если у локального товара тот же name и b24_product_id пустой — привязываем, а не создаём дубль.
+                $nameStmt = $db->prepare("
+                    SELECT id, b24_product_id, roll_length, price_per_meter, price_1_4, price_5_9, price_10_19, price_20_plus
+                    FROM products
+                    WHERE LOWER(TRIM(name)) = LOWER(TRIM(?))
+                    ORDER BY CASE WHEN COALESCE(b24_product_id, 0) = 0 THEN 0 ELSE 1 END, id ASC
+                    LIMIT 5
+                ");
+                $nameStmt->execute([$name]);
+                $nameMatches = $nameStmt->fetchAll(PDO::FETCH_ASSOC);
+
+                $singleNoB24 = null;
+                $countNoB24 = 0;
+                foreach ($nameMatches as $nm) {
+                    if (intval(isset($nm['b24_product_id']) ? $nm['b24_product_id'] : 0) <= 0) {
+                        $singleNoB24 = $nm;
+                        $countNoB24++;
+                    }
+                }
+
+                if ($countNoB24 === 1 && $singleNoB24) {
+                    $product = $singleNoB24;
+                    if ($b24_id > 0) {
+                        $db->prepare("UPDATE products SET b24_product_id = ? WHERE id = ? AND (b24_product_id IS NULL OR b24_product_id = 0)")
+                            ->execute([$b24_id, intval($singleNoB24['id'])]);
+                        $product['b24_product_id'] = $b24_id;
+                    }
+                } elseif (count($nameMatches) === 1) {
+                    // Единственный матч по имени (даже если b24_product_id уже проставлен).
+                    $product = $nameMatches[0];
+                }
+            }
 
             if (!$product) {
                 $db->prepare("
@@ -378,17 +420,6 @@ function queueDealForWarehouse($db, $data) {
                 );
             } else {
                 $productId = intval($product['id']);
-                $productDetailsStmt = $db->prepare("
-                    SELECT id, roll_length, price_per_meter, price_1_4, price_5_9, price_10_19, price_20_plus
-                    FROM products
-                    WHERE id = ?
-                    LIMIT 1
-                ");
-                $productDetailsStmt->execute([$productId]);
-                $details = $productDetailsStmt->fetch(PDO::FETCH_ASSOC);
-                if ($details) {
-                    $product = $details;
-                }
             }
 
             // If B24 line price is empty, resolve local tier price by roll quantity.

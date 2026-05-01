@@ -1991,7 +1991,7 @@ require 'includes/header.php';
                     <th class="sticky-col sticky-col-select"><input type="checkbox" id="select-all-rows"></th>
                     <th class="sticky-col sticky-col-id">ID</th>
                     <th class="sticky-col sticky-col-name">Название</th>
-                    <th>B24</th>
+                    <th class="b24-id-col">B24 ID</th>
                     <th>Метраж</th>
                     <th>Себест.</th>
                     <th>Доставка</th>
@@ -2027,7 +2027,7 @@ require 'includes/header.php';
                             <span class="product-name-text" title="<?php echo htmlspecialchars(isset($p['name']) ? $p['name'] : '', ENT_QUOTES, 'UTF-8'); ?>"><?php echo htmlspecialchars(isset($p['name']) ? $p['name'] : ''); ?></span>
                             <div class="inline-row-error"></div>
                         </td>
-                        <td><?php echo $b24Id > 0 ? $b24Id : '—'; ?></td>
+                        <td class="b24-id-col"><?php echo $b24Id > 0 ? $b24Id : '—'; ?></td>
                         <td>
                             <span class="cell-view"><?php echo htmlspecialchars((string)$p['roll_length']); ?></span>
                             <input class="form-control cell-edit" data-field="roll_length" type="text" value="<?php echo htmlspecialchars((string)$p['roll_length']); ?>">

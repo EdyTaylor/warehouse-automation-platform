@@ -939,8 +939,14 @@ html[data-theme="dark"] .alert-info {
 .products-table td:nth-child(4),
 .products-table th:nth-child(5),
 .products-table td:nth-child(5) {
-    width: 64px;
-    min-width: 64px;
+    width: 82px;
+    min-width: 82px;
+}
+
+.products-table .b24-id-col {
+    white-space: nowrap;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 0.9em;
 }
 
 .products-table th:nth-child(6),
