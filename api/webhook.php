@@ -533,22 +533,16 @@ function applyDealPaidOrReserveMark($db, $dealId, $dealData) {
 
 function getDealProducts($db, $dealId) {
     require_once __DIR__ . '/bitrix/send.php';
-    
-    $cfg = require __DIR__ . '/bitrix/config.php';
-    $method = isset($cfg['method_urls']['crm.deal.productrows.get']) ? $cfg['method_urls']['crm.deal.productrows.get'] : null;
-    
-    if (!$method) {
-        return [];
-    }
-    
-    $payload = ['id' => $dealId];
+
+    // method_urls в config опционально подменяет URL; если пуст — sendToBitrix сам строит .../crm.deal.productrows.get.json
+    $payload = array('id' => $dealId);
     $resp = sendToBitrix('crm.deal.productrows.get', $payload);
     
     if (!is_array($resp) || isset($resp['error'])) {
         return [];
     }
     
-    $products = [];
+    $products = array();
     $rows = isset($resp['result']) && is_array($resp['result']) ? $resp['result'] : array();
     foreach ($rows as $item) {
         $productId = intval(isset($item['PRODUCT_ID']) ? $item['PRODUCT_ID'] : 0);
@@ -557,12 +551,12 @@ function getDealProducts($db, $dealId) {
         $name = isset($item['PRODUCT_NAME']) ? $item['PRODUCT_NAME'] : '';
         
         if ($productId > 0 && $quantity > 0) {
-            $products[] = [
+            $products[] = array(
                 'id' => $productId,
                 'name' => $name,
                 'quantity' => $quantity,
                 'price' => $price
-            ];
+            );
         }
     }
     
@@ -570,9 +564,9 @@ function getDealProducts($db, $dealId) {
 }
 
 function getDealDetails($dealId) {
-    $resp = sendToBitrix('crm.deal.get', ['id' => $dealId]);
+    $resp = sendToBitrix('crm.deal.get', array('id' => $dealId));
     if (!is_array($resp) || isset($resp['error'])) {
         return [];
     }
-    return isset($resp['result']) && is_array($resp['result']) ? $resp['result'] : [];
+    return isset($resp['result']) && is_array($resp['result']) ? $resp['result'] : array();
 }
