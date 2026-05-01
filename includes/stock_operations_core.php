@@ -413,6 +413,10 @@ function extractBitrixErrorText($resp) {
     return '';
 }
 
+function stockReceiptShouldPushCrmCatalogPrice($db) {
+    return trim((string)getAppSetting($db, 'stock_receipt_push_crm_catalog_price', '0')) === '1';
+}
+
 function forceCreateStockCloneProduct($db, $localProductId, $currentName, $pricePerMeter) {
     $baseName = trim((string)$currentName);
     if ($baseName === '') {
@@ -426,7 +430,7 @@ function forceCreateStockCloneProduct($db, $localProductId, $currentName, $price
         'NAME' => $cloneName,
         'TYPE' => 1
     );
-    if (floatval($pricePerMeter) > 0) {
+    if (stockReceiptShouldPushCrmCatalogPrice($db) && floatval($pricePerMeter) > 0) {
         $fields['PRICE'] = floatval($pricePerMeter);
     }
     $createResp = sendToBitrix('crm.product.add', array('fields' => $fields));
@@ -533,7 +537,13 @@ function ensureUsableB24ProductId($db, $localProductId, $b24ProductId, $productN
         return $id;
     }
 
-    // Hard fallback: create a dedicated stock-compatible product and remap local link.
+    /** По умолчанию без клонов «… [stock]» — они плодят дубликаты в каталоге. Включить: app_settings stock_b24_clone_on_type_mismatch = 1 */
+    $allowStockClone = trim((string)getAppSetting($db, 'stock_b24_clone_on_type_mismatch', '0')) === '1';
+    if (!$allowStockClone) {
+        return $id;
+    }
+
+    // Hard fallback: создать складской клон только если включено явно выше.
     $newName = trim((string)$productName);
     if ($newName === '') {
         $newName = 'Товар #' . intval($localProductId);
@@ -542,7 +552,7 @@ function ensureUsableB24ProductId($db, $localProductId, $b24ProductId, $productN
         'NAME' => $newName . ' [stock]',
         'TYPE' => 1
     );
-    if (floatval($pricePerMeter) > 0) {
+    if (stockReceiptShouldPushCrmCatalogPrice($db) && floatval($pricePerMeter) > 0) {
         $createFields['PRICE'] = floatval($pricePerMeter);
     }
     $createResp = sendToBitrix('crm.product.add', array('fields' => $createFields));
@@ -600,21 +610,24 @@ function conductAndEnsurePosted($db, $b24DocId, $docType, $supplierName) {
     }
 
     if ($conductError !== '' && stripos($conductError, 'Неверный тип товара') !== false) {
-        $invalidB24Id = parseInvalidProductIdFromConductError($conductError);
-        if ($invalidB24Id > 0) {
-            $prodStmt = $db->prepare("SELECT id, name, price_per_meter FROM products WHERE b24_product_id = ? LIMIT 1");
-            $prodStmt->execute(array($invalidB24Id));
-            $localProd = $prodStmt->fetch(PDO::FETCH_ASSOC);
-            if ($localProd) {
-                $newB24Id = forceCreateStockCloneProduct(
-                    $db,
-                    intval($localProd['id']),
-                    isset($localProd['name']) ? $localProd['name'] : '',
-                    floatval(isset($localProd['price_per_meter']) ? $localProd['price_per_meter'] : 0)
-                );
-                if ($newB24Id > 0) {
-                    replaceInvalidElementInB24Document($db, $b24DocId, $invalidB24Id, $newB24Id, $docType);
-                    $conductResp = sendToBitrix('catalog.document.conduct', array('id' => intval($b24DocId)));
+        /** По умолчанию не создаём [stock]-клон при проведении. Включить: stock_b24_conduct_stock_clone_fallback = 1 */
+        if (trim((string)getAppSetting($db, 'stock_b24_conduct_stock_clone_fallback', '0')) === '1') {
+            $invalidB24Id = parseInvalidProductIdFromConductError($conductError);
+            if ($invalidB24Id > 0) {
+                $prodStmt = $db->prepare("SELECT id, name, price_per_meter FROM products WHERE b24_product_id = ? LIMIT 1");
+                $prodStmt->execute(array($invalidB24Id));
+                $localProd = $prodStmt->fetch(PDO::FETCH_ASSOC);
+                if ($localProd) {
+                    $newB24Id = forceCreateStockCloneProduct(
+                        $db,
+                        intval($localProd['id']),
+                        isset($localProd['name']) ? $localProd['name'] : '',
+                        floatval(isset($localProd['price_per_meter']) ? $localProd['price_per_meter'] : 0)
+                    );
+                    if ($newB24Id > 0) {
+                        replaceInvalidElementInB24Document($db, $b24DocId, $invalidB24Id, $newB24Id, $docType);
+                        $conductResp = sendToBitrix('catalog.document.conduct', array('id' => intval($b24DocId)));
+                    }
                 }
             }
         }
@@ -1305,7 +1318,7 @@ function ensureProductInBitrix($db, $product, $pricePerMeter) {
             'id' => $b24ProductId,
             'fields' => array('NAME' => $productName)
         );
-        if ($pricePerMeter > 0) {
+        if (stockReceiptShouldPushCrmCatalogPrice($db) && $pricePerMeter > 0) {
             $payload['fields']['PRICE'] = $pricePerMeter;
         }
         sendToBitrix('crm.product.update', $payload);
@@ -1313,7 +1326,7 @@ function ensureProductInBitrix($db, $product, $pricePerMeter) {
     }
 
     $createPayload = array('fields' => array('NAME' => $productName));
-    if ($pricePerMeter > 0) {
+    if (stockReceiptShouldPushCrmCatalogPrice($db) && $pricePerMeter > 0) {
         $createPayload['fields']['PRICE'] = $pricePerMeter;
     }
     $resp = sendToBitrix('crm.product.add', $createPayload);

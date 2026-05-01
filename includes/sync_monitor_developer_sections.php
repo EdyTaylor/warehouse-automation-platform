@@ -91,7 +91,8 @@
                 В JSON можно добавить ключ <code>&quot;local_only&quot;: true</code>; галочка тоже задаёт режим локально только.
                 При <strong>паузе синхронизации</strong> приход создаёт рулоны только если в блоке «Пауза» включено <strong>«Разрешить локальный приход при паузе»</strong> и здесь отмечено «только локально» (или в JSON есть <code>local_only</code>).
                 Если у локальной позиции нет привязки к Битриксу (<code>b24_product_id</code>), перед созданием новой карточки приложение ищет в CRM товар с <strong>тем же именем</strong>, чтобы не плодить дубликаты; отключить: в <code>app_settings</code> ключ <code>stock_receipt_link_b24_by_exact_name</code> = <code>0</code>.
-                Отдельно дубликаты с суффиксом <strong>[stock]</strong> могут создаваться, когда Битрикс не принимает тип товара в складском документе (логика <code>ensureUsableB24ProductId</code>): тогда нужен складской тип товара в каталоге.
+                Отдельно суффикс <strong>[stock]</strong>: раньше создавался при несовпадении типа товара в CRM со складским. Сейчас по умолчанию <strong>клоны отключены</strong> (<code>app_settings</code>): <code>stock_b24_clone_on_type_mismatch</code>=<code>0</code>; включить старое поведение → <code>1</code>. При проведении документа клон через «Неверный тип товара» выключен: <code>stock_b24_conduct_stock_clone_fallback</code>=<code>0</code> (включить → <code>1</code>).
+                Розничную <strong>PRICE</strong> в карточке CRM при приходе по умолчанию <strong>не трогаем</strong> (<code>stock_receipt_push_crm_catalog_price</code>=<code>0</code>) — иначе закуп за метр подменял каталожную цену. Пушить цену из прихода снова → <code>1</code>.
             </p>
             <?php if ($bulkReceiptUiDefault): ?>
                 <div class="alert alert-info">
