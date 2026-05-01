@@ -1,0 +1,13 @@
+# Сгенерировано скриптами (не коммитить)
+bulk_receipt_from_llumar.generated.json
+bulk_receipt_from_llumar.kgs.snapshot.json
+bulk_receipt_from_llumar.run_result.json
+products_full_import_prices_usd_x88.sql
+products_prices_usd_x88_updates.sql
+products_prices_usd_x88_review.csv
+products_usd_x88_comparison_for_feedback.csv
+products_usd_x88_excel_rows_not_in_database.csv
+bulk_receipt_from_llumar_skipped.csv
+
+# Распакованный XLSX (тяжёлый; положить локально из LLumar.xlsx)
+llumar_xlsx/
