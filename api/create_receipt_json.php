@@ -5,12 +5,22 @@
  * Строки без привязки к прайсу LLumar: укажите b24_product_id (ID товара в каталоге Б24), qty_rolls,
  * roll_length, цены за рулон; product_id можно не задавать — локальная запись products создастся/найдётся сама.
  *
- * Безопасность: ключ app_settings stock_receipt_api_secret, заголовок X-Stock-Receipt-Secret (или ?secret= для отладки).
+ * Безопасность: ключ app_settings stock_receipt_api_secret (задаётся в sync_monitor.php), заголовок
+ * X-Stock-Receipt-Secret или для отладки тот же ключ в query ?secret=
  *
+ * Важно: только POST с телом JSON. Обычный GET из адресной строки не выполнит приход (будет 405).
+ *
+ * Пример curl (Linux / Git Bash):
  *   curl -X POST "https://ваш-сайт/api/create_receipt_json.php" \
  *     -H "Content-Type: application/json; charset=utf-8" \
  *     -H "X-Stock-Receipt-Secret: ВАШ_КЛЮЧ" \
- *     -d @example/new/bulk_receipt_once_b24.example.json
+ *     --data-binary @example/new/bulk_receipt_from_llumar.generated.json
+ *
+ * PowerShell:
+ *   $u = "https://ваш-сайт/api/create_receipt_json.php"
+ *   $k = "ВАШ_КЛЮЧ"
+ *   $body = Get-Content -Raw -Encoding UTF8 "example\new\bulk_receipt_from_llumar.generated.json"
+ *   Invoke-RestMethod -Uri $u -Method Post -Body $body -ContentType "application/json; charset=utf-8" -Headers @{ "X-Stock-Receipt-Secret" = $k }
  */
 
 ini_set('display_errors', 0);

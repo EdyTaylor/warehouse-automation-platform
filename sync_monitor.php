@@ -120,6 +120,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             setAppSetting($db, 'usd_to_kgs_rate', (string)$usdToKgsRate);
             setAppSetting($db, 'stock_sync_store_id', (string)$stockSyncStoreId);
             setAppSetting($db, 'sync_cycle_chunk', (string)$syncCycleChunk);
+            $receiptSecretNew = isset($_POST['stock_receipt_api_secret']) ? trim((string)$_POST['stock_receipt_api_secret']) : '';
+            if ($receiptSecretNew !== '') {
+                setAppSetting($db, 'stock_receipt_api_secret', $receiptSecretNew);
+            }
             $successMsg = 'Настройки интеграции сохранены.';
         } catch (Exception $e) {
             $errorMsg = 'Не удалось сохранить настройки: ' . $e->getMessage();
@@ -127,7 +131,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     }
 }
 
+$stockReceiptSecretStored = trim((string)getAppSetting($db, 'stock_receipt_api_secret', ''));
+
 $integrationSettings = array(
+    'stock_receipt_secret_set' => ($stockReceiptSecretStored !== ''),
     'default_store_from_id' => getAppSetting($db, 'default_store_from_id', '1'),
     'default_store_to_id' => getAppSetting($db, 'default_store_to_id', '1'),
     'default_responsible_id' => getAppSetting($db, 'default_responsible_id', '1'),
@@ -486,6 +493,23 @@ $integrationSyncPaused = integrationAllSyncPaused($db);
                     <div class="form-group">
                         <label>Размер шага автосинка (5-100)</label>
                         <input class="input" type="number" min="5" max="100" name="sync_cycle_chunk" value="<?= (int)$integrationSettings['sync_cycle_chunk'] ?>">
+                    </div>
+                    <div class="form-group warehouse-filter-item-wide">
+                        <label>Секрет JSON-прихода (<code>stock_receipt_api_secret</code>)</label>
+                        <input class="input" type="password" name="stock_receipt_api_secret" value="" autocomplete="new-password"
+                            placeholder="<?= !empty($integrationSettings['stock_receipt_secret_set']) ? 'Оставьте пустым, чтобы не менять текущий ключ' : 'Задайте длинную случайную строку и сохраните' ?>">
+                        <p class="text-muted" style="margin-top:6px;margin-bottom:0;">
+                            Нужен для <code>api/create_receipt_json.php</code>: один <strong>POST</strong> с телом JSON прихода → запись в приложение + документ в Б24.
+                            <?php if (!empty($integrationSettings['stock_receipt_secret_set'])): ?>
+                                Ключ уже задан; новое значение перезапишет его.
+                            <?php else: ?>
+                                Пока не задан — API прихода отвечает 503.
+                            <?php endif; ?>
+                        </p>
+                        <pre style="margin-top:10px;white-space:pre-wrap;font-size:12px;padding:10px;background:var(--background-color,#f5f6fa);border-radius:6px;border:1px solid var(--border-color);">curl -X POST "<?= htmlspecialchars((isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 'https' : 'http') . '://' . (isset($_SERVER['HTTP_HOST']) ? $_SERVER['HTTP_HOST'] : 'ваш-хост')) ?>/api/create_receipt_json.php" \
+  -H "Content-Type: application/json; charset=utf-8" \
+  -H "X-Stock-Receipt-Secret: ВАШ_СЕКРЕТ_ИЗ_ПОЛЯ_ВЫШЕ" \
+  --data-binary @example/new/bulk_receipt_from_llumar.generated.json</pre>
                     </div>
                 </div>
                 <button class="btn btn-success" type="submit">Сохранить настройки</button>
