@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 /** Shared: stock tables, Bitrix document sync, receipt product helpers. */
 
 require_once __DIR__ . '/../functions/app_settings.php';
@@ -554,6 +554,9 @@ function parseBitrixListRows($resp) {
     }
     if (isset($rows['documents']) && is_array($rows['documents'])) {
         return $rows['documents'];
+    }
+    if (isset($rows['products']) && is_array($rows['products'])) {
+        return $rows['products'];
     }
     if (is_array($rows)) {
         return $rows;
@@ -1301,13 +1304,35 @@ function stockB24ConductBulkRepairInvalidProductTypes(PDO $db, $b24DocId, $docTy
     $summary['ids_parsed'] = $ids;
 
     $allowStockClone = trim((string)getAppSetting($db, 'stock_b24_clone_on_type_mismatch', '0')) === '1';
-    $autoFork = trim((string)getAppSetting($db, 'stock_b24_auto_fork_when_type_repair_fails', '1')) === '1';
+    $autoFork = trim((string)getAppSetting($db, 'stock_b24_auto_fork_when_type_repair_fails', '0')) === '1';
     $tryFork = $allowStockClone || $autoFork;
 
     foreach ($ids as $invalidBid) {
         $invalidBid = intval($invalidBid);
         if ($invalidBid <= 0) {
             continue;
+        }
+
+        $prodStmt = $db->prepare("SELECT id, name, price_per_meter FROM products WHERE b24_product_id = ? LIMIT 1");
+        $prodStmt->execute(array($invalidBid));
+        $localProd = $prodStmt->fetch(PDO::FETCH_ASSOC);
+        $locId = ($localProd && isset($localProd['id'])) ? intval($localProd['id']) : 0;
+        $hintNm = ($localProd && isset($localProd['name'])) ? (string)$localProd['name'] : '';
+
+        /** Родитель торгового каталога → SKU из того же дерева без новых crm.product */
+        if (trim((string)getAppSetting($db, 'stock_b24_resolve_catalog_type3_parents', '1')) !== '0') {
+            $offerId = stockOperationsResolveB24CatalogParentToOfferSku($db, $locId, $invalidBid, $hintNm);
+            if ($offerId > 0 && intval($offerId) !== intval($invalidBid)) {
+                if (replaceInvalidElementInB24Document($db, $b24DocId, $invalidBid, intval($offerId), $docType)) {
+                    $summary['replaced_pairs'][] = array(
+                        'from' => intval($invalidBid),
+                        'to' => intval($offerId),
+                        'reason' => 'catalog_parent_to_offer_sku'
+                    );
+                    pauseBetweenB24DocumentLineAdds($db);
+                    continue;
+                }
+            }
         }
 
         // Сначала тот же путь, что при создании прихода: поправить TYPE у существующей карточки (без дублей в каталоге).
@@ -1321,10 +1346,6 @@ function stockB24ConductBulkRepairInvalidProductTypes(PDO $db, $b24DocId, $docTy
             $summary['skipped_ids'][] = $invalidBid;
             continue;
         }
-
-        $prodStmt = $db->prepare("SELECT id, name, price_per_meter FROM products WHERE b24_product_id = ? LIMIT 1");
-        $prodStmt->execute(array($invalidBid));
-        $localProd = $prodStmt->fetch(PDO::FETCH_ASSOC);
 
         $newB24Id = 0;
         if ($localProd && is_array($localProd)) {
@@ -1422,6 +1443,15 @@ function getB24ProductType($b24ProductId) {
     }
     $catalogGetResp = sendToBitrix('catalog.product.get', array('id' => $id));
     if (is_array($catalogGetResp) && !isset($catalogGetResp['error']) && isset($catalogGetResp['result']) && is_array($catalogGetResp['result'])) {
+        if (isset($catalogGetResp['result']['product']) && is_array($catalogGetResp['result']['product'])) {
+            $cp = $catalogGetResp['result']['product'];
+            if (isset($cp['type'])) {
+                return intval($cp['type']);
+            }
+            if (isset($cp['TYPE'])) {
+                return intval($cp['TYPE']);
+            }
+        }
         if (isset($catalogGetResp['result']['type'])) {
             return intval($catalogGetResp['result']['type']);
         }
@@ -1529,10 +1559,294 @@ function stockB24RepairAllLineCatalogProductTypesForDocument(PDO $db, $b24DocId)
     return $out;
 }
 
+/**
+ * Имя для сопоставления с торговым предложением Б24 (убираем лишние пробелы, нижний регистр).
+ *
+ * @param string $name
+ * @return string
+ */
+function stockNormalizeProductNameForB24OfferMatch($name) {
+    $name = trim(preg_replace('/\s+/u', ' ', (string)$name));
+    if ($name === '') {
+        return '';
+    }
+    if (function_exists('mb_strtolower')) {
+        return mb_strtolower($name, 'UTF-8');
+    }
+    return strtolower($name);
+}
+
+/**
+ * @param array|null $catalogGetResp как ответ sendToBitrix('catalog.product.get', ...)
+ * @return array|null
+ */
+function bitrixCatalogProductRowFromGetResponse($catalogGetResp) {
+    if (!is_array($catalogGetResp) || isset($catalogGetResp['error']) || !isset($catalogGetResp['result'])) {
+        return null;
+    }
+    $r = $catalogGetResp['result'];
+    if (isset($r['product']) && is_array($r['product'])) {
+        return $r['product'];
+    }
+    if (is_array($r) && isset($r['id'])) {
+        return $r;
+    }
+    return null;
+}
+
+/**
+ * Все SKU (офферы) родителя в каталоге: catalog.product.list с пагинацией по next.
+ *
+ * @param int $parentCatalogId
+ * @param int $iblockId из карточки родителя, 0 если нет
+ * @return array список ассоциативных строк позиций каталога
+ */
+function stockBitrixCatalogCollectChildOffersForParent($parentCatalogId, $iblockId) {
+    $parentCatalogId = intval($parentCatalogId);
+    if ($parentCatalogId <= 0) {
+        return array();
+    }
+    $iblockId = intval($iblockId);
+    $filterVariants = array();
+    if ($iblockId > 0) {
+        $filterVariants[] = array('parentId' => $parentCatalogId, 'iblockId' => $iblockId);
+        $filterVariants[] = array('parentProductId' => $parentCatalogId, 'iblockId' => $iblockId);
+        $filterVariants[] = array('PARENT_ID' => $parentCatalogId, 'iblockId' => $iblockId);
+    }
+    $filterVariants[] = array('parentId' => $parentCatalogId);
+    $filterVariants[] = array('parentProductId' => $parentCatalogId);
+    $filterVariants[] = array('PARENT_ID' => $parentCatalogId);
+
+    foreach ($filterVariants as $filt) {
+        $seen = array();
+        $accum = array();
+        $start = 0;
+        $noProgress = false;
+        for ($page = 0; $page < 80 && !$noProgress; $page++) {
+            $listResp = sendToBitrix('catalog.product.list', array(
+                'filter' => $filt,
+                'select' => array('id', 'iblockId', 'name', 'type', 'parentId'),
+                'start' => $start
+            ));
+            if (!is_array($listResp) || isset($listResp['error'])) {
+                break;
+            }
+            $rows = parseBitrixListRows($listResp);
+            if (empty($rows) || !is_array($rows)) {
+                break;
+            }
+            $added = false;
+            foreach ($rows as $row) {
+                if (!is_array($row)) {
+                    continue;
+                }
+                $rid = intval(isset($row['id']) ? $row['id'] : 0);
+                if ($rid <= 0 || $rid === $parentCatalogId) {
+                    continue;
+                }
+                if (isset($seen[$rid])) {
+                    continue;
+                }
+                $seen[$rid] = true;
+                $accum[] = $row;
+                $added = true;
+            }
+            if (!$added) {
+                break;
+            }
+            $next = null;
+            if (isset($listResp['result']['next'])) {
+                $next = intval($listResp['result']['next']);
+            }
+            if ($next !== null && $next > $start) {
+                $start = $next;
+            } else {
+                $start += intval(count($rows));
+            }
+            if ($next === null && count($rows) < 38) {
+                break;
+            }
+        }
+        if (!empty($accum)) {
+            return $accum;
+        }
+    }
+
+    return array();
+}
+
+/**
+ * Выбрать один id оффера при нескольких: точное совпадение имени подсказке или имени родителя.
+ *
+ * @param string $parentName
+ * @param string $hintName из приложения или пусто
+ * @param array $candidates строки каталога
+ * @return int ид оффера; 0 = не нашли безопасно
+ */
+function stockPickDeterministicOfferIdFromCandidates($parentName, $hintName, array $candidates) {
+    if (empty($candidates)) {
+        return 0;
+    }
+    $byId = array();
+    foreach ($candidates as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        $rid = intval(isset($row['id']) ? $row['id'] : 0);
+        if ($rid <= 0) {
+            continue;
+        }
+        $nm = isset($row['name']) ? trim((string)$row['name']) : '';
+        $byId[$rid] = array('name' => $nm);
+    }
+    if (empty($byId)) {
+        return 0;
+    }
+
+    $keysId = array_keys($byId);
+    if (count($keysId) === 1) {
+        return intval($keysId[0]);
+    }
+
+    $hn = stockNormalizeProductNameForB24OfferMatch($hintName);
+    $pn = stockNormalizeProductNameForB24OfferMatch($parentName);
+    $targetFirst = ($hn !== '' ? $hn : $pn);
+    if ($targetFirst !== '') {
+        $hitsKey = array();
+        foreach ($byId as $rid => $info) {
+            if (stockNormalizeProductNameForB24OfferMatch($info['name']) === $targetFirst) {
+                $hitsKey[intval($rid)] = true;
+            }
+        }
+        if (count($hitsKey) === 1) {
+            foreach (array_keys($hitsKey) as $rk) {
+                return intval($rk);
+            }
+        }
+    }
+
+    if ($hn !== '' && $pn !== '' && $hn !== $pn) {
+        $hitsP = array();
+        foreach ($byId as $rid => $info) {
+            if (stockNormalizeProductNameForB24OfferMatch($info['name']) === $pn) {
+                $hitsP[intval($rid)] = true;
+            }
+        }
+        if (count($hitsP) === 1) {
+            foreach (array_keys($hitsP) as $rk) {
+                return intval($rk);
+            }
+        }
+    }
+
+    return 0;
+}
+
+/** Тип родителя «товар с предложениями» в торговом каталоге REST (обычно 3). Через app_settings stock_b24_catalog_parent_offer_type можно переопределить. */
+function stockOperationsBitrixCatalogParentWithOffersTypeValue(PDO $db) {
+    $v = intval(getAppSetting($db, 'stock_b24_catalog_parent_offer_type', '3'));
+    if ($v <= 0) {
+        return 3;
+    }
+    return $v;
+}
+
+/**
+ * Если b24_catalog_id указывает на родителя type=3 без пригодности в СУ строкой — найти SKU и перепривязать products.b24_product_id.
+ *
+ * Выключить: app_settings stock_b24_resolve_catalog_type3_parents = 0
+ *
+ * @param PDO $db
+ * @param int $localProductId 0 если обновление локальной строки каталога не нужно (только узнать id для документа)
+ * @param int $b24CatalogId
+ * @param string $hintName имя строки приложения под сопоставление с оффером
+ * @return int финальный числовой id для elementId складского документа / crm связки
+ */
+function stockOperationsResolveB24CatalogParentToOfferSku($db, $localProductId, $b24CatalogId, $hintName) {
+    $idIn = intval($b24CatalogId);
+    if ($idIn <= 0) {
+        return 0;
+    }
+    if (trim((string)getAppSetting($db, 'stock_b24_resolve_catalog_type3_parents', '1')) === '0') {
+        return $idIn;
+    }
+
+    $getResp = sendToBitrix('catalog.product.get', array('id' => $idIn));
+    $row = bitrixCatalogProductRowFromGetResponse($getResp);
+    if ($row === null || !is_array($row)) {
+        return $idIn;
+    }
+    $ptype = null;
+    if (isset($row['type'])) {
+        $ptype = intval($row['type']);
+    } elseif (isset($row['TYPE'])) {
+        $ptype = intval($row['TYPE']);
+    }
+    $parentMust = stockOperationsBitrixCatalogParentWithOffersTypeValue($db);
+    if ($ptype === null || intval($ptype) !== intval($parentMust)) {
+        return $idIn;
+    }
+
+    $parentName = '';
+    if (isset($row['name'])) {
+        $parentName = trim((string)$row['name']);
+    }
+    $iblockChild = intval(isset($row['iblockId']) ? $row['iblockId'] : (isset($row['iblock']) ? $row['iblock'] : 0));
+
+    $cands = stockBitrixCatalogCollectChildOffersForParent($idIn, $iblockChild);
+    if (empty($cands)) {
+        return $idIn;
+    }
+
+    $picked = stockPickDeterministicOfferIdFromCandidates($parentName, $hintName, $cands);
+    /** Явное «первая SKU по мин. id»: app_settings stock_b24_offer_pick_min_id_fallback = 1 */
+    if ($picked <= 0 && trim((string)getAppSetting($db, 'stock_b24_offer_pick_min_id_fallback', '0')) === '1') {
+        $mine = null;
+        foreach ($cands as $cr) {
+            if (!is_array($cr)) {
+                continue;
+            }
+            $rid = intval(isset($cr['id']) ? $cr['id'] : 0);
+            if ($rid <= 0) {
+                continue;
+            }
+            if ($mine === null || $rid < $mine) {
+                $mine = $rid;
+            }
+        }
+        if ($mine !== null) {
+            $picked = intval($mine);
+        }
+    }
+    if ($picked <= 0 || $picked === $idIn) {
+        return $idIn;
+    }
+
+    $localPid = intval($localProductId);
+    if ($localPid > 0) {
+        $db->prepare('UPDATE products SET b24_product_id = ? WHERE id = ?')
+            ->execute(array($picked, $localPid));
+    }
+
+    return $picked;
+}
+
 function ensureUsableB24ProductId($db, $localProductId, $b24ProductId, $productName, $pricePerMeter) {
     $id = intval($b24ProductId);
     if ($id <= 0) {
         return 0;
+    }
+
+    if (trim((string)getAppSetting($db, 'stock_b24_resolve_catalog_type3_parents', '1')) !== '0') {
+        $mapped = stockOperationsResolveB24CatalogParentToOfferSku(
+            $db,
+            intval($localProductId),
+            $id,
+            isset($productName) ? (string)$productName : ''
+        );
+        if ($mapped > 0) {
+            $id = intval($mapped);
+        }
     }
 
     if (repairB24ProductTypeToWarehouseInPlace($id) > 0) {
@@ -1540,11 +1854,10 @@ function ensureUsableB24ProductId($db, $localProductId, $b24ProductId, $productN
     }
 
     /**
-     * На части Б24 тип карточки для СУ через REST не переводится — «Неверный тип товара #…» при conduct.
-     * Автоматически создаём crm.product с TYPE=1 (суффикс « [stock]») и записываем в products.b24_product_id — см. forceCreateStockCloneProduct.
-     * Отключить: app_settings stock_b24_auto_fork_when_type_repair_fails = 0 (останется только stock_b24_clone_on_type_mismatch = 1).
+     * Клон « [stock]» — только когда явно включено (по умолчанию выкл.): не засорять каталог дублями.
+     * Автоклон исторически был stock_b24_auto_fork_when_type_repair_fails; явный режим stock_b24_clone_on_type_mismatch.
      */
-    $autoFork = trim((string)getAppSetting($db, 'stock_b24_auto_fork_when_type_repair_fails', '1')) === '1';
+    $autoFork = trim((string)getAppSetting($db, 'stock_b24_auto_fork_when_type_repair_fails', '0')) === '1';
     $allowStockClone = trim((string)getAppSetting($db, 'stock_b24_clone_on_type_mismatch', '0')) === '1';
     if (!$autoFork && !$allowStockClone) {
         return $id;
@@ -2731,6 +3044,14 @@ function ensureProductInBitrix($db, $product, $pricePerMeter) {
     }
 
     if ($b24ProductId > 0) {
+        if (trim((string)getAppSetting($db, 'stock_b24_resolve_catalog_type3_parents', '1')) !== '0') {
+            $resolvedSku = stockOperationsResolveB24CatalogParentToOfferSku($db, $productId, $b24ProductId, $productNameTrim);
+            if ($resolvedSku > 0) {
+                $b24ProductId = intval($resolvedSku);
+                $product['b24_product_id'] = intval($resolvedSku);
+            }
+        }
+
         $fields = array();
         if (stockReceiptShouldPushCrmCatalogName($db) && $productNameTrim !== '' && !stockReceiptIsPlaceholderB24ProductName($productNameTrim)) {
             $fields['NAME'] = $productNameTrim;
