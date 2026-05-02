@@ -29,7 +29,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     } else {
         try {
             $docStmt = $db->prepare("
-                SELECT id, operation_type, doc_number, comment_text, supplier, b24_sync_status, b24_document_id
+                SELECT id, operation_type, doc_number, comment_text, supplier, b24_sync_status, b24_document_id, b24_sync_response
                 FROM stock_operation_docs
                 WHERE id = ?
                 LIMIT 1
@@ -42,6 +42,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             if (!in_array($doc['operation_type'], array('receipt', 'writeoff'), true)) {
                 throw new Exception('Повторный синк доступен только для прихода и списания.');
             }
+
+            $b24ResolvedId = stockOperationsResolveB24DocumentIdForRetry($db, $doc);
+
             if (intval(isset($doc['b24_document_id']) ? $doc['b24_document_id'] : 0) > 0 && (string)$doc['b24_sync_status'] === 'sent') {
                 throw new Exception('Документ уже синхронизирован в Б24: #' . intval($doc['b24_document_id']));
             }
@@ -58,14 +61,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 throw new Exception('У документа нет строк для синка.');
             }
 
-            if (intval(isset($doc['b24_document_id']) ? $doc['b24_document_id'] : 0) > 0) {
+            if ($b24ResolvedId > 0) {
                 $syncResult = addLinesAndConductExistingB24Document(
                     $db,
-                    intval($doc['b24_document_id']),
+                    $b24ResolvedId,
                     (string)$doc['operation_type'],
                     $lineRows,
                     isset($doc['supplier']) ? (string)$doc['supplier'] : ''
                 );
+                if (is_array($syncResult)) {
+                    $syncResult['retry_reused_b24_document_id'] = $b24ResolvedId;
+                    if (intval(isset($doc['b24_document_id']) ? $doc['b24_document_id'] : 0) <= 0) {
+                        $fromJson = stockOperationsExtractB24DocumentIdFromSavedSyncJson(
+                            isset($doc['b24_sync_response']) ? (string)$doc['b24_sync_response'] : ''
+                        );
+                        $syncResult['retry_b24_document_id_source'] =
+                            (intval($fromJson) === $b24ResolvedId) ? 'stored_json' : 'doc_number_lookup';
+                    }
+                }
             } else {
                 $syncResult = syncOperationDocumentToBitrix(
                     $db,

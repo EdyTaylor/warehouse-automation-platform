@@ -278,10 +278,164 @@ function parseBitrixListRows($resp) {
     if (isset($rows['elements']) && is_array($rows['elements'])) {
         return $rows['elements'];
     }
+    if (isset($rows['documents']) && is_array($rows['documents'])) {
+        return $rows['documents'];
+    }
     if (is_array($rows)) {
         return $rows;
     }
     return array();
+}
+
+/**
+ * Рекурсивно вытащить id складского документа из сохранённого JSON ответа (частый случай:
+ * документ уже создан в Б24, но b24_document_id в MySQL так и не записали после сбоя).
+ *
+ * @param string $json
+ * @return int
+ */
+function stockOperationsExtractB24DocumentIdFromSavedSyncJson($json) {
+    $s = trim((string)$json);
+    if ($s === '') {
+        return 0;
+    }
+    $dec = json_decode($s, true);
+    if (!is_array($dec)) {
+        return 0;
+    }
+    return stockOperationsExtractB24DocumentIdWalk($dec, 10);
+}
+
+/**
+ * @param array $node
+ * @param int $depthLeft
+ * @return int
+ */
+function stockOperationsExtractB24DocumentIdWalk($node, $depthLeft) {
+    if ($depthLeft <= 0 || !is_array($node)) {
+        return 0;
+    }
+    foreach ($node as $k => $v) {
+        if (($k === 'b24_document_id' || $k === 'documentId') && (is_numeric($v) || is_string($v))) {
+            $id = intval($v);
+            if ($id > 0) {
+                return $id;
+            }
+        }
+    }
+    foreach ($node as $v) {
+        if (!is_array($v)) {
+            continue;
+        }
+        $hit = stockOperationsExtractB24DocumentIdWalk($v, $depthLeft - 1);
+        if ($hit > 0) {
+            return $hit;
+        }
+    }
+    return 0;
+}
+
+/**
+ * Уже есть документ склада Б24 с таким номером — чтобы «Повторить» не вызывал document.add второй раз.
+ *
+ * @param PDO $db
+ * @param string $docNumber
+ * @param string $operationType receipt|writeoff
+ * @return int
+ */
+function stockOperationsFindB24DocumentIdByDocNumber($db, $docNumber, $operationType) {
+    $dn = trim((string)$docNumber);
+    if ($dn === '') {
+        return 0;
+    }
+    $b24DocType = '';
+    if ($operationType === 'receipt') {
+        $b24DocType = resolveDocTypeCodeFromBitrix('receipt');
+    } elseif ($operationType === 'writeoff') {
+        $b24DocType = resolveDocTypeCodeFromBitrix('writeoff');
+    }
+
+    // Разные порталы — разные ключи фильтра; перебираем до первого списка с подходящей строкой.
+    $filterVariants = array(
+        array('=docNumber' => $dn),
+        array('docNumber' => $dn),
+        array('DOC_NUMBER' => $dn),
+    );
+
+    foreach ($filterVariants as $filt) {
+        $resp = sendToBitrix('catalog.document.list', array(
+            'filter' => $filt,
+            'select' => array('id', 'docNumber', 'docType', 'status', 'STATUS'),
+            'order' => array('id' => 'DESC'),
+            'start' => 0
+        ));
+        $rows = parseBitrixListRows($resp);
+        if (empty($rows) || !is_array($rows)) {
+            continue;
+        }
+        $batchBest = 0;
+        foreach ($rows as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            $rid = intval(isset($row['id']) ? $row['id'] : (isset($row['ID']) ? $row['ID'] : 0));
+            if ($rid <= 0) {
+                continue;
+            }
+            $rowNum = '';
+            if (isset($row['docNumber'])) {
+                $rowNum = trim((string)$row['docNumber']);
+            } elseif (isset($row['DOC_NUMBER'])) {
+                $rowNum = trim((string)$row['DOC_NUMBER']);
+            } elseif (isset($row['NUMBER'])) {
+                $rowNum = trim((string)$row['NUMBER']);
+            }
+            if ($rowNum !== '' && $rowNum !== $dn) {
+                continue;
+            }
+            $rowDt = '';
+            if (isset($row['docType'])) {
+                $rowDt = trim((string)$row['docType']);
+            } elseif (isset($row['DOC_TYPE'])) {
+                $rowDt = trim((string)$row['DOC_TYPE']);
+            }
+            if ($b24DocType !== '' && $rowDt !== '' && $rowDt !== $b24DocType) {
+                continue;
+            }
+            if ($rid > $batchBest) {
+                $batchBest = $rid;
+            }
+        }
+        if ($batchBest > 0) {
+            return $batchBest;
+        }
+    }
+
+    return 0;
+}
+
+/**
+ * Определить id документа Б24 для кнопки «Повторить»: колонка, JSON ответа, поиск по номеру.
+ *
+ * @param PDO $db
+ * @param array $doc строка stock_operation_docs
+ * @return int
+ */
+function stockOperationsResolveB24DocumentIdForRetry($db, array $doc) {
+    $fromCol = intval(isset($doc['b24_document_id']) ? $doc['b24_document_id'] : 0);
+    if ($fromCol > 0) {
+        return $fromCol;
+    }
+    $fromJson = 0;
+    if (isset($doc['b24_sync_response'])) {
+        $fromJson = stockOperationsExtractB24DocumentIdFromSavedSyncJson((string)$doc['b24_sync_response']);
+    }
+    if ($fromJson > 0) {
+        return $fromJson;
+    }
+    $op = isset($doc['operation_type']) ? (string)$doc['operation_type'] : '';
+    $num = isset($doc['doc_number']) ? (string)$doc['doc_number'] : '';
+    return stockOperationsFindB24DocumentIdByDocNumber($db, $num, $op);
 }
 
 function ensureB24CompanyId($supplierName) {
