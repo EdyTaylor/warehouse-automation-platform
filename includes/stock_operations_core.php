@@ -574,6 +574,61 @@ function stockOperationsResolveB24DocumentIdForRetry($db, array $doc, $strategy 
 }
 
 /**
+ * Выровнять stock_operation_docs.b24_document_id с документом в портале по doc_number.
+ * Сохраняется тот же идентификатор, что в Б24 (поле id в catalog.document.*); внутренний id документа в приложении не меняется.
+ * Обновляем колонку, если: в приложении id пустой; сохранённый id удалён в портале (document.get → not found);
+ * в портале найден более новый id при том же номере (типичный сценарий: удалили черновик и создали заново).
+ * Не меняет b24_sync_status и b24_sync_response.
+ *
+ * Отключить фоновые вызовы на списке: app_settings stock_b24_reconcile_on_doc_list_max = 0
+ *
+ * @param PDO $db
+ * @param array $doc достаточно id, operation_type, doc_number, b24_document_id
+ * @return bool true если выполнен UPDATE в MySQL
+ */
+function stockOperationsReconcileStoredB24DocumentIdWithPortal(PDO $db, array &$doc) {
+    $docLocalId = intval(isset($doc['id']) ? $doc['id'] : 0);
+    if ($docLocalId <= 0) {
+        return false;
+    }
+    $op = isset($doc['operation_type']) ? (string)$doc['operation_type'] : '';
+    if ($op !== 'receipt' && $op !== 'writeoff') {
+        return false;
+    }
+    $num = trim(isset($doc['doc_number']) ? (string)$doc['doc_number'] : '');
+    if ($num === '') {
+        return false;
+    }
+    $portalId = stockOperationsFindB24DocumentIdByDocNumber($db, $num, $op);
+    if ($portalId <= 0) {
+        return false;
+    }
+    if (bitrixCatalogDocumentPresenceById($portalId)['kind'] !== 'exists') {
+        return false;
+    }
+    $storedCol = intval(isset($doc['b24_document_id']) ? $doc['b24_document_id'] : 0);
+    $storedKind = 'none';
+    if ($storedCol > 0) {
+        $storedKind = bitrixCatalogDocumentPresenceById($storedCol)['kind'];
+    }
+    $need = false;
+    if ($storedCol <= 0) {
+        $need = true;
+    } elseif ($storedKind === 'missing') {
+        $need = true;
+    } elseif ($storedCol !== $portalId && $portalId > $storedCol && $storedKind === 'exists') {
+        $need = true;
+    }
+    if (!$need) {
+        return false;
+    }
+    $st = $db->prepare('UPDATE stock_operation_docs SET b24_document_id = ? WHERE id = ?');
+    $st->execute(array(intval($portalId), $docLocalId));
+    $doc['b24_document_id'] = intval($portalId);
+    return true;
+}
+
+/**
  * После синка складского документа пробросить локальное имя и розничную цену в crm.product (упрощённо: один id товара, без SKU-офферов).
  *
  * @param PDO $db
@@ -809,6 +864,45 @@ function bitrixCatalogDocumentGetResultAsRow($resp) {
         return $r['DOCUMENT'];
     }
     return $r;
+}
+
+/**
+ * Проверка существования складского документа в портале по id (preflight перед element.add).
+ * «missing» — только явный ответ REST о несуществующем документе; иные ошибки — «error» (без автосоздания дубликата).
+ *
+ * @param int $b24DocId
+ * @return array kind: exists|missing|error, row?, response?
+ */
+function bitrixCatalogDocumentPresenceById($b24DocId) {
+    $id = intval($b24DocId);
+    if ($id <= 0) {
+        return array('kind' => 'error', 'response' => null);
+    }
+    $payload = array(
+        'id' => $id,
+        'select' => array('id', 'status', 'STATUS', 'docNumber', 'docType'),
+    );
+    $resp = sendToBitrix('catalog.document.get', $payload);
+    if (!is_array($resp) || isset($resp['error'])) {
+        $resp = sendToBitrix('catalog.document.get', array('id' => $id));
+    }
+    if (!is_array($resp)) {
+        return array('kind' => 'error', 'response' => $resp);
+    }
+    if (isset($resp['error'])) {
+        $code = (string)$resp['error'];
+        $desc = isset($resp['error_description']) ? (string)$resp['error_description'] : '';
+        $d = function_exists('mb_strtolower') ? mb_strtolower($desc, 'UTF-8') : strtolower($desc);
+        if ($code === 'ERROR_DOCUMENT_STATUS' && strpos($d, 'not found') !== false) {
+            return array('kind' => 'missing', 'response' => $resp);
+        }
+        return array('kind' => 'error', 'response' => $resp);
+    }
+    $row = bitrixCatalogDocumentGetResultAsRow($resp);
+    if ($row !== null && is_array($row)) {
+        return array('kind' => 'exists', 'row' => $row, 'response' => $resp);
+    }
+    return array('kind' => 'error', 'response' => $resp);
 }
 
 function stockReceiptShouldPushCrmCatalogPrice($db) {
@@ -1152,7 +1246,9 @@ function getB24ProductType($b24ProductId) {
 }
 
 /**
- * Выставить у существующего товара Б24 тип, допустимый для складского документа (TYPE=1), без создания копий.
+ * Выставить у существующего товара Б24 тип, допустимый для складского документа (CRM: TYPE=1).
+ * В REST «каталог» для catalog_product помечает тип товара как read-only (выставляется платформой);
+ * менять признак «товар для СУ / не услуга» нужно через CRM: crm.product.update — см. структуру catalog_product в доке Bitrix24.
  *
  * @param int $b24ProductId
  * @return int тот же id при успехе, 0 если тип так и не стал 1
@@ -1167,7 +1263,6 @@ function repairB24ProductTypeToWarehouseInPlace($b24ProductId) {
         return $id;
     }
     sendToBitrix('crm.product.update', array('id' => $id, 'fields' => array('TYPE' => 1)));
-    sendToBitrix('catalog.product.update', array('id' => $id, 'fields' => array('type' => 1, 'TYPE' => 1)));
     $afterType = getB24ProductType($id);
     if ($afterType === 1) {
         return $id;
@@ -1948,12 +2043,35 @@ function stockOperationsDispatchB24WarehouseWorker(PDO $db, $docId, $retryStrate
  * @param string $retryStrategy full|portal_by_number_only
  * @return array
  */
-function stockOperationsExecuteB24SyncWithLines(PDO $db, array $doc, array $lineRows, $retryStrategy) {
+function stockOperationsExecuteB24SyncWithLines(PDO $db, array &$doc, array $lineRows, $retryStrategy) {
     $retryStrategy = strtolower(trim((string)$retryStrategy));
     if ($retryStrategy !== 'portal_by_number_only') {
         $retryStrategy = 'full';
     }
+    stockOperationsReconcileStoredB24DocumentIdWithPortal($db, $doc);
     $b24ResolvedId = stockOperationsResolveB24DocumentIdForRetry($db, $doc, $retryStrategy);
+    $b24StaleRecovery = '';
+    if ($b24ResolvedId > 0) {
+        $presence = bitrixCatalogDocumentPresenceById($b24ResolvedId);
+        if ($presence['kind'] === 'missing') {
+            $b24StaleRecovery = 'b24_document_id_missing_in_portal_preflight';
+            if ($retryStrategy === 'full') {
+                // Колонка/JSON содержали id удалённого черновика: ищем актуальный по doc_number.
+                $fallbackId = stockOperationsResolveB24DocumentIdForRetry($db, $doc, 'portal_by_number_only');
+                if ($fallbackId > 0 && bitrixCatalogDocumentPresenceById($fallbackId)['kind'] === 'exists') {
+                    $b24ResolvedId = $fallbackId;
+                    $b24StaleRecovery .= ' | rebound_portal_by_doc_number_ok';
+                } else {
+                    $b24ResolvedId = 0;
+                    $b24StaleRecovery .= ' | create_new_via_document_add';
+                }
+            } else {
+                $b24ResolvedId = 0;
+                $b24StaleRecovery .= ' | create_new_via_document_add';
+            }
+        }
+    }
+
     $b24ResolvedIdAfterSync = 0;
     if ($b24ResolvedId > 0) {
         $b24ResolvedIdAfterSync = $b24ResolvedId;
@@ -1984,6 +2102,9 @@ function stockOperationsExecuteB24SyncWithLines(PDO $db, array $doc, array $line
     );
     if (is_array($syncResult)) {
         $syncResult['retry_strategy_requested'] = $retryStrategy;
+        if ($b24StaleRecovery !== '') {
+            $syncResult['b24_stale_document_recovery'] = $b24StaleRecovery;
+        }
         if ($b24ResolvedIdAfterSync > 0) {
             $syncResult['retry_reused_b24_document_id'] = $b24ResolvedIdAfterSync;
             if (intval(isset($doc['b24_document_id']) ? $doc['b24_document_id'] : 0) <= 0) {
@@ -2008,13 +2129,32 @@ function stockOperationsExecuteB24SyncWithLines(PDO $db, array $doc, array $line
  * @param array $doc stock_operation_docs
  * @return array как conductAndEnsurePosted
  */
-function stockOperationsExecuteB24ConductOnly(PDO $db, array $doc) {
+function stockOperationsExecuteB24ConductOnly(PDO $db, array &$doc) {
+    stockOperationsReconcileStoredB24DocumentIdWithPortal($db, $doc);
     $b24DocId = stockOperationsResolveB24DocumentIdForRetry($db, $doc, 'full');
-    if ($b24DocId <= 0) {
-        $b24DocId = stockOperationsResolveB24DocumentIdForRetry($db, $doc, 'portal_by_number_only');
+    $b24StaleRecovery = '';
+    if ($b24DocId > 0 && bitrixCatalogDocumentPresenceById($b24DocId)['kind'] === 'missing') {
+        $b24StaleRecovery = 'conduct_only_b24_id_missing_preflight';
+        $fromNum = stockOperationsResolveB24DocumentIdForRetry($db, $doc, 'portal_by_number_only');
+        if ($fromNum > 0 && bitrixCatalogDocumentPresenceById($fromNum)['kind'] === 'exists') {
+            $b24DocId = $fromNum;
+            $b24StaleRecovery .= ' | rebound_portal_by_doc_number_ok';
+        } else {
+            $b24DocId = 0;
+            $b24StaleRecovery .= ' | need_resync_or_new_doc';
+        }
     }
     if ($b24DocId <= 0) {
-        return array(
+        $b24DocId = stockOperationsResolveB24DocumentIdForRetry($db, $doc, 'portal_by_number_only');
+        if ($b24DocId > 0 && bitrixCatalogDocumentPresenceById($b24DocId)['kind'] === 'missing') {
+            $b24DocId = 0;
+            if ($b24StaleRecovery === '') {
+                $b24StaleRecovery = 'conduct_only_resolved_id_missing';
+            }
+        }
+    }
+    if ($b24DocId <= 0) {
+        $out = array(
             'ok' => false,
             'stage' => 'prepare',
             'response' => array(
@@ -2022,6 +2162,10 @@ function stockOperationsExecuteB24ConductOnly(PDO $db, array $doc) {
                 'error_description' => 'Нет известного id документа Битрикс24. Нажмите «Повторить» или «Дофиксировать».'
             ),
         );
+        if ($b24StaleRecovery !== '') {
+            $out['b24_stale_document_recovery'] = $b24StaleRecovery;
+        }
+        return $out;
     }
     $op = isset($doc['operation_type']) ? (string)$doc['operation_type'] : '';
     $supplier = isset($doc['supplier']) ? (string)$doc['supplier'] : '';
@@ -2038,6 +2182,9 @@ function stockOperationsExecuteB24ConductOnly(PDO $db, array $doc) {
     }
     $res['retry_mode'] = 'conduct_only';
     $res['b24_resolve_id_used'] = intval($b24DocId);
+    if ($b24StaleRecovery !== '') {
+        $res['b24_stale_document_recovery'] = $b24StaleRecovery;
+    }
     if (!isset($res['b24_document_id']) || intval($res['b24_document_id']) <= 0) {
         $res['b24_document_id'] = intval($b24DocId);
     }
@@ -2322,6 +2469,8 @@ function ensureProductInBitrix($db, $product, $pricePerMeter) {
                     ->execute(array($linkedId, $productId));
                 $b24ProductId = $linkedId;
                 $product['b24_product_id'] = $linkedId;
+                // Привязка по имени часто цепляет «услугу» / старый crm.product без типа для СУ — выравниваем под склад.
+                repairB24ProductTypeToWarehouseInPlace($linkedId);
             }
         }
     }
@@ -2334,16 +2483,23 @@ function ensureProductInBitrix($db, $product, $pricePerMeter) {
         if (stockReceiptShouldPushCrmCatalogPrice($db) && $pricePerMeter > 0) {
             $fields['PRICE'] = floatval($pricePerMeter);
         }
+        // Старый рабочий сценарий обновлял только NAME/PRICE; для catalog.document.conduct нужен товар с типом склада (TYPE=1).
+        $fields['TYPE'] = 1;
         if (!empty($fields)) {
             sendToBitrix('crm.product.update', array(
                 'id' => $b24ProductId,
                 'fields' => $fields
             ));
         }
+        repairB24ProductTypeToWarehouseInPlace($b24ProductId);
         return $product;
     }
 
-    $createPayload = array('fields' => array('NAME' => $productName));
+    // Как в example/stock: только NAME (+ PRICE), но складской документ Б24 не примет «услугу» — сразу создаём как товар для СУ.
+    $createPayload = array('fields' => array(
+        'NAME' => $productName,
+        'TYPE' => 1
+    ));
     if (stockReceiptShouldPushCrmCatalogPrice($db) && $pricePerMeter > 0) {
         $createPayload['fields']['PRICE'] = $pricePerMeter;
     }
@@ -2354,6 +2510,7 @@ function ensureProductInBitrix($db, $product, $pricePerMeter) {
             $db->prepare("UPDATE products SET b24_product_id = ? WHERE id = ?")
                 ->execute(array($newB24Id, $productId));
             $product['b24_product_id'] = $newB24Id;
+            repairB24ProductTypeToWarehouseInPlace($newB24Id);
         }
     }
 

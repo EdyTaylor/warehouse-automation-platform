@@ -389,6 +389,32 @@ $recentDocs = $db->query("
     LIMIT 20
 ")->fetchAll(PDO::FETCH_ASSOC);
 
+$reconcileListMax = intval(getAppSetting($db, 'stock_b24_reconcile_on_doc_list_max', '3'));
+if ($reconcileListMax > 0 && !empty($recentDocs)) {
+    $reconcileDone = 0;
+    foreach ($recentDocs as $ix => $rd) {
+        if ($reconcileDone >= $reconcileListMax) {
+            break;
+        }
+        if (!isset($rd['operation_type']) || !in_array((string)$rd['operation_type'], array('receipt', 'writeoff'), true)) {
+            continue;
+        }
+        if (trim(isset($rd['doc_number']) ? (string)$rd['doc_number'] : '') === '') {
+            continue;
+        }
+        $stLab = isset($rd['b24_sync_status']) ? (string)$rd['b24_sync_status'] : '';
+        $haveBid = intval(isset($rd['b24_document_id']) ? $rd['b24_document_id'] : 0) > 0;
+        if ($stLab === 'sent' && $haveBid) {
+            continue;
+        }
+        $row = $rd;
+        if (stockOperationsReconcileStoredB24DocumentIdWithPortal($db, $row)) {
+            $recentDocs[$ix] = $row;
+            $reconcileDone++;
+        }
+    }
+}
+
 $page_title = 'Складские операции';
 require 'includes/header.php';
 ?>
