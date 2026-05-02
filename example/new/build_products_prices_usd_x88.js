@@ -9,6 +9,9 @@
  * Берёт из листа LLumar колонки: B/C название, D длина рулона, E/F закуп USD, L остаток (число рулонов),
  * матчит к products.sql → b24_product_id (+ опционально product_id), пишет bulk_receipt_from_llumar.generated.json
  * В каждой строке есть product_name (матч из прайса) — для подписи и восстановления названий в приложении/CRM при приходе или отдельным CLI.
+ *
+ * Если JSON уже есть без имён — подставить product_name только из локального dump products.sql в этой же папке:
+ *   node example/new/build_products_prices_usd_x88.js --bulk-receipt-enrich-names
  */
 var fs = require('fs');
 var path = require('path');
@@ -622,6 +625,104 @@ function findTopProductsForExcelRow(exRow, productMetaList) {
     }
   }
   return dedup;
+}
+
+/** b24_product_id → name из столбца name в этом же каталоге (products.sql, поле после id). При дубликатах b24 сохраняется первое имя в файле. */
+function buildB24ToNameFromProductsSql() {
+  if (!fs.existsSync(PRODUCTS_SQL)) {
+    console.error(
+      'Нет файла:',
+      PRODUCTS_SQL,
+      '(ожидается dump таблицы products рядом с bulk JSON)'
+    );
+    process.exit(1);
+  }
+  var productRows = parseProductsSql(PRODUCTS_SQL);
+  var map = {};
+  var seenConflict = {};
+  var pi;
+  for (pi = 0; pi < productRows.length; pi++) {
+    var f = productRows[pi];
+    if (f.length < 12) {
+      continue;
+    }
+    var pname = stripQuotes(f[1]);
+    var b24 = intB24FromField(f[11]);
+    if (b24 <= 0 || !pname) {
+      continue;
+    }
+    if (map[b24] === undefined) {
+      map[b24] = pname;
+    } else if (map[b24] !== pname && !seenConflict[b24]) {
+      seenConflict[b24] = true;
+      console.error(
+        'Предупреждение: в products.sql несколько имён для b24',
+        b24,
+        '(оставляем первое в файле)'
+      );
+    }
+  }
+  return map;
+}
+
+/** Дописать product_name в bulk_receipt_from_llumar.generated.json по products.sql в той же папке example/new/. */
+function runBulkReceiptEnrichNamesFromProductsSql() {
+  var map = buildB24ToNameFromProductsSql();
+  if (!fs.existsSync(OUT_BULK_RECEIPT_JSON)) {
+    console.error(
+      'Нет файла:',
+      OUT_BULK_RECEIPT_JSON,
+      '(сгенерируйте --bulk-receipt или загрузите JSON)'
+    );
+    process.exit(1);
+  }
+  var raw = fs.readFileSync(OUT_BULK_RECEIPT_JSON, 'utf8');
+  var env = JSON.parse(raw);
+  if (!env.lines || !Array.isArray(env.lines)) {
+    console.error('Нет ключа lines[] в JSON');
+    process.exit(1);
+  }
+  var filled = 0;
+  var missingB24 = [];
+  var noIdLines = 0;
+  var li;
+  for (li = 0; li < env.lines.length; li++) {
+    var line = env.lines[li];
+    if (!line || typeof line !== 'object') {
+      continue;
+    }
+    var b24 = Number(line.b24_product_id || line.b24ProductId || 0);
+    if (!(b24 > 0)) {
+      noIdLines++;
+      continue;
+    }
+    var nm = map[b24];
+    if (!nm) {
+      missingB24.push(b24);
+      continue;
+    }
+    line.product_name = nm;
+    filled++;
+  }
+  fs.writeFileSync(
+    OUT_BULK_RECEIPT_JSON,
+    JSON.stringify(env, null, 2) + '\n',
+    'utf8'
+  );
+  console.log('Written:', OUT_BULK_RECEIPT_JSON);
+  console.log(
+    JSON.stringify(
+      {
+        lines_total: env.lines.length,
+        product_name_set: filled,
+        lines_without_b24: noIdLines,
+        b24_not_found_in_products_sql_count: missingB24.length,
+        b24_not_found_sample: missingB24.slice(0, 15)
+      },
+      null,
+      2
+    )
+  );
 }
 
 function runBulkReceiptFromLlumar() {
@@ -1383,7 +1484,9 @@ function main() {
   console.log(JSON.stringify(stats, null, 2));
 }
 
-if (process.argv.indexOf('--bulk-receipt') >= 0) {
+if (process.argv.indexOf('--bulk-receipt-enrich-names') >= 0) {
+  runBulkReceiptEnrichNamesFromProductsSql();
+} else if (process.argv.indexOf('--bulk-receipt') >= 0) {
   runBulkReceiptFromLlumar();
 } else {
   main();
