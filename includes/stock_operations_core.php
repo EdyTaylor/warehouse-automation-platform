@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 /** Shared: stock tables, Bitrix document sync, receipt product helpers. */
 
 require_once __DIR__ . '/../functions/app_settings.php';
@@ -660,7 +660,10 @@ function stockOperationsPushReceiptProductsNamePriceToB24Catalog($db, array $lin
             continue;
         }
 
-        $fields = array('NAME' => $nm);
+        $fields = array();
+        if (stockReceiptShouldPushCrmCatalogName($db) && !stockReceiptIsPlaceholderB24ProductName($nm)) {
+            $fields['NAME'] = $nm;
+        }
         $ppm = round(floatval(isset($pr['price_per_meter']) ? $pr['price_per_meter'] : 0), 4);
         if ($ppm > 0) {
             $fields['PRICE'] = $ppm;
@@ -668,6 +671,10 @@ function stockOperationsPushReceiptProductsNamePriceToB24Catalog($db, array $lin
             if ($cid !== '') {
                 $fields['CURRENCY_ID'] = $cid;
             }
+        }
+
+        if (empty($fields)) {
+            continue;
         }
 
         sendToBitrix('crm.product.update', array(
