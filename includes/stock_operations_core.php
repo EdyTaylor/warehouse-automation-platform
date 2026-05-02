@@ -751,6 +751,55 @@ function extractBitrixErrorText($resp) {
     return '';
 }
 
+/**
+ * Официально: корень ответа catalog.document.conduct — true если документ проведён (не полагаться только на document.get с задержкой).
+ *
+ * @param mixed $conductResp массив ответа REST
+ * @return bool
+ */
+function bitrixCatalogDocumentConductResponseIndicatesSuccess($conductResp) {
+    if (!is_array($conductResp)) {
+        return false;
+    }
+    if (isset($conductResp['error']) && $conductResp['error'] !== null && $conductResp['error'] !== '') {
+        return false;
+    }
+    if (!array_key_exists('result', $conductResp)) {
+        return false;
+    }
+    $r = $conductResp['result'];
+    if ($r === true) {
+        return true;
+    }
+    if ($r === 1 || $r === '1' || strtolower((string)$r) === 'true') {
+        return true;
+    }
+    return false;
+}
+
+/**
+ * Одна строка document из catalog.document.get (учёт разных версий формата результата).
+ *
+ * @param array $resp
+ * @return array|null
+ */
+function bitrixCatalogDocumentGetResultAsRow($resp) {
+    if (!is_array($resp) || isset($resp['error']) || !isset($resp['result'])) {
+        return null;
+    }
+    $r = $resp['result'];
+    if (!is_array($r)) {
+        return null;
+    }
+    if (isset($r['document']) && is_array($r['document'])) {
+        return $r['document'];
+    }
+    if (isset($r['DOCUMENT']) && is_array($r['DOCUMENT'])) {
+        return $r['DOCUMENT'];
+    }
+    return $r;
+}
+
 function stockReceiptShouldPushCrmCatalogPrice($db) {
     return trim((string)getAppSetting($db, 'stock_receipt_push_crm_catalog_price', '0')) === '1';
 }
@@ -955,12 +1004,12 @@ function ensureUsableB24ProductId($db, $localProductId, $b24ProductId, $productN
 }
 
 function waitUntilB24DocumentConducted($db, $b24DocId) {
-    $attempts = intval(getAppSetting($db, 'b24_conduct_check_attempts', '5'));
+    $attempts = intval(getAppSetting($db, 'b24_conduct_check_attempts', '18'));
     if ($attempts < 1) {
         $attempts = 1;
     }
-    if ($attempts > 20) {
-        $attempts = 20;
+    if ($attempts > 60) {
+        $attempts = 60;
     }
     $sleepMs = intval(getAppSetting($db, 'b24_doc_delay_ms', '700'));
     if ($sleepMs < 100) {
@@ -984,12 +1033,22 @@ function conductAndEnsurePosted($db, $b24DocId, $docType, $supplierName) {
     }
     if ((string)$docType === 'receipt') {
         ensureDocumentSupplierForReceipt($b24DocId, $supplierName);
+        // После contractor.add порталу нужна секунда, иначе conduct иногда вернёт «поставщик не указан» / не проведёт.
+        pauseBeforeConduct($db);
     }
     $conductResp = sendToBitrix('catalog.document.conduct', array('id' => intval($b24DocId)));
     $conductError = extractBitrixErrorText($conductResp);
 
-    if ($conductError !== '' && stripos($conductError, 'Не указан поставщик') !== false && (string)$docType === 'receipt') {
+    $conductSupplierMissing = (
+        stripos($conductError, 'поставщик') !== false
+        || stripos($conductError, 'Не указан поставщик') !== false
+        || stripos($conductError, 'Supplier not specified') !== false
+        || stripos(strtolower((string)$conductError), 'supplier') !== false
+    );
+
+    if ($conductError !== '' && $conductSupplierMissing && (string)$docType === 'receipt') {
         ensureDocumentSupplierForReceipt($b24DocId, $supplierName);
+        pauseBeforeConduct($db);
         $conductResp = sendToBitrix('catalog.document.conduct', array('id' => intval($b24DocId)));
         $conductError = extractBitrixErrorText($conductResp);
     }
@@ -1012,11 +1071,23 @@ function conductAndEnsurePosted($db, $b24DocId, $docType, $supplierName) {
                     if ($newB24Id > 0) {
                         replaceInvalidElementInB24Document($db, $b24DocId, $invalidB24Id, $newB24Id, $docType);
                         $conductResp = sendToBitrix('catalog.document.conduct', array('id' => intval($b24DocId)));
+                        $conductError = extractBitrixErrorText($conductResp);
                     }
                 }
             }
         }
     }
+
+    // Главный критерий успеха по REST (см. apidocs Bitrix catalog.document.conduct → result:true).
+    if (bitrixCatalogDocumentConductResponseIndicatesSuccess($conductResp)) {
+        return array(
+            'ok' => true,
+            'b24_document_id' => intval($b24DocId),
+            'conduct_response' => $conductResp,
+            'status_checked' => 'conduct_api_result_true'
+        );
+    }
+
     if (waitUntilB24DocumentConducted($db, $b24DocId)) {
         return array(
             'ok' => true,
@@ -1230,20 +1301,41 @@ function syncOperationDocumentToBitrix($db, $docId, $docType, $docNumber, $comme
 }
 
 function isB24DocumentConducted($b24DocId) {
-    $resp = sendToBitrix('catalog.document.get', array('id' => intval($b24DocId)));
+    $id = intval($b24DocId);
+    $payload = array(
+        'id' => $id,
+        'select' => array('id', 'status', 'STATUS')
+    );
+    $resp = sendToBitrix('catalog.document.get', $payload);
+    if (!is_array($resp) || isset($resp['error'])) {
+        $resp = sendToBitrix('catalog.document.get', array('id' => $id));
+    }
     if (!is_array($resp) || isset($resp['error']) || !isset($resp['result'])) {
         return false;
     }
-    $row = is_array($resp['result']) ? $resp['result'] : array();
+    $row = bitrixCatalogDocumentGetResultAsRow($resp);
+    if ($row === null || !is_array($row)) {
+        return false;
+    }
     $status = '';
     if (isset($row['status'])) {
         $status = (string)$row['status'];
     } elseif (isset($row['STATUS'])) {
         $status = (string)$row['STATUS'];
-    } elseif (isset($row['document']['status'])) {
-        $status = (string)$row['document']['status'];
     }
-    return strtoupper($status) === 'Y';
+    // Распространённые алиасы (разные редакции складского документа).
+    foreach (array(
+        isset($row['documentStatus']) ? (string)$row['documentStatus'] : '',
+        isset($row['DOCUMENT_STATUS']) ? (string)$row['DOCUMENT_STATUS'] : '',
+        isset($row['state']) ? (string)$row['state'] : ''
+    ) as $candidate) {
+        if ($candidate !== '' && $status === '') {
+            $status = $candidate;
+            break;
+        }
+    }
+
+    return strtoupper($status) === 'Y' || $status === '1' || strtoupper((string)$status) === 'CONDUCTED';
 }
 
 function fetchB24DocumentElementsMap($b24DocId) {
