@@ -244,6 +244,157 @@ function mergeStockOperationLineRowsForBitrixSku(array $lineRows) {
     return $out;
 }
 
+/**
+ * Сжать строки документа к одному elementId CRM на склад: после merge по product_id разные локальные
+ * товары могут получить один b24_product_id (клон/[stock]); два element.add с одним id дают две строки в Б24.
+ * Сперва для каждого product_id дергаем ensureUsableB24ProductId, затем группируем по актуальному b24_product_id.
+ *
+ * @param PDO $db
+ * @param array $lineRows как из stock_operation_lines
+ * @return array
+ */
+function stockOperationsMergeLineRowsPerB24CatalogId(PDO $db, array $lineRows) {
+    $lineRows = mergeStockOperationLineRowsForBitrixSku(is_array($lineRows) ? $lineRows : array());
+    if (empty($lineRows)) {
+        return array();
+    }
+    $uniquePids = array();
+    foreach ($lineRows as $line) {
+        if (!is_array($line)) {
+            continue;
+        }
+        $pid = intval(isset($line['product_id']) ? $line['product_id'] : 0);
+        if ($pid > 0) {
+            $uniquePids[$pid] = true;
+        }
+    }
+    foreach (array_keys($uniquePids) as $pid) {
+        $pid = intval($pid);
+        $pStmt = $db->prepare("SELECT b24_product_id, price_per_meter, delivery_price, name FROM products WHERE id = ? LIMIT 1");
+        $pStmt->execute(array($pid));
+        $prod = $pStmt->fetch(PDO::FETCH_ASSOC);
+        if (!is_array($prod)) {
+            continue;
+        }
+        $bid = intval(isset($prod['b24_product_id']) ? $prod['b24_product_id'] : 0);
+        if ($bid <= 0) {
+            continue;
+        }
+        ensureUsableB24ProductId(
+            $db,
+            $pid,
+            $bid,
+            isset($prod['name']) ? (string)$prod['name'] : '',
+            floatval(isset($prod['price_per_meter']) ? $prod['price_per_meter'] : 0)
+        );
+    }
+
+    $groups = array();
+    $groupOrder = array();
+
+    foreach ($lineRows as $line) {
+        if (!is_array($line)) {
+            continue;
+        }
+        $pid = intval(isset($line['product_id']) ? $line['product_id'] : 0);
+        if ($pid <= 0) {
+            continue;
+        }
+        $pStmt = $db->prepare("SELECT b24_product_id, price_per_meter, delivery_price, name FROM products WHERE id = ? LIMIT 1");
+        $pStmt->execute(array($pid));
+        $prod = $pStmt->fetch(PDO::FETCH_ASSOC);
+        if (!is_array($prod)) {
+            continue;
+        }
+        $bid = intval(isset($prod['b24_product_id']) ? $prod['b24_product_id'] : 0);
+        if ($bid <= 0) {
+            continue;
+        }
+
+        $amount = floatval(isset($line['quantity_m']) ? $line['quantity_m'] : 0);
+        if ($amount <= 0) {
+            $amount = floatval(isset($line['qty_rolls']) ? $line['qty_rolls'] : 0);
+        }
+        if ($amount <= 0) {
+            continue;
+        }
+
+        $rolls = intval(isset($line['qty_rolls']) ? $line['qty_rolls'] : 0);
+        $priceRoll = floatval(isset($line['price_per_roll']) ? $line['price_per_roll'] : 0);
+        $deliveryRoll = floatval(isset($line['delivery_price_per_roll']) ? $line['delivery_price_per_roll'] : 0);
+        $lineTotal = floatval(isset($line['line_total']) ? $line['line_total'] : 0);
+
+        if (!isset($groups[$bid])) {
+            $groupOrder[] = $bid;
+            $groups[$bid] = array(
+                'tpl' => $line,
+                'rep_pid' => $pid,
+                'sum_amount' => 0.0,
+                'sum_line_total' => 0.0,
+                'sum_rolls' => 0,
+                'price_roll_roll_weight' => 0.0,
+                'delivery_roll_roll_weight' => 0.0,
+                'roll_weight_for_roll_prices' => 0,
+            );
+        } else {
+            if ($pid < $groups[$bid]['rep_pid']) {
+                $groups[$bid]['rep_pid'] = $pid;
+            }
+        }
+
+        $g = &$groups[$bid];
+        $g['sum_amount'] += $amount;
+        $g['sum_line_total'] += $lineTotal;
+        if ($rolls > 0) {
+            $g['sum_rolls'] += $rolls;
+            $rw = intval($rolls);
+            $g['roll_weight_for_roll_prices'] += $rw;
+            $g['price_roll_roll_weight'] += $priceRoll * floatval($rw);
+            $g['delivery_roll_roll_weight'] += $deliveryRoll * floatval($rw);
+        }
+        unset($g);
+    }
+
+    $out = array();
+    foreach ($groupOrder as $bid) {
+        $g = $groups[$bid];
+        $qtyMsum = round(floatval($g['sum_amount']), 6);
+        if ($qtyMsum <= 0) {
+            continue;
+        }
+
+        $row = isset($g['tpl']) && is_array($g['tpl']) ? $g['tpl'] : array();
+
+        $row['product_id'] = intval($g['rep_pid']);
+        $row['quantity_m'] = $qtyMsum;
+        $row['line_total'] = round(floatval($g['sum_line_total']), 4);
+
+        $sumRolls = intval($g['sum_rolls']);
+        $rwForPrice = intval($g['roll_weight_for_roll_prices']);
+
+        $row['qty_rolls'] = $sumRolls;
+
+        $avgRl = 0.0;
+        if ($sumRolls > 0) {
+            $avgRl = $qtyMsum / floatval($sumRolls);
+        }
+        if ($avgRl > 0) {
+            $row['roll_length'] = round($avgRl, 6);
+        }
+
+        if ($rwForPrice > 0) {
+            $pr = round(floatval($g['price_roll_roll_weight']) / floatval(max(1, $rwForPrice)), 6);
+            $dr = round(floatval($g['delivery_roll_roll_weight']) / floatval(max(1, $rwForPrice)), 6);
+            $row['price_per_roll'] = $pr;
+            $row['delivery_price_per_roll'] = $dr;
+        }
+
+        $out[] = $row;
+    }
+
+    return $out;
+}
+
 function calculateDocumentTotalFromLines($lineRows) {
     $total = 0.0;
     foreach ($lineRows as $line) {
@@ -1575,7 +1726,7 @@ function syncOperationDocumentToBitrix($db, $docId, $docType, $docNumber, $comme
     }
     $b24DocType = $docMap[$docType];
 
-    $lineRows = mergeStockOperationLineRowsForBitrixSku(is_array($lineRows) ? $lineRows : array());
+    $lineRows = stockOperationsMergeLineRowsPerB24CatalogId($db, is_array($lineRows) ? $lineRows : array());
 
     $docResp = sendToBitrix('catalog.document.add', array(
         'fields' => array(
@@ -1826,7 +1977,7 @@ function addLinesAndConductExistingB24Document($db, $b24DocId, $docType, $lineRo
     $storeTo = intval(getAppSetting($db, 'default_store_to_id', '1'));
     $currency = (string)getAppSetting($db, 'default_currency', 'KGS');
 
-    $lineRows = mergeStockOperationLineRowsForBitrixSku(is_array($lineRows) ? $lineRows : array());
+    $lineRows = stockOperationsMergeLineRowsPerB24CatalogId($db, is_array($lineRows) ? $lineRows : array());
 
     if ($docType === 'receipt') {
         ensureDocumentSupplierForReceipt(intval($b24DocId), $supplierName);
