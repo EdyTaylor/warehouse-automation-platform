@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 /** Shared: stock tables, Bitrix document sync, receipt product helpers. */
 
 require_once __DIR__ . '/../functions/app_settings.php';
