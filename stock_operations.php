@@ -23,6 +23,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     if (!validateFormToken('retry_b24_sync', isset($_POST['form_token']) ? $_POST['form_token'] : '')) {
         $errorMsg = 'Сессия формы устарела. Обновите страницу и повторите.';
     } else {
+    // Освободить блокировку сессии до долгого синка: иначе параллельное открытие «Операции» в другой вкладке «висит».
+    if (function_exists('session_write_close')) {
+        session_write_close();
+    }
     $docId = intval(isset($_POST['doc_id']) ? $_POST['doc_id'] : 0);
     if ($docId <= 0) {
         $errorMsg = 'Некорректный документ для повторного синка.';
@@ -163,6 +167,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     if (!validateFormToken('create_receipt', isset($_POST['form_token']) ? $_POST['form_token'] : '')) {
         $errorMsg = 'Сессия формы устарела. Обновите страницу и повторите.';
     } else {
+        if (function_exists('session_write_close')) {
+            session_write_close();
+        }
         $docNumber = trim(isset($_POST['doc_number']) ? $_POST['doc_number'] : '');
         $supplier = trim(isset($_POST['supplier']) ? $_POST['supplier'] : '');
         $commentText = trim(isset($_POST['comment_text']) ? $_POST['comment_text'] : '');
@@ -215,6 +222,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     if (!validateFormToken('create_writeoff', isset($_POST['form_token']) ? $_POST['form_token'] : '')) {
         $errorMsg = 'Сессия формы устарела. Обновите страницу и повторите.';
     } else {
+    if (function_exists('session_write_close')) {
+        session_write_close();
+    }
     $docNumber = trim(isset($_POST['writeoff_doc_number']) ? $_POST['writeoff_doc_number'] : '');
     $commentText = trim(isset($_POST['writeoff_comment_text']) ? $_POST['writeoff_comment_text'] : '');
     $lineRollId = isset($_POST['writeoff_roll_id']) && is_array($_POST['writeoff_roll_id']) ? $_POST['writeoff_roll_id'] : array();
@@ -307,6 +317,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     }
 }
 
+if (session_status() !== PHP_SESSION_ACTIVE) {
+    session_start();
+}
 $receiptToken = ensureFormToken('create_receipt');
 $writeoffToken = ensureFormToken('create_writeoff');
 $deleteToken = ensureFormToken('delete_doc');
