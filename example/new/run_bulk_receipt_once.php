@@ -19,11 +19,14 @@ if (php_sapi_name() !== 'cli') {
     exit(1);
 }
 
-require_once dirname(__DIR__, 2) . '/db.php';
-require_once dirname(__DIR__, 2) . '/functions/stock_movements.php';
-require_once dirname(__DIR__, 2) . '/api/bitrix/send.php';
-require_once dirname(__DIR__, 2) . '/functions/app_settings.php';
-require_once dirname(__DIR__, 2) . '/includes/stock_operations_core.php';
+// Корень сайта (example/new → public_html); два уровня dirname — совместимо с PHP 5.6 (без dirname(..., 2) из PHP 7).
+$root = dirname(dirname(__DIR__));
+
+require_once $root . '/db.php';
+require_once $root . '/functions/stock_movements.php';
+require_once $root . '/api/bitrix/send.php';
+require_once $root . '/functions/app_settings.php';
+require_once $root . '/includes/stock_operations_core.php';
 
 date_default_timezone_set('Asia/Bishkek');
 
@@ -49,7 +52,6 @@ function money2($n) {
 
 $inputRel = argValue('input', 'example/new/bulk_receipt_from_llumar.generated.json');
 $force = hasArg('force');
-$root = dirname(__DIR__, 2);
 $inputPath = $root . '/' . str_replace('\\', '/', $inputRel);
 $snapshotPath = $root . '/example/new/bulk_receipt_from_llumar.kgs.snapshot.json';
 $resultPath = $root . '/example/new/bulk_receipt_from_llumar.run_result.json';
@@ -72,7 +74,7 @@ if (hasArg('local-only')) {
 
 $db = getDB();
 
-require_once dirname(__DIR__, 2) . '/functions/stock_emergency_kill.php';
+require_once $root . '/functions/stock_emergency_kill.php';
 $killMsg = stockEmergencyRollCreationStoppedMessage($db);
 if ($killMsg !== '') {
     echo 'BLOCKED emergency: ' . $killMsg . "\nСнимите флаг STOCK_CREATES_OFF / emergency_block_roll_creates.\n";
