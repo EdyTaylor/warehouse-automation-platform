@@ -10,6 +10,7 @@
  *   php example/new/run_bulk_receipt_once.php --force
  *   php example/new/run_bulk_receipt_once.php --input="example/new/bulk_receipt_from_llumar.generated.json"
  *   php example/new/run_bulk_receipt_once.php --local-only
+ *   Перед первым большим запуском (рекомендуется): php example/product_names_snapshot_cli.php snapshot before-bulk-DATE
  *   При паузе в app_settings: включите «Разрешить локальный приход при паузе» в sync_monitor или временно снимите паузу.
  */
 

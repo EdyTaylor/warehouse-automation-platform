@@ -417,6 +417,53 @@ function stockReceiptShouldPushCrmCatalogPrice($db) {
     return trim((string)getAppSetting($db, 'stock_receipt_push_crm_catalog_price', '0')) === '1';
 }
 
+/**
+ * По умолчанию не трогаем имя товара в crm.product при приходе (название ведёт каталог приложения / Битрикс).
+ * Включить перезапись NAME из приложения при приходе: app_settings stock_receipt_push_crm_catalog_name = 1
+ */
+function stockReceiptShouldPushCrmCatalogName($db) {
+    return trim((string)getAppSetting($db, 'stock_receipt_push_crm_catalog_name', '0')) === '1';
+}
+
+function stockReceiptIsPlaceholderB24ProductName($name) {
+    $n = trim((string)$name);
+    if ($n === '') {
+        return true;
+    }
+    if (strpos($n, 'Товар Б24 #') === 0) {
+        return true;
+    }
+    return false;
+}
+
+/**
+ * Имя crm.product в Битрикс24 по ID (например, чтобы не создавать «Товар Б24 #…», если в JSON без product_name).
+ *
+ * @param int $crmProductId ID товара в Б24 (тот же, что приход в b24_product_id)
+ * @return string
+ */
+function stockReceiptFetchCrmProductName($crmProductId) {
+    $crmProductId = intval($crmProductId);
+    if ($crmProductId <= 0) {
+        return '';
+    }
+    $resp = sendToBitrix('crm.product.get', array('id' => $crmProductId));
+    if (!is_array($resp) || isset($resp['error'])) {
+        return '';
+    }
+    if (!isset($resp['result']) || !is_array($resp['result'])) {
+        return '';
+    }
+    $r = $resp['result'];
+    $nm = '';
+    if (isset($r['NAME']) && trim((string)$r['NAME']) !== '') {
+        $nm = trim((string)$r['NAME']);
+    } elseif (isset($r['name']) && trim((string)$r['name']) !== '') {
+        $nm = trim((string)$r['name']);
+    }
+    return $nm;
+}
+
 function forceCreateStockCloneProduct($db, $localProductId, $currentName, $pricePerMeter) {
     $baseName = trim((string)$currentName);
     if ($baseName === '') {
@@ -1160,6 +1207,15 @@ function ensureProductForReceipt($db, $productId, $productName, $rollLength, $pr
         $stmt->execute(array($productId));
         $p = $stmt->fetch(PDO::FETCH_ASSOC);
         if ($p) {
+            $dbNmFix = isset($p['name']) ? trim((string)$p['name']) : '';
+            $b24ForName = intval(isset($p['b24_product_id']) ? $p['b24_product_id'] : 0);
+            if ($b24ForName > 0 && stockReceiptIsPlaceholderB24ProductName($dbNmFix)) {
+                $fromB24Nm = stockReceiptFetchCrmProductName($b24ForName);
+                if ($fromB24Nm !== '') {
+                    $db->prepare('UPDATE products SET name = ? WHERE id = ?')->execute(array($fromB24Nm, $productId));
+                    $p['name'] = $fromB24Nm;
+                }
+            }
             if ($pricePerRoll > 0 || $deliveryPricePerRoll > 0 || $rollLength > 0) {
                 $db->prepare("UPDATE products SET purchase_price = ?, delivery_price = ?, roll_length = ?, price_per_meter = ? WHERE id = ?")
                     ->execute(array($pricePerRoll, $deliveryPricePerRoll, $rollLength, $pricePerMeter, $productId));
@@ -1314,14 +1370,19 @@ function ensureProductInBitrix($db, $product, $pricePerMeter) {
     }
 
     if ($b24ProductId > 0) {
-        $payload = array(
-            'id' => $b24ProductId,
-            'fields' => array('NAME' => $productName)
-        );
-        if (stockReceiptShouldPushCrmCatalogPrice($db) && $pricePerMeter > 0) {
-            $payload['fields']['PRICE'] = $pricePerMeter;
+        $fields = array();
+        if (stockReceiptShouldPushCrmCatalogName($db) && $productNameTrim !== '' && !stockReceiptIsPlaceholderB24ProductName($productNameTrim)) {
+            $fields['NAME'] = $productNameTrim;
         }
-        sendToBitrix('crm.product.update', $payload);
+        if (stockReceiptShouldPushCrmCatalogPrice($db) && $pricePerMeter > 0) {
+            $fields['PRICE'] = floatval($pricePerMeter);
+        }
+        if (!empty($fields)) {
+            sendToBitrix('crm.product.update', array(
+                'id' => $b24ProductId,
+                'fields' => $fields
+            ));
+        }
         return $product;
     }
 
@@ -1697,13 +1758,30 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
                 if (is_array($foundByB24)) {
                     $productId = intval(isset($foundByB24['id']) ? $foundByB24['id'] : 0);
                     $dbNm = isset($foundByB24['name']) ? trim((string)$foundByB24['name']) : '';
+                    if ($productId > 0 && ($dbNm === '' || stockReceiptIsPlaceholderB24ProductName($dbNm))) {
+                        $fromB24Line = stockReceiptFetchCrmProductName($b24LineId);
+                        if ($fromB24Line !== '') {
+                            $db->prepare('UPDATE products SET name = ? WHERE id = ?')->execute(array($fromB24Line, $productId));
+                            $dbNm = $fromB24Line;
+                        }
+                    }
                     if ($dbNm !== '') {
                         $productName = $dbNm;
                     } elseif ($productName === '') {
                         $productName = $dbNm;
                     }
                 } else {
-                    $nmIns = ($productName !== '') ? $productName : ('Товар Б24 #' . $b24LineId);
+                    $nmIns = $productName;
+                    if ($nmIns === '' || stockReceiptIsPlaceholderB24ProductName($nmIns)) {
+                        $fromB24New = stockReceiptFetchCrmProductName($b24LineId);
+                        if ($fromB24New !== '') {
+                            $nmIns = $fromB24New;
+                        }
+                    }
+                    if ($nmIns === '') {
+                        $nmIns = 'Товар Б24 #' . $b24LineId;
+                    }
+                    $productName = $nmIns;
                     $insP = $db->prepare('
                         INSERT INTO products (name, b24_product_id, roll_length, purchase_price, delivery_price, price_per_meter)
                         VALUES (?, ?, ?, 0, 0, 0)
