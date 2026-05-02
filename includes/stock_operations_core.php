@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 /** Shared: stock tables, Bitrix document sync, receipt product helpers. */
 
 require_once __DIR__ . '/../functions/app_settings.php';
@@ -1274,7 +1274,56 @@ function repairB24ProductTypeToWarehouseInPlace($b24ProductId) {
     if ($afterType === 1) {
         return $id;
     }
+    // Портал иногда подтягивает TYPE в каталог с задержкой — вторая попытка.
+    usleep(350000);
+    sendToBitrix('crm.product.update', array('id' => $id, 'fields' => array('TYPE' => 1)));
+    $afterType = getB24ProductType($id);
+    if ($afterType === 1) {
+        return $id;
+    }
     return 0;
+}
+
+/**
+ * Перед catalog.document.conduct: TYPE=1 (crm.product) для всех elementId строк черновика.
+ * Уменьшает «Неверный тип товара» при первом проведении из приложения.
+ * Не выполняется при нажатии «Провести» только в UI Битрикс24 — нужен синк/кнопка из приложения.
+ * Отключить: app_settings stock_b24_preconduct_repair_line_types = 0
+ *
+ * @param PDO $db
+ * @param int $b24DocId
+ * @return array repaired_ids, skipped
+ */
+function stockB24RepairAllLineCatalogProductTypesForDocument(PDO $db, $b24DocId) {
+    $bid = intval($b24DocId);
+    $out = array('repaired' => array(), 'already_ok' => array(), 'failed' => array());
+    if ($bid <= 0) {
+        return $out;
+    }
+    $map = fetchB24DocumentElementsMap($bid);
+    if (!is_array($map) || empty($map)) {
+        return $out;
+    }
+    $seen = array();
+    foreach (array_keys($map) as $eidRaw) {
+        $eid = intval($eidRaw);
+        if ($eid <= 0 || isset($seen[$eid])) {
+            continue;
+        }
+        $seen[$eid] = true;
+        $before = getB24ProductType($eid);
+        if ($before === 1) {
+            $out['already_ok'][] = $eid;
+            continue;
+        }
+        if (repairB24ProductTypeToWarehouseInPlace($eid) > 0) {
+            $out['repaired'][] = $eid;
+        } else {
+            $out['failed'][] = $eid;
+        }
+        pauseBetweenB24DocumentLineAdds($db);
+    }
+    return $out;
 }
 
 function ensureUsableB24ProductId($db, $localProductId, $b24ProductId, $productName, $pricePerMeter) {
@@ -1350,6 +1399,10 @@ function conductAndEnsurePosted($db, $b24DocId, $docType, $supplierName) {
     if ((string)$docType === 'receipt') {
         ensureDocumentSupplierForReceipt($b24DocId, $supplierName);
         // После contractor.add порталу нужна секунда, иначе conduct иногда вернёт «поставщик не указан» / не проведёт.
+        pauseBeforeConduct($db);
+    }
+    if (trim((string)getAppSetting($db, 'stock_b24_preconduct_repair_line_types', '1')) === '1') {
+        stockB24RepairAllLineCatalogProductTypesForDocument($db, intval($b24DocId));
         pauseBeforeConduct($db);
     }
     $conductResp = sendToBitrix('catalog.document.conduct', array('id' => intval($b24DocId)));
