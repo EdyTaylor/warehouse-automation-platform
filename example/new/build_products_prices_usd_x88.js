@@ -8,7 +8,7 @@
  *   node example/new/build_products_prices_usd_x88.js --bulk-receipt
  * Берёт из листа LLumar колонки: B/C название, D длина рулона, E/F закуп USD, L остаток (число рулонов),
  * матчит к products.sql → b24_product_id (+ опционально product_id), пишет bulk_receipt_from_llumar.generated.json
- * Имя не указывается: при импорте приложение ставит название из БД по b24_product_id.
+ * В каждой строке есть product_name (матч из прайса) — для подписи и восстановления названий в приложении/CRM при приходе или отдельным CLI.
  */
 var fs = require('fs');
 var path = require('path');
@@ -779,6 +779,7 @@ function runBulkReceiptFromLlumar() {
 
     linesOut.push({
       b24_product_id: top.b24,
+      product_name: top.pname,
       qty_rolls: lr.qtyRolls,
       roll_length: lr.lengthM,
       purchase_per_roll: lr.purchasePerRoll,
@@ -800,6 +801,7 @@ function runBulkReceiptFromLlumar() {
     lines: linesOut.map(function (x) {
       var ln = {
         b24_product_id: x.b24_product_id,
+        product_name: x.product_name,
         qty_rolls: x.qty_rolls,
         roll_length: x.roll_length,
         purchase_per_roll: x.purchase_per_roll,

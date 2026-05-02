@@ -1568,6 +1568,7 @@ function stockReceiptMysqlReleaseLock(PDO $db, $lockName) {
  * - min_full: мин. остаток рулона (м), по умолчанию 0.5
  * - lines[]: массив строк, каждая с полями:
  *     product_id (локальный; подсказка; если указан и b24_product_id — приоритет у b24, чужой product_id игнорируется),
+ *     product_name из JSON при отсутствии заглушки «Товар Б24 #» переопределяет локальный name после привязки по b24 (LLumar-батч и др.),
  *     b24_product_id — ID товара в Б24: ищется локальный products по b24_product_id или создаётся минимальная строка,
  *     product_name (для нового локального товара или подписи),
  *     qty_rolls, roll_length,
@@ -1745,12 +1746,15 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
                 $deliveryPricePerRollUsd = $usdToKgsRate > 0 ? ($deliveryPricePerRoll / $usdToKgsRate) : 0;
             }
             $productId = intval(isset($row['product_id']) ? $row['product_id'] : (isset($row['productId']) ? $row['productId'] : 0));
-            $productName = isset($row['product_name']) ? trim((string)$row['product_name']) : (isset($row['productName']) ? trim((string)$row['productName']) : '');
+            $nameFromJson = isset($row['product_name']) ? trim((string)$row['product_name']) : (isset($row['productName']) ? trim((string)$row['productName']) : '');
+            $productName = $nameFromJson;
             $b24LineId = intval(isset($row['b24_product_id']) ? $row['b24_product_id'] : (isset($row['b24ProductId']) ? $row['b24ProductId'] : 0));
+
+            $jsonNameUsable = ($nameFromJson !== '' && !stockReceiptIsPlaceholderB24ProductName($nameFromJson));
 
             // Если в строке указан Bitrix-ID товара — приход всегда вешаем на локальную карточку с этим b24_product_id
             // (каталог приложения ↔ Б24), даже если в JSON ошибочно передан другой product_id.
-            // Имя для строки документа берём из каталога, чтобы не плодить «другие» подписи при отличии написания в Excel.
+            // Если в JSON явно передано нормальное product_name (например из bulk LLumar) — оно важнее локальной подписи и обновляет products.name.
             if ($b24LineId > 0) {
                 $stB24 = $db->prepare('SELECT id, name FROM products WHERE b24_product_id = ? ORDER BY id ASC LIMIT 1');
                 $stB24->execute(array($b24LineId));
@@ -1765,13 +1769,18 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
                             $dbNm = $fromB24Line;
                         }
                     }
-                    if ($dbNm !== '') {
+                    if ($jsonNameUsable) {
+                        $productName = $nameFromJson;
+                        if ($productId > 0) {
+                            $db->prepare('UPDATE products SET name = ? WHERE id = ?')->execute(array($nameFromJson, $productId));
+                        }
+                    } elseif ($dbNm !== '') {
                         $productName = $dbNm;
                     } elseif ($productName === '') {
                         $productName = $dbNm;
                     }
                 } else {
-                    $nmIns = $productName;
+                    $nmIns = $nameFromJson !== '' ? $nameFromJson : $productName;
                     if ($nmIns === '' || stockReceiptIsPlaceholderB24ProductName($nmIns)) {
                         $fromB24New = stockReceiptFetchCrmProductName($b24LineId);
                         if ($fromB24New !== '') {

@@ -94,6 +94,7 @@
                 Отдельно суффикс <strong>[stock]</strong>: раньше создавался при несовпадении типа товара в CRM со складским. Сейчас по умолчанию <strong>клоны отключены</strong> (<code>app_settings</code>): <code>stock_b24_clone_on_type_mismatch</code>=<code>0</code>; включить старое поведение → <code>1</code>. При проведении документа клон через «Неверный тип товара» выключен: <code>stock_b24_conduct_stock_clone_fallback</code>=<code>0</code> (включить → <code>1</code>).
                 Розничную <strong>PRICE</strong> в карточке CRM при приходе по умолчанию <strong>не трогаем</strong> (<code>stock_receipt_push_crm_catalog_price</code>=<code>0</code>) — иначе закуп за метр подменял каталожную цену. Пушить цену из прихода снова → <code>1</code>.
                 Имя <strong>NAME</strong> в CRM при приходе по умолчанию <strong>не перезаписывается</strong> (<code>stock_receipt_push_crm_catalog_name</code>=<code>0</code>); включить явный пуш названия из приложения → <code>1</code>. Перед большим импортом можно сделать бэкап имён каталога: CLI <code>php example/product_names_snapshot_cli.php snapshot МЕТКА</code> и при необходимости <code>restore-latest МЕТКА</code>.
+                Имена из JSON LLumar (поле <code>product_name</code>) можно одним проходом применить к каталогу: <code>php example/sync_product_names_from_bulk_receipt_json_cli.php exec</code> и при необходимости <code>--push-b24</code>.
             </p>
             <?php if ($bulkReceiptUiDefault): ?>
                 <div class="alert alert-info">
