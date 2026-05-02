@@ -951,6 +951,18 @@ function runCreateMissingProductsInB24($db, $limit) {
     );
 }
 
+/** Имя в crm.product.update при отправке из products.php — не пустое и не служебная заглушка Битрикса. */
+function productsPhpShouldPushCatalogNameToB24($name) {
+    $n = trim((string)$name);
+    if ($n === '') {
+        return false;
+    }
+    if (strpos($n, 'Товар Б24 #') === 0) {
+        return false;
+    }
+    return true;
+}
+
 function syncProductPriceToB24($db, $productId) {
     $pid = intval($productId);
     $stmt = $db->prepare("
@@ -1001,8 +1013,8 @@ function syncProductPriceToB24($db, $productId) {
         $currencyId = 'KGS';
     }
 
-    // В Б24 передаём только розничную цену за метр (без закупки и без catalog.product.update — иначе «single price» / диапазоны).
-    // Товары с вариациями: цены в интерфейсе идут на торговые предложения (offer), см. catalog.product.offer.list по parentId.
+    // В Б24 передаём розничную цену за метр + при необходимости NAME (crm.product.update; без закупки и без catalog.product.update базовых полей).
+    // Товары с вариациями: цены в интерфейсе идут на торговые предложения (offer), см. catalog.product.offer.list по parentId — NAME уходит тем же составом целей.
     $targetsMeta = b24ResolveRetailPriceCatalogTargetIdsMeta($b24Id);
     $targets = isset($targetsMeta['targets']) && is_array($targetsMeta['targets']) ? $targetsMeta['targets'] : array();
     $parentType = intval(isset($targetsMeta['parent_type']) ? $targetsMeta['parent_type'] : 0);
@@ -1045,6 +1057,10 @@ function syncProductPriceToB24($db, $productId) {
     if ($retailPrice > 0) {
         $crmFields['PRICE'] = $retailPrice;
         $crmFields['CURRENCY_ID'] = $currencyId;
+    }
+    $nameTrim = trim((string)$pName);
+    if (productsPhpShouldPushCatalogNameToB24($nameTrim)) {
+        $crmFields['NAME'] = $nameTrim;
     }
 
     $crmResp = null;
