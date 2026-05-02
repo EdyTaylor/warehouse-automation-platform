@@ -890,10 +890,176 @@ function parseInvalidProductIdFromConductError($text) {
     return 0;
 }
 
+/**
+ * Все id товаров CRM из ошибки проведения «Неверный тип товара #…» (может быть много строк в одном error_description).
+ *
+ * @param string $text
+ * @return array список int без дублей в порядке появления
+ */
+function parseInvalidB24ProductIdsFromConductError($text) {
+    $src = (string)$text;
+    $out = array();
+    $seen = array();
+    $patterns = array(
+        '/Неверный тип товара\s*#(\d+)/u',
+        '/Invalid\s+product\s+type[^\d]*#(\d+)/iu',
+        '/incorrect\s+product\s+type[^\d]*#(\d+)/iu'
+    );
+    foreach ($patterns as $re) {
+        if (@preg_match_all($re, $src, $m)) {
+            if (!empty($m[1]) && is_array($m[1])) {
+                foreach ($m[1] as $digits) {
+                    $id = intval($digits);
+                    if ($id > 0 && !isset($seen[$id])) {
+                        $seen[$id] = true;
+                        $out[] = $id;
+                    }
+                }
+            }
+        }
+    }
+    return $out;
+}
+
+function bitrixConductErrorIndicatesInvalidProductTypes($conductError) {
+    $e = strtolower((string)$conductError);
+    if ($conductError !== '' && strpos((string)$conductError, 'Неверный тип товара') !== false) {
+        return true;
+    }
+    if (strpos($e, 'invalid product type') !== false) {
+        return true;
+    }
+    if (strpos($e, 'incorrect product type') !== false) {
+        return true;
+    }
+    return false;
+}
+
+/**
+ * Клон типа warehouse (crm.product TYPE=1) для id, который нельзя провести; без привязки к локальной БД приложения.
+ *
+ * @param int $sourceB24ProductId id «плохой» позиции в Б24 (как в ошибке проведения)
+ * @return int новый ID или 0
+ */
+function forkB24CrmProductToWarehouseTypeClone($sourceB24ProductId) {
+    $sid = intval($sourceB24ProductId);
+    if ($sid <= 0) {
+        return 0;
+    }
+    $resp = sendToBitrix('crm.product.get', array('id' => $sid));
+    if (!is_array($resp) || isset($resp['error']) || !isset($resp['result']) || !is_array($resp['result'])) {
+        return 0;
+    }
+    $r = $resp['result'];
+    $nm = '';
+    if (isset($r['NAME']) && trim((string)$r['NAME']) !== '') {
+        $nm = trim((string)$r['NAME']);
+    } elseif (isset($r['name']) && trim((string)$r['name']) !== '') {
+        $nm = trim((string)$r['name']);
+    }
+    if ($nm === '') {
+        $nm = 'Товар Б24 #' . $sid;
+    }
+    if (stripos($nm, '[stock]') === false) {
+        $nm .= ' [stock]';
+    }
+    $fields = array(
+        'NAME' => $nm,
+        'TYPE' => 1
+    );
+    $price = isset($r['PRICE']) ? floatval($r['PRICE']) : (isset($r['price']) ? floatval($r['price']) : 0);
+    if ($price > 0) {
+        $fields['PRICE'] = $price;
+        if (isset($r['CURRENCY_ID']) && trim((string)$r['CURRENCY_ID']) !== '') {
+            $fields['CURRENCY_ID'] = trim((string)$r['CURRENCY_ID']);
+        }
+    }
+    $addResp = sendToBitrix('crm.product.add', array('fields' => $fields));
+    if (!is_array($addResp) || isset($addResp['error']) || !isset($addResp['result'])) {
+        return 0;
+    }
+    return intval($addResp['result']);
+}
+
+/**
+ * По ошибке conduct подменить все «плохие» elementId складскими карточками и заново отправить строки документа.
+ *
+ * @param PDO $db
+ * @param int $b24DocId
+ * @param string $docType receipt|writeoff
+ * @param string $conductError
+ * @return array summary для JSON в b24_sync_response
+ */
+function stockB24ConductBulkRepairInvalidProductTypes(PDO $db, $b24DocId, $docType, $conductError) {
+    $summary = array(
+        'bulk_type_repair' => true,
+        'source_errors_snippet' => function_exists('mb_substr')
+            ? mb_substr((string)$conductError, 0, 400)
+            : substr((string)$conductError, 0, 400),
+        'ids_parsed' => array(),
+        'type_updates_in_place' => array(),
+        'replaced_pairs' => array(),
+        'skipped_ids' => array(),
+    );
+
+    $ids = parseInvalidB24ProductIdsFromConductError((string)$conductError);
+    $summary['ids_parsed'] = $ids;
+
+    $allowStockClone = trim((string)getAppSetting($db, 'stock_b24_clone_on_type_mismatch', '0')) === '1';
+
+    foreach ($ids as $invalidBid) {
+        $invalidBid = intval($invalidBid);
+        if ($invalidBid <= 0) {
+            continue;
+        }
+
+        // Сначала тот же путь, что при создании прихода: поправить TYPE у существующей карточки (без дублей в каталоге).
+        if (repairB24ProductTypeToWarehouseInPlace($invalidBid) > 0) {
+            $summary['type_updates_in_place'][] = $invalidBid;
+            pauseBetweenB24DocumentLineAdds($db);
+            continue;
+        }
+
+        if (!$allowStockClone) {
+            $summary['skipped_ids'][] = $invalidBid;
+            continue;
+        }
+
+        $prodStmt = $db->prepare("SELECT id, name, price_per_meter FROM products WHERE b24_product_id = ? LIMIT 1");
+        $prodStmt->execute(array($invalidBid));
+        $localProd = $prodStmt->fetch(PDO::FETCH_ASSOC);
+
+        $newB24Id = 0;
+        if ($localProd && is_array($localProd)) {
+            $newB24Id = forceCreateStockCloneProduct(
+                $db,
+                intval($localProd['id']),
+                isset($localProd['name']) ? $localProd['name'] : '',
+                floatval(isset($localProd['price_per_meter']) ? $localProd['price_per_meter'] : 0)
+            );
+        } else {
+            $newB24Id = forkB24CrmProductToWarehouseTypeClone($invalidBid);
+        }
+
+        if ($newB24Id <= 0) {
+            $summary['skipped_ids'][] = $invalidBid;
+            continue;
+        }
+        if (!replaceInvalidElementInB24Document($db, $b24DocId, $invalidBid, $newB24Id, $docType)) {
+            $summary['skipped_ids'][] = $invalidBid;
+            continue;
+        }
+        $summary['replaced_pairs'][] = array('from' => $invalidBid, 'to' => $newB24Id);
+        pauseBetweenB24DocumentLineAdds($db);
+    }
+
+    return $summary;
+}
+
 function replaceInvalidElementInB24Document($db, $b24DocId, $oldB24ProductId, $newB24ProductId, $docType) {
     $rowsResp = sendToBitrix('catalog.document.element.list', array(
         'filter' => array('docId' => intval($b24DocId)),
-        'select' => array('id', 'elementId', 'amount')
+        'select' => array('id', 'elementId', 'amount', 'price', 'purchasingPrice', 'currency')
     ));
     $rows = parseBitrixListRows($rowsResp);
     if (empty($rows)) {
@@ -910,6 +1076,19 @@ function replaceInvalidElementInB24Document($db, $b24DocId, $oldB24ProductId, $n
         $rowId = intval(isset($row['id']) ? $row['id'] : 0);
         $elementId = intval(isset($row['elementId']) ? $row['elementId'] : (isset($row['ELEMENT_ID']) ? $row['ELEMENT_ID'] : 0));
         $amount = floatval(isset($row['amount']) ? $row['amount'] : (isset($row['AMOUNT']) ? $row['AMOUNT'] : 0));
+        $linePrice = floatval(isset($row['price']) ? $row['price'] : (isset($row['Price']) ? $row['Price'] : (isset($row['PRICE']) ? $row['PRICE'] : 0)));
+        if ($linePrice <= 0) {
+            $linePrice = floatval(isset($row['purchasingPrice']) ? $row['purchasingPrice'] : (isset($row['PURCHASING_PRICE']) ? $row['PURCHASING_PRICE'] : 0));
+        }
+        $lineCur = '';
+        if (isset($row['currency']) && trim((string)$row['currency']) !== '') {
+            $lineCur = trim((string)$row['currency']);
+        } elseif (isset($row['CURRENCY'])) {
+            $lineCur = trim((string)$row['CURRENCY']);
+        }
+        if ($lineCur === '') {
+            $lineCur = $currency;
+        }
         if ($rowId <= 0 || $elementId !== intval($oldB24ProductId)) {
             continue;
         }
@@ -924,7 +1103,15 @@ function replaceInvalidElementInB24Document($db, $b24DocId, $oldB24ProductId, $n
         } else {
             $fields['storeFrom'] = $storeFrom;
         }
-        $fields['currency'] = $currency;
+        $fields['currency'] = $lineCur;
+        if ($linePrice > 0) {
+            $fields['price'] = $linePrice;
+            $fields['purchasingPrice'] = $linePrice;
+            $fields['purchasingCurrency'] = $lineCur;
+            $fields['PRICE'] = $linePrice;
+            $fields['PURCHASING_PRICE'] = $linePrice;
+            $fields['PURCHASING_CURRENCY'] = $lineCur;
+        }
         sendToBitrix('catalog.document.element.add', array('fields' => $fields));
         $replaced = true;
     }
@@ -953,21 +1140,37 @@ function getB24ProductType($b24ProductId) {
     return null;
 }
 
+/**
+ * Выставить у существующего товара Б24 тип, допустимый для складского документа (TYPE=1), без создания копий.
+ *
+ * @param int $b24ProductId
+ * @return int тот же id при успехе, 0 если тип так и не стал 1
+ */
+function repairB24ProductTypeToWarehouseInPlace($b24ProductId) {
+    $id = intval($b24ProductId);
+    if ($id <= 0) {
+        return 0;
+    }
+    $currentType = getB24ProductType($id);
+    if ($currentType === 1) {
+        return $id;
+    }
+    sendToBitrix('crm.product.update', array('id' => $id, 'fields' => array('TYPE' => 1)));
+    sendToBitrix('catalog.product.update', array('id' => $id, 'fields' => array('type' => 1, 'TYPE' => 1)));
+    $afterType = getB24ProductType($id);
+    if ($afterType === 1) {
+        return $id;
+    }
+    return 0;
+}
+
 function ensureUsableB24ProductId($db, $localProductId, $b24ProductId, $productName, $pricePerMeter) {
     $id = intval($b24ProductId);
     if ($id <= 0) {
         return 0;
     }
 
-    $currentType = getB24ProductType($id);
-    if ($currentType === 1) {
-        return $id;
-    }
-
-    sendToBitrix('crm.product.update', array('id' => $id, 'fields' => array('TYPE' => 1)));
-    sendToBitrix('catalog.product.update', array('id' => $id, 'fields' => array('type' => 1, 'TYPE' => 1)));
-    $afterType = getB24ProductType($id);
-    if ($afterType === 1) {
+    if (repairB24ProductTypeToWarehouseInPlace($id) > 0) {
         return $id;
     }
 
@@ -1053,50 +1256,65 @@ function conductAndEnsurePosted($db, $b24DocId, $docType, $supplierName) {
         $conductError = extractBitrixErrorText($conductResp);
     }
 
-    if ($conductError !== '' && stripos($conductError, 'Неверный тип товара') !== false) {
-        /** По умолчанию не создаём [stock]-клон при проведении. Включить: stock_b24_conduct_stock_clone_fallback = 1 */
-        if (trim((string)getAppSetting($db, 'stock_b24_conduct_stock_clone_fallback', '0')) === '1') {
-            $invalidB24Id = parseInvalidProductIdFromConductError($conductError);
-            if ($invalidB24Id > 0) {
-                $prodStmt = $db->prepare("SELECT id, name, price_per_meter FROM products WHERE b24_product_id = ? LIMIT 1");
-                $prodStmt->execute(array($invalidB24Id));
-                $localProd = $prodStmt->fetch(PDO::FETCH_ASSOC);
-                if ($localProd) {
-                    $newB24Id = forceCreateStockCloneProduct(
-                        $db,
-                        intval($localProd['id']),
-                        isset($localProd['name']) ? $localProd['name'] : '',
-                        floatval(isset($localProd['price_per_meter']) ? $localProd['price_per_meter'] : 0)
-                    );
-                    if ($newB24Id > 0) {
-                        replaceInvalidElementInB24Document($db, $b24DocId, $invalidB24Id, $newB24Id, $docType);
-                        $conductResp = sendToBitrix('catalog.document.conduct', array('id' => intval($b24DocId)));
-                        $conductError = extractBitrixErrorText($conductResp);
-                    }
-                }
-            }
+    $conductTypeRepairEnabled = trim((string)getAppSetting($db, 'stock_b24_conduct_repair_invalid_product_types', '1')) === '1'
+        || trim((string)getAppSetting($db, 'stock_b24_conduct_stock_clone_fallback', '0')) === '1';
+
+    $typeRepairLog = array();
+    $conductRepairRounds = 0;
+    $conductRepairMax = intval(getAppSetting($db, 'stock_b24_conduct_type_repair_max_rounds', '8'));
+    if ($conductRepairMax < 1) {
+        $conductRepairMax = 1;
+    }
+    if ($conductRepairMax > 20) {
+        $conductRepairMax = 20;
+    }
+    while ($conductTypeRepairEnabled
+        && bitrixConductErrorIndicatesInvalidProductTypes($conductError)
+        && $conductRepairRounds < $conductRepairMax
+    ) {
+        $conductRepairRounds++;
+        $roundSummary = stockB24ConductBulkRepairInvalidProductTypes($db, intval($b24DocId), (string)$docType, $conductError);
+        $roundSummary['round'] = $conductRepairRounds;
+        $typeRepairLog[] = $roundSummary;
+        $typeRepairMadeProgress =
+            (!empty($roundSummary['replaced_pairs'])
+                || !empty($roundSummary['type_updates_in_place']));
+        if (!$typeRepairMadeProgress) {
+            break;
         }
+        pauseBeforeConduct($db);
+        $conductResp = sendToBitrix('catalog.document.conduct', array('id' => intval($b24DocId)));
+        $conductError = extractBitrixErrorText($conductResp);
     }
 
     // Главный критерий успеха по REST (см. apidocs Bitrix catalog.document.conduct → result:true).
     if (bitrixCatalogDocumentConductResponseIndicatesSuccess($conductResp)) {
-        return array(
+        $done = array(
             'ok' => true,
             'b24_document_id' => intval($b24DocId),
             'conduct_response' => $conductResp,
             'status_checked' => 'conduct_api_result_true'
         );
+        if (!empty($typeRepairLog)) {
+            $done['conduct_bulk_type_repairs'] = $typeRepairLog;
+        }
+        return $done;
     }
 
     if (waitUntilB24DocumentConducted($db, $b24DocId)) {
-        return array(
+        $done = array(
             'ok' => true,
             'b24_document_id' => intval($b24DocId),
             'conduct_response' => $conductResp,
             'status_checked' => 'Y'
         );
+        if (!empty($typeRepairLog)) {
+            $done['conduct_bulk_type_repairs'] = $typeRepairLog;
+        }
+        return $done;
     }
 
+    $updateResp = null;
     // Fallback: some portals expose posting as status update.
     $updateResp = sendToBitrix('catalog.document.update', array(
         'id' => intval($b24DocId),
@@ -1106,22 +1324,30 @@ function conductAndEnsurePosted($db, $b24DocId, $docType, $supplierName) {
         )
     ));
     if (waitUntilB24DocumentConducted($db, $b24DocId)) {
-        return array(
+        $done = array(
             'ok' => true,
             'b24_document_id' => intval($b24DocId),
             'conduct_response' => $conductResp,
             'conduct_fallback_update' => $updateResp,
             'status_checked' => 'Y'
         );
+        if (!empty($typeRepairLog)) {
+            $done['conduct_bulk_type_repairs'] = $typeRepairLog;
+        }
+        return $done;
     }
 
-    return array(
+    $failed = array(
         'ok' => false,
         'stage' => 'document.conduct',
         'b24_document_id' => intval($b24DocId),
         'response' => $conductResp,
         'fallback_update_response' => $updateResp
     );
+    if (!empty($typeRepairLog)) {
+        $failed['conduct_bulk_type_repairs'] = $typeRepairLog;
+    }
+    return $failed;
 }
 
 function syncOperationDocumentToBitrix($db, $docId, $docType, $docNumber, $commentary, $lineRows, $supplierName) {
