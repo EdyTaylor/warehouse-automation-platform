@@ -85,7 +85,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             if ($retryStrategy === 'conduct_only') {
                 $syncResult = stockOperationsExecuteB24ConductOnly($db, $doc);
                 $syncStatus = resolveB24SyncStatus($syncResult);
-            } elseif ($isReceiptDefer && stockOperationsDispatchB24WarehouseWorker($db, $docId)) {
+            } elseif ($isReceiptDefer && stockOperationsDispatchB24WarehouseWorker($db, $docId, $retryStrategy)) {
                 $syncResult = array(
                     'ok' => true,
                     'queued' => true,
@@ -108,7 +108,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                     $docId
                 ));
 
-            if ($syncStatus === 'sent' || $syncStatus === 'partial') {
+            // После partial не делаем сотни crm.product.update — портал и так перегружен, проведение всё равно не готово.
+            if ($syncStatus === 'sent') {
                 stockOperationsPushReceiptProductsNamePriceToB24Catalog($db, $lineRows);
             }
 

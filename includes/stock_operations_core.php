@@ -619,6 +619,17 @@ function stockOperationsPushReceiptProductsNamePriceToB24Catalog($db, array $lin
             'id' => $b24,
             'fields' => $fields
         ));
+        // Не давим портал Б24 серией без пауз (одновременный UI + наш REST → «подвисание» CRM).
+        $pushDelayMs = intval(getAppSetting($db, 'stock_b24_catalog_push_delay_ms', '120'));
+        if ($pushDelayMs < 0) {
+            $pushDelayMs = 0;
+        }
+        if ($pushDelayMs > 3000) {
+            $pushDelayMs = 3000;
+        }
+        if ($pushDelayMs > 0) {
+            usleep($pushDelayMs * 1000);
+        }
     }
 }
 
@@ -1867,7 +1878,12 @@ function stockOperationsGuessPublicSiteUrl() {
  * @param int $docId
  * @return bool true если exec/curl вызван
  */
-function stockOperationsDispatchB24WarehouseWorker(PDO $db, $docId) {
+/**
+ * @param PDO $db
+ * @param int $docId
+ * @param string|null $retryStrategy full|portal_by_number_only|null — передать ту же стратегию, что у кнопки «Дофиксировать»/«Повторить»; null = только app_settings stock_b24_worker_retry_strategy (как раньше).
+ */
+function stockOperationsDispatchB24WarehouseWorker(PDO $db, $docId, $retryStrategy = null) {
     $docId = intval($docId);
     if ($docId <= 0) {
         return false;
@@ -1879,6 +1895,13 @@ function stockOperationsDispatchB24WarehouseWorker(PDO $db, $docId) {
     if ($secret === '') {
         return false;
     }
+    $strategyParam = '';
+    if ($retryStrategy !== null && $retryStrategy !== '') {
+        $rs = strtolower(trim((string)$retryStrategy));
+        if ($rs === 'full' || $rs === 'portal_by_number_only') {
+            $strategyParam = $rs;
+        }
+    }
     $base = trim((string)getAppSetting($db, 'stock_b24_worker_public_base_url', ''));
     if ($base === '') {
         $base = stockOperationsGuessPublicSiteUrl();
@@ -1887,17 +1910,30 @@ function stockOperationsDispatchB24WarehouseWorker(PDO $db, $docId) {
         return false;
     }
     $base = rtrim($base, '/');
-    $q = http_build_query(array(
+    $qs = array(
         'doc_id' => $docId,
         'secret' => $secret,
-    ));
+    );
+    if ($strategyParam !== '') {
+        $qs['retry_strategy'] = $strategyParam;
+    }
+    $q = http_build_query($qs);
     $url = $base . '/api/stock_operation_b24_worker.php?' . $q;
 
+    $curlMax = intval(getAppSetting($db, 'stock_b24_worker_curl_max_time_seconds', '1800'));
+    if ($curlMax < 120) {
+        $curlMax = 120;
+    }
+    if ($curlMax > 7200) {
+        $curlMax = 7200;
+    }
+
     $isWin = (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN');
+    $mt = intval($curlMax);
     if ($isWin) {
-        $cmd = 'start /B curl -fsS --max-time 600 --connect-timeout 10 ' . escapeshellarg($url);
+        $cmd = 'start /B curl -fsS --max-time ' . $mt . ' --connect-timeout 10 ' . escapeshellarg($url);
     } else {
-        $cmd = 'curl -fsS --max-time 600 --connect-timeout 10 ' . escapeshellarg($url) . ' >/dev/null 2>&1 &';
+        $cmd = 'curl -fsS --max-time ' . $mt . ' --connect-timeout 10 ' . escapeshellarg($url) . ' >/dev/null 2>&1 &';
     }
     @exec($cmd);
     return true;
@@ -2865,7 +2901,7 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
 
         $successMessageBase = 'Документ прихода #' . $docId . ' проведен. Валюта ввода: ' . $receiptCurrency . '. Курс USD: ' . number_format($usdToKgsRate, 2, '.', ' ') . ' | Сумма: ' . number_format($totalAmount, 2, '.', ' ') . ' KGS';
 
-        if ($deferEnabled && $cntDeferLines >= $deferMinLines && stockOperationsDispatchB24WarehouseWorker($db, $docId)) {
+        if ($deferEnabled && $cntDeferLines >= $deferMinLines && stockOperationsDispatchB24WarehouseWorker($db, $docId, 'full')) {
             $syncResult = array(
                 'ok' => true,
                 'queued' => true,

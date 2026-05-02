@@ -104,9 +104,12 @@ try {
         exit;
     }
 
-    $retryStrategy = trim((string)getAppSetting($db, 'stock_b24_worker_retry_strategy', 'portal_by_number_only'));
-    if ($retryStrategy !== 'full') {
-        $retryStrategy = 'portal_by_number_only';
+    $retryStrategy = strtolower(trim(isset($_GET['retry_strategy']) ? (string)$_GET['retry_strategy'] : ''));
+    if ($retryStrategy !== 'full' && $retryStrategy !== 'portal_by_number_only') {
+        $retryStrategy = trim((string)getAppSetting($db, 'stock_b24_worker_retry_strategy', 'portal_by_number_only'));
+        if ($retryStrategy !== 'full') {
+            $retryStrategy = 'portal_by_number_only';
+        }
     }
 
     try {
@@ -120,7 +123,8 @@ try {
                 $docId
             ));
 
-        if (((string)$doc['operation_type']) === 'receipt' && ($syncStatus === 'sent' || $syncStatus === 'partial')) {
+        // Не бьём Б24 пачкой crm.product.update при partial — UI портала тормозит, а проведение всё ещё неуспешно.
+        if (((string)$doc['operation_type']) === 'receipt' && $syncStatus === 'sent') {
             stockOperationsPushReceiptProductsNamePriceToB24Catalog($db, $lineRows);
         }
 
