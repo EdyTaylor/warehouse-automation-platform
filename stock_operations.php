@@ -48,10 +48,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             }
 
             $retryStrategy = isset($_POST['retry_strategy']) ? strtolower(trim((string)$_POST['retry_strategy'])) : 'full';
-            if ($retryStrategy !== 'portal_by_number_only') {
+            if ($retryStrategy !== 'portal_by_number_only' && $retryStrategy !== 'conduct_only') {
                 $retryStrategy = 'full';
             }
-            $b24ResolvedId = stockOperationsResolveB24DocumentIdForRetry($db, $doc, $retryStrategy);
 
             if (intval(isset($doc['b24_document_id']) ? $doc['b24_document_id'] : 0) > 0 && (string)$doc['b24_sync_status'] === 'sent') {
                 throw new Exception('Документ уже синхронизирован в Б24: #' . intval($doc['b24_document_id']));
@@ -74,11 +73,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             if ($deferMinLines < 1) {
                 $deferMinLines = 22;
             }
-            $isReceiptDefer = $deferEnabled
+            $isReceiptDefer = ($retryStrategy !== 'conduct_only')
+                && $deferEnabled
                 && (string)$doc['operation_type'] === 'receipt'
                 && count($lineRows) >= $deferMinLines;
 
-            if ($isReceiptDefer && stockOperationsDispatchB24WarehouseWorker($db, $docId)) {
+            if ($retryStrategy === 'conduct_only') {
+                $syncResult = stockOperationsExecuteB24ConductOnly($db, $doc);
+                $syncStatus = resolveB24SyncStatus($syncResult);
+            } elseif ($isReceiptDefer && stockOperationsDispatchB24WarehouseWorker($db, $docId)) {
                 $syncResult = array(
                     'ok' => true,
                     'queued' => true,
@@ -106,7 +109,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             }
 
             if ($syncStatus === 'sent') {
-                $successMsg = 'Повторный синк документа #' . $docId . ' выполнен. Б24 документ #' . intval($syncResult['b24_document_id']);
+                if ($retryStrategy === 'conduct_only') {
+                    $successMsg = 'Документ #' . $docId . ' проведён в Битрикс24: #' . intval($syncResult['b24_document_id']) . '.';
+                } else {
+                    $successMsg = 'Повторный синк документа #' . $docId . ' выполнен. Б24 документ #' . intval($syncResult['b24_document_id']);
+                }
             } elseif ($syncStatus === 'queued') {
                 $successMsg = 'Документ #' . $docId . ': синхронизация с Битрикс24 запущена в фоне (обычно 1–3 мин). Обновите страницу.';
             } elseif ($syncStatus === 'partial') {
@@ -545,8 +552,9 @@ require 'includes/header.php';
                                         <input type="hidden" name="action" value="retry_b24_sync">
                                         <input type="hidden" name="form_token" value="<?= htmlspecialchars($retryToken) ?>">
                                         <input type="hidden" name="doc_id" value="<?= intval($d['id']) ?>">
-                                        <button type="submit" name="retry_strategy" value="full" class="btn btn-warning btn-sm" title="Сохранённый номер документа Б24 или из ответа/поиска по номеру: дозалить строки и провести">Дофиксировать</button>
-                                        <button type="submit" name="retry_strategy" value="portal_by_number_only" class="btn btn-outline btn-sm" title="Если документ удалили в портале: не использовать старый id из базы — только активный документ с этим номером или создание нового; затем можно «Дофиксировать». После отправки синка — имя и цена в CRM">Повторить</button>
+                                        <button type="submit" name="retry_strategy" value="full" class="btn btn-warning btn-sm" title="Дозаписать недостающие строки в уже известном/найденном по номеру документе Б24 и провести его (полный проход строк + conduct).">Дофиксировать</button>
+                                        <button type="submit" name="retry_strategy" value="portal_by_number_only" class="btn btn-outline btn-sm" title="Если документ удалили в портале: не использовать старый id из базы — только активный документ с этим номером или создание нового; затем можно «Дофиксировать». После синка — имя и цена в CRM">Повторить</button>
+                                        <button type="submit" name="retry_strategy" value="conduct_only" class="btn btn-primary btn-sm" title="Только проведение (conduct) уже созданного документа со строками. Строки не добавляет — если они не добавлены, нажмите «Дофиксировать».">Провести документ</button>
                                     </form>
                                 <?php else: ?>
                                     -

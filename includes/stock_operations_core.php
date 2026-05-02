@@ -1645,6 +1645,52 @@ function stockOperationsExecuteB24SyncWithLines(PDO $db, array $doc, array $line
 }
 
 /**
+ * Только проведение (catalog.document.conduct / ожидание статуса) для уже созданного документа со строками.
+ * Не добавляет строки — для случая когда «Дофиксировать» уже дозалил позиции, а проведение упало с ошибкой/таймаутом.
+ *
+ * id документа: сперва full (колонка, JSON), если 0 — поиск по номеру в портале.
+ *
+ * @param PDO $db
+ * @param array $doc stock_operation_docs
+ * @return array как conductAndEnsurePosted
+ */
+function stockOperationsExecuteB24ConductOnly(PDO $db, array $doc) {
+    $b24DocId = stockOperationsResolveB24DocumentIdForRetry($db, $doc, 'full');
+    if ($b24DocId <= 0) {
+        $b24DocId = stockOperationsResolveB24DocumentIdForRetry($db, $doc, 'portal_by_number_only');
+    }
+    if ($b24DocId <= 0) {
+        return array(
+            'ok' => false,
+            'stage' => 'prepare',
+            'response' => array(
+                'error' => 'no_b24_document_id',
+                'error_description' => 'Нет известного id документа Битрикс24. Нажмите «Повторить» или «Дофиксировать».'
+            ),
+        );
+    }
+    $op = isset($doc['operation_type']) ? (string)$doc['operation_type'] : '';
+    $supplier = isset($doc['supplier']) ? (string)$doc['supplier'] : '';
+    $res = conductAndEnsurePosted($db, intval($b24DocId), $op, $supplier);
+    if (!is_array($res)) {
+        return array(
+            'ok' => false,
+            'stage' => 'document.conduct',
+            'b24_document_id' => intval($b24DocId),
+            'response' => null,
+            'retry_mode' => 'conduct_only',
+            'b24_resolve_id_used' => intval($b24DocId),
+        );
+    }
+    $res['retry_mode'] = 'conduct_only';
+    $res['b24_resolve_id_used'] = intval($b24DocId);
+    if (!isset($res['b24_document_id']) || intval($res['b24_document_id']) <= 0) {
+        $res['b24_document_id'] = intval($b24DocId);
+    }
+    return $res;
+}
+
+/**
  * После проведённого прихода в Б24 подтянуть остатки по товарам в каталог/магазин портала.
  *
  * @param PDO $db
