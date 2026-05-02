@@ -11,7 +11,7 @@
  * Безопасность: ключ app_settings stock_receipt_api_secret (задаётся в sync_monitor.php), заголовок
  * X-Stock-Receipt-Secret или для отладки тот же ключ в query ?secret=
  *
- * Для больших приходов: по умолчанию при ≥ строк (app_settings stock_receipt_b24_worker_min_lines, обычно 22) синк Б24
+ * Для больших приходов: по умолчанию при ≥ строк (app_settings stock_receipt_b24_worker_min_lines, по умолчанию 2) синк Б24
  * уходит в фоновый запрос api/stock_operation_b24_worker.php (ответ HTTP не ждёт проведения — нет 504 у nginx).
  * Либо добавьте в JSON: "local_only": true — без документа в Б24 вообще.
  * Чанковый режим (несколько документов подряд, короче один HTTP-ответ): "lines_per_chunk": 28 (или 25–80),

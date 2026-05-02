@@ -74,9 +74,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             }
 
             $deferEnabled = trim((string)getAppSetting($db, 'stock_receipt_b24_worker_enabled', '1')) === '1';
-            $deferMinLines = intval(getAppSetting($db, 'stock_receipt_b24_worker_min_lines', '22'));
+            $deferMinLines = intval(getAppSetting($db, 'stock_receipt_b24_worker_min_lines', '2'));
             if ($deferMinLines < 1) {
-                $deferMinLines = 22;
+                $deferMinLines = 2;
             }
             $isReceiptDefer = ($retryStrategy !== 'conduct_only')
                 && $deferEnabled

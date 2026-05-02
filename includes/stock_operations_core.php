@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 /** Shared: stock tables, Bitrix document sync, receipt product helpers. */
 
 require_once __DIR__ . '/../functions/app_settings.php';
@@ -1118,6 +1118,8 @@ function stockB24ConductBulkRepairInvalidProductTypes(PDO $db, $b24DocId, $docTy
     $summary['ids_parsed'] = $ids;
 
     $allowStockClone = trim((string)getAppSetting($db, 'stock_b24_clone_on_type_mismatch', '0')) === '1';
+    $autoFork = trim((string)getAppSetting($db, 'stock_b24_auto_fork_when_type_repair_fails', '1')) === '1';
+    $tryFork = $allowStockClone || $autoFork;
 
     foreach ($ids as $invalidBid) {
         $invalidBid = intval($invalidBid);
@@ -1132,7 +1134,7 @@ function stockB24ConductBulkRepairInvalidProductTypes(PDO $db, $b24DocId, $docTy
             continue;
         }
 
-        if (!$allowStockClone) {
+        if (!$tryFork) {
             $summary['skipped_ids'][] = $invalidBid;
             continue;
         }
@@ -1354,32 +1356,24 @@ function ensureUsableB24ProductId($db, $localProductId, $b24ProductId, $productN
         return $id;
     }
 
-    /** По умолчанию без клонов «… [stock]» — они плодят дубликаты в каталоге. Включить: app_settings stock_b24_clone_on_type_mismatch = 1 */
+    /**
+     * На части Б24 тип карточки для СУ через REST не переводится — «Неверный тип товара #…» при conduct.
+     * Автоматически создаём crm.product с TYPE=1 (суффикс « [stock]») и записываем в products.b24_product_id — см. forceCreateStockCloneProduct.
+     * Отключить: app_settings stock_b24_auto_fork_when_type_repair_fails = 0 (останется только stock_b24_clone_on_type_mismatch = 1).
+     */
+    $autoFork = trim((string)getAppSetting($db, 'stock_b24_auto_fork_when_type_repair_fails', '1')) === '1';
     $allowStockClone = trim((string)getAppSetting($db, 'stock_b24_clone_on_type_mismatch', '0')) === '1';
-    if (!$allowStockClone) {
+    if (!$autoFork && !$allowStockClone) {
         return $id;
     }
 
-    // Hard fallback: создать складской клон только если включено явно выше.
-    $newName = trim((string)$productName);
-    if ($newName === '') {
-        $newName = 'Товар #' . intval($localProductId);
-    }
-    $createFields = array(
-        'NAME' => $newName . ' [stock]',
-        'TYPE' => 1
+    $newB24Id = forceCreateStockCloneProduct(
+        $db,
+        intval($localProductId),
+        isset($productName) ? (string)$productName : '',
+        floatval($pricePerMeter)
     );
-    if (stockReceiptShouldPushCrmCatalogPrice($db) && floatval($pricePerMeter) > 0) {
-        $createFields['PRICE'] = floatval($pricePerMeter);
-    }
-    $createResp = sendToBitrix('crm.product.add', array('fields' => $createFields));
-    $newB24Id = 0;
-    if (is_array($createResp) && !isset($createResp['error']) && isset($createResp['result'])) {
-        $newB24Id = intval($createResp['result']);
-    }
     if ($newB24Id > 0) {
-        $db->prepare("UPDATE products SET b24_product_id = ? WHERE id = ?")
-            ->execute(array($newB24Id, intval($localProductId)));
         return $newB24Id;
     }
 
@@ -3128,9 +3122,9 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
         }
 
         $deferEnabled = trim((string)getAppSetting($db, 'stock_receipt_b24_worker_enabled', '1')) === '1';
-        $deferMinLines = intval(getAppSetting($db, 'stock_receipt_b24_worker_min_lines', '22'));
+        $deferMinLines = intval(getAppSetting($db, 'stock_receipt_b24_worker_min_lines', '2'));
         if ($deferMinLines < 1) {
-            $deferMinLines = 22;
+            $deferMinLines = 2;
         }
         $cntDeferLines = intval($db->query("SELECT COUNT(*) AS c FROM stock_operation_lines WHERE doc_id=" . intval($docId))->fetchColumn());
 
