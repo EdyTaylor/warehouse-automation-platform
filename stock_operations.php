@@ -389,7 +389,8 @@ $recentDocs = $db->query("
     LIMIT 20
 ")->fetchAll(PDO::FETCH_ASSOC);
 
-$reconcileListMax = intval(getAppSetting($db, 'stock_b24_reconcile_on_doc_list_max', '3'));
+// 0 = не дергать Б24 при каждом открытии страницы (меньше 504 на Beget). Включить: app_settings stock_b24_reconcile_on_doc_list_max = 1..3
+$reconcileListMax = intval(getAppSetting($db, 'stock_b24_reconcile_on_doc_list_max', '0'));
 if ($reconcileListMax > 0 && !empty($recentDocs)) {
     $reconcileDone = 0;
     foreach ($recentDocs as $ix => $rd) {

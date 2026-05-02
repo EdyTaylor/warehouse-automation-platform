@@ -1289,6 +1289,8 @@ function repairB24ProductTypeToWarehouseInPlace($b24ProductId) {
  * Уменьшает «Неверный тип товара» при первом проведении из приложения.
  * Не выполняется при нажатии «Провести» только в UI Битрикс24 — нужен синк/кнопка из приложения.
  * Отключить: app_settings stock_b24_preconduct_repair_line_types = 0
+ * Лимит позиций (уникальных elementId): stock_b24_preconduct_repair_max_elements (по умолчанию 22).
+ * При большем числе пропускаем — иначе Beget/nginx даёт 504; типы добивает цикл после ошибки conduct.
  *
  * @param PDO $db
  * @param int $b24DocId
@@ -1302,6 +1304,22 @@ function stockB24RepairAllLineCatalogProductTypesForDocument(PDO $db, $b24DocId)
     }
     $map = fetchB24DocumentElementsMap($bid);
     if (!is_array($map) || empty($map)) {
+        return $out;
+    }
+    $uniqIds = array();
+    foreach (array_keys($map) as $k) {
+        $ik = intval($k);
+        if ($ik > 0) {
+            $uniqIds[$ik] = true;
+        }
+    }
+    $nUniq = count($uniqIds);
+    $maxEl = intval(getAppSetting($db, 'stock_b24_preconduct_repair_max_elements', '22'));
+    if ($maxEl > 0 && $nUniq > $maxEl) {
+        $out['skipped'] = true;
+        $out['skip_reason'] = 'element_count_exceeds_max';
+        $out['element_count'] = $nUniq;
+        $out['max_elements'] = $maxEl;
         return $out;
     }
     $seen = array();
