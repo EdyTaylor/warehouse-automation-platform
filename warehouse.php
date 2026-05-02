@@ -112,11 +112,11 @@ function hydrateMissingRollProductNamesFromBitrix($db, &$rolls) {
 }
 
 // 🔥 ДОБАВЛЕНИЕ РУЛОНОВ
-if ($_SERVER['REQUEST_METHOD'] === 'POST' 
-    && !isset($_POST['sell_rolls']) 
-    && !isset($_POST['sell_meters']) 
+if ($_SERVER['REQUEST_METHOD'] === 'POST'
+    && !isset($_POST['sell_rolls'])
+    && !isset($_POST['sell_meters'])
     && !isset($_POST['delete_roll'])
-    && (!isset($_POST['action']) || $_POST['action'] !== 'writeoff')
+    && (!isset($_POST['action']) || ($_POST['action'] !== 'writeoff' && $_POST['action'] !== 'warehouse_b24_conflict_scan'))
 ) {
     $emOff = stockEmergencyRollCreationStoppedMessage($db);
     $blockMsg = ($emOff !== '') ? $emOff : integrationStockRollCreationBlockedMessage($db);
@@ -325,6 +325,31 @@ if (isset($_POST['sell_meters'])) {
     }
 }
 
+// Скан склад ↔ Б24: расхождения в b24_sync_conflicts (тип stock_store_mismatch).
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'warehouse_b24_conflict_scan') {
+    require_once __DIR__ . '/functions/stock_store_conflict_scan.php';
+    $storeIdWs = intval(getAppSetting($db, 'stock_sync_store_id', '0'));
+    if ($storeIdWs <= 0) {
+        $storeIdWs = intval(getAppSetting($db, 'default_store_from_id', '1'));
+    }
+    if ($storeIdWs <= 0) {
+        $storeIdWs = intval(getAppSetting($db, 'default_store_to_id', '1'));
+    }
+    if ($storeIdWs <= 0) {
+        $storeIdWs = 1;
+    }
+    $storeIdWs = b24ResolveWorkingStoreIdLocal($storeIdWs);
+    $summaryWs = stockStoreConflictScanProgressive($db, $storeIdWs, 26.0, 32);
+    $success_msg = '📊 Скан склад ↔ Б24 (catalog.store по store_id): обработано товаров ' . intval($summaryWs['processed_this_run'])
+        . ', записано/обновлено расхождений ' . intval($summaryWs['mismatch_upserted'])
+        . ', совпало ' . intval($summaryWs['matches'])
+        . ', store #' . intval($summaryWs['store_id']) . ', за ' . $summaryWs['elapsed_sec'] . ' c';
+    if (empty($summaryWs['done'])) {
+        $success_msg .= ' За один заход охват ограничен (~25 с API) — нажмите кнопку ещё раз, чтобы продолжить.';
+    }
+    $success_msg .= ' Откройте «Продажи Б24» (раздел расхождений) или «Настройки» → найденные расхождения.';
+}
+
 // Фильтры списка рулонов
 $filterProductId = intval(isset($_GET['product_id']) ? $_GET['product_id'] : 0);
 $filterStatus = isset($_GET['status']) ? trim($_GET['status']) : '';
@@ -334,8 +359,14 @@ $onlyScrap = isset($_GET['only_scrap']) && $_GET['only_scrap'] === '1';
 $lowStockThreshold = floatval(isset($_GET['low_stock_below']) ? $_GET['low_stock_below'] : 0);
 $withoutNameOnly = isset($_GET['without_name']) && $_GET['without_name'] === '1';
 
+$layout = isset($_GET['layout']) ? trim($_GET['layout']) : 'rolls';
+if ($layout !== 'products') {
+    $layout = 'rolls';
+}
+
 // Получаем данные с улучшенной обработкой
 $rolls = array();
+$productGroups = array();
 try {
     $where = array();
     $params = array();
@@ -369,6 +400,37 @@ try {
         $where[] = "COALESCE(NULLIF(TRIM(p_local.name), ''), NULLIF(TRIM(p_b24.name), '')) IS NULL";
     }
 
+    $whereSql = '';
+    if (!empty($where)) {
+        $whereSql = ' WHERE ' . implode(' AND ', $where);
+    }
+
+    if ($layout === 'products') {
+        $sqlGrp = "
+            SELECT 
+                r.product_id,
+                MAX(COALESCE(p_local.b24_product_id, 0)) AS b24_product_id,
+                COUNT(*) AS roll_count,
+                SUM(CASE WHEN r.reserved = 0 AND r.current_length > 0 AND r.status NOT IN ('sold','waste','written_off') THEN r.current_length ELSE 0 END) AS free_meters,
+                MAX(COALESCE(p_local.roll_length, p_b24.roll_length, r.original_length)) AS typical_roll_length,
+                MAX(COALESCE(p_local.price_per_meter, p_b24.price_per_meter, 0)) AS price_per_meter,
+                MAX(COALESCE(
+                    NULLIF(TRIM(p_local.name), ''),
+                    NULLIF(TRIM(p_b24.name), ''),
+                    CONCAT('Архивный товар (ID ', r.product_id, ')')
+                )) AS product_name
+            FROM rolls r
+            LEFT JOIN products p_local ON r.product_id = p_local.id
+            LEFT JOIN products p_b24 ON r.product_id = p_b24.b24_product_id
+            " . $whereSql . "
+            GROUP BY r.product_id
+            ORDER BY free_meters DESC, roll_count DESC
+        ";
+        $gStmt = $db->prepare($sqlGrp);
+        $gStmt->execute($params);
+        $productGroups = $gStmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+
     $sql = "
         SELECT 
             r.id,
@@ -389,15 +451,15 @@ try {
         FROM rolls r
         LEFT JOIN products p_local ON r.product_id = p_local.id
         LEFT JOIN products p_b24 ON r.product_id = p_b24.b24_product_id
-    ";
-    if (!empty($where)) {
-        $sql .= " WHERE " . implode(" AND ", $where);
-    }
-    $sql .= " ORDER BY r.id DESC";
+    " . $whereSql . " ORDER BY r.id DESC";
+
     $stmt = $db->prepare($sql);
     $stmt->execute($params);
     $rolls = $stmt->fetchAll(PDO::FETCH_ASSOC);
-    hydrateMissingRollProductNamesFromBitrix($db, $rolls);
+
+    if ($layout === 'rolls') {
+        hydrateMissingRollProductNamesFromBitrix($db, $rolls);
+    }
 } catch (Exception $e) {
     $rolls = $db->query("SELECT * FROM rolls ORDER BY id DESC")->fetchAll(PDO::FETCH_ASSOC);
     foreach ($rolls as &$roll) {
@@ -439,11 +501,23 @@ require 'includes/header.php';
 
         <div class="card">
             <h2>🔄 Синхронизация с Б24</h2>
+            <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:8px; align-items:center;">
+                <a href="api/bitrix/sync_stock.php?push=1" class="btn btn-warning" target="_blank">📤 Выгрузить остатки в Б24</a>
+                <a href="api/bitrix/sync_stock.php?push=1&amp;compare=1" class="btn btn-light" target="_blank">Сравнить (JSON отчёт)</a>
+                <form method="POST" style="display:inline-block; margin:0;">
+                    <input type="hidden" name="action" value="warehouse_b24_conflict_scan">
+                    <button type="submit" class="btn btn-outline">🔎 Скан: расхождения склад ↔ Б24</button>
+                </form>
+                <a href="b24_sales.php" class="btn btn-light">Расхождения и очередь</a>
+                <a href="sync_monitor.php#sec-conflicts" class="btn btn-light" target="_blank">Настройки: расхождения</a>
+            </div>
+            <p class="text-muted" style="margin:0 0 8px 0;font-size:0.92rem;">
+                «Скан» читает остатки на складе Б24 (<code>catalog.storeproduct</code>) и сверяет с суммой свободных метров по рулонам в приложении; несовпадения попадают в общий список расхождений (можно закрыть в «Продажи Б24»).
+                Выгрузка остатков по-прежнему односторонне перезаписывает Б24 цифрами из приложения.
+            </p>
             <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:8px;">
-                <a href="api/bitrix/sync_stock.php?push=1" class="btn btn-warning" target="_blank">📤 Синхронизировать остатки</a>
                 <a href="api/sync_prices.php?action=to_b24" class="btn btn-warning" target="_blank">💰 Синхронизировать цены</a>
                 <a href="api/bitrix/import_products.php" class="btn btn-success" target="_blank">📥 Импортировать товары из Б24</a>
-                <a href="b24_sales.php" class="btn btn-light">📋 Очередь резерва Б24</a>
                 <a href="warehouse_orders.php" class="btn btn-light">🧰 Рабочее место кладовщика</a>
             </div>
             <?php if ($b24Queue): ?>
@@ -487,6 +561,13 @@ require 'includes/header.php';
                             <option value="all" <?= $viewMode === 'all' ? 'selected' : '' ?>>Все</option>
                         </select>
                     </div>
+                    <div class="form-group warehouse-filter-item">
+                        <label>Навигация</label>
+                        <select name="layout" id="warehouse-layout-switch">
+                            <option value="rolls" <?= $layout === 'rolls' ? 'selected' : '' ?>>По рулонам</option>
+                            <option value="products" <?= $layout === 'products' ? 'selected' : '' ?>>Сводка по товарам</option>
+                        </select>
+                    </div>
                     <div class="form-group warehouse-filter-item warehouse-filter-item-wide">
                         <label>Быстрые фильтры</label>
                         <div class="warehouse-filter-inline">
@@ -513,7 +594,13 @@ require 'includes/header.php';
                 <div class="warehouse-filter-actions">
                     <button type="submit" class="btn btn-primary">Применить фильтры</button>
                     <a href="warehouse.php" class="btn btn-light">Сбросить</a>
-                    <span class="text-muted">Показываем: <?= count($rolls) ?> рулонов</span>
+                    <span class="text-muted">
+                        <?php if ($layout === 'products'): ?>
+                            Позиций: <?= count($productGroups) ?> (сводка), рулонов в выборке: <?= count($rolls) ?>.
+                        <?php else: ?>
+                            Рулонов: <?= count($rolls) ?>.
+                        <?php endif; ?>
+                    </span>
                 </div>
             </form>
         </div>
@@ -531,9 +618,14 @@ require 'includes/header.php';
         <div class="card">
             <h2>📋 Складские остатки</h2>
             <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;">
-                <a class="btn btn-light" href="?view=active">Рабочий склад</a>
-                <a class="btn btn-light" href="?view=history">Архив движения</a>
-                <a class="btn btn-light" href="?view=all">Полный список</a>
+                <?php $wLay = htmlspecialchars('layout=' . urlencode($layout) . '&view='); ?>
+                <a class="btn btn-light <?= $viewMode === 'active' ? 'btn-primary' : '' ?>" href="?<?= $wLay ?>active">Рабочий склад</a>
+                <a class="btn btn-light <?= $viewMode === 'history' ? 'btn-primary' : '' ?>" href="?<?= $wLay ?>history">Архив движения</a>
+                <a class="btn btn-light <?= $viewMode === 'all' ? 'btn-primary' : '' ?>" href="?<?= $wLay ?>all">Полный список</a>
+                <span class="text-muted" style="align-self:center;">|</span>
+                <?php $wView = htmlspecialchars('view=' . urlencode($viewMode)); ?>
+                <a class="btn <?= $layout === 'rolls' ? 'btn-primary' : 'btn-light' ?>" href="?layout=rolls&amp;<?= $wView ?>">По рулонам</a>
+                <a class="btn <?= $layout === 'products' ? 'btn-primary' : 'btn-light' ?>" href="?layout=products&amp;<?= $wView ?>">Сводка по товарам</a>
             </div>
             <?php
             $counts = array('active' => 0, 'history' => 0);
@@ -548,7 +640,46 @@ require 'includes/header.php';
             <p class="text-muted">
                 В выборке: актуальных <?= $counts['active'] ?>, исторических <?= $counts['history'] ?>.
             </p>
-            <?php if (count($rolls) > 0): ?>
+            <?php if ($layout === 'products'): ?>
+                <?php if (!empty($productGroups)): ?>
+                <table class="table warehouse-product-summary-table">
+                    <thead>
+                        <tr>
+                            <th>Лок. товар</th>
+                            <th>Рулонов</th>
+                            <th>Свободных м (сводка)</th>
+                            <th>Битрикс ID</th>
+                            <th>Цена/м</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach ($productGroups as $pg): ?>
+                            <?php
+                            $pidG = intval(isset($pg['product_id']) ? $pg['product_id'] : 0);
+                            $fmG = round(floatval(isset($pg['free_meters']) ? $pg['free_meters'] : 0), 2);
+                            $rcG = intval(isset($pg['roll_count']) ? $pg['roll_count'] : 0);
+                            $b24G = intval(isset($pg['b24_product_id']) ? $pg['b24_product_id'] : 0);
+                            $rollsDeep = '?layout=rolls&amp;view=' . urlencode($viewMode) . '&amp;product_id=' . $pidG;
+                            ?>
+                            <tr>
+                                <td>
+                                    <strong><?php echo htmlspecialchars(isset($pg['product_name']) ? (string)$pg['product_name'] : ''); ?></strong><br>
+                                    <small class="text-muted">id <?php echo $pidG; ?></small>
+                                </td>
+                                <td><?php echo $rcG; ?></td>
+                                <td><strong><?php echo number_format($fmG, 2, '.', ' '); ?> м</strong></td>
+                                <td><?php if ($b24G > 0): ?><?php echo $b24G; ?><?php else: ?><span class="text-muted">—</span><?php endif; ?></td>
+                                <td><?php echo !empty($pg['price_per_meter']) && floatval($pg['price_per_meter']) > 0 ? number_format(floatval($pg['price_per_meter']), 0, '.', ' ') . ' KGS' : '—'; ?></td>
+                                <td><a class="btn btn-light btn-sm" href="<?= htmlspecialchars($rollsDeep) ?>">Рулоны</a></td>
+                            </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+                <?php else: ?>
+                    <p class="text-muted">Нет рулонов в текущих фильтрах — сводка пуста.</p>
+                <?php endif; ?>
+            <?php elseif (count($rolls) > 0): ?>
             <table class="table">
                 <thead>
                     <tr>

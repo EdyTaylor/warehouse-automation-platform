@@ -62,23 +62,8 @@ function ensureDealRowsSyncSchema($db) {
 }
 
 function ensureSyncConflictSchema($db) {
-    $db->exec("
-        CREATE TABLE IF NOT EXISTS b24_sync_conflicts (
-            id int NOT NULL AUTO_INCREMENT,
-            conflict_type varchar(50) NOT NULL,
-            b24_product_id int DEFAULT NULL,
-            local_product_id int DEFAULT NULL,
-            local_value decimal(14,2) DEFAULT NULL,
-            b24_value decimal(14,2) DEFAULT NULL,
-            details text,
-            status varchar(20) NOT NULL DEFAULT 'new',
-            created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            PRIMARY KEY (id),
-            KEY idx_conflict_status (status, created_at),
-            KEY idx_conflict_product (b24_product_id, local_product_id, status)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    ");
+    require_once __DIR__ . '/functions/b24_sync_conflicts.php';
+    ensureB24SyncConflictsSchema($db);
 }
 
 function resolveConflictStatus($db, $conflictId, $status, $detailsSuffix) {
@@ -165,18 +150,22 @@ function buildConflictResolutionHint($conflict) {
     $localVal = floatval(isset($conflict['local_value']) ? $conflict['local_value'] : 0);
     $b24Val = floatval(isset($conflict['b24_value']) ? $conflict['b24_value'] : 0);
 
-    if ($type === 'stock_field_mismatch') {
+    if ($type === 'stock_field_mismatch' || $type === 'stock_store_mismatch') {
         if ($b24Val > $localVal + 0.01) {
             return array(
-                'warehouse_state' => 'На складе меньше, чем в Б24',
-                'b24_state' => 'В Б24 остаток завышен',
-                'recommended' => 'Обычно: "Выровнять Б24 по складу". Если Б24 корректен физически — "Добавить на склад (принять Б24)".'
+                'warehouse_state' => 'На складе приложения меньше метража, чем в Б24',
+                'b24_state' => $type === 'stock_store_mismatch'
+                    ? 'На складе Б24 (warehouse) остаток больше'
+                    : 'В поле остатка товара в Б24 указано больше',
+                'recommended' => 'Обычно: "Выровнять Б24 по складу". Если учёт Б24 точнее — "Добавить на склад (принять Б24)".'
             );
         }
         if ($localVal > $b24Val + 0.01) {
             return array(
-                'warehouse_state' => 'На складе больше, чем в Б24',
-                'b24_state' => 'В Б24 остаток занижен/нулевой',
+                'warehouse_state' => 'На складе приложения больше метража',
+                'b24_state' => $type === 'stock_store_mismatch'
+                    ? 'На складе Б24 меньше / нулевой'
+                    : 'В поле Б24 указано меньше',
                 'recommended' => 'Обычно: "Выровнять Б24 по складу".'
             );
         }
@@ -962,7 +951,7 @@ try {
 <?php if ($message): ?><div class="alert alert-success"><?= h($message) ?></div><?php endif; ?>
 <?php if ($error): ?><div class="alert alert-danger"><?= h($error) ?></div><?php endif; ?>
 
-<h3>Расхождения склад ↔ Б24</h3>
+<h3 id="b24-stock-conflicts">Расхождения склад ↔ Б24</h3>
 <p class="text-muted">
     Автоматически не чистим. Для каждого расхождения выберите действие:
     выровнять Б24 по складу (истина — склад) или принять данные Б24 и добавить на склад.

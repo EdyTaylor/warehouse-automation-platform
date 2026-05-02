@@ -13,56 +13,8 @@ $db = getDB();
 integrationAbortJsonIfAllSyncPaused($db);
 $cfg = require __DIR__ . '/config.php';
 
-function ensureSyncCycleTables($db) {
-    $db->exec("
-        CREATE TABLE IF NOT EXISTS b24_sync_conflicts (
-            id int NOT NULL AUTO_INCREMENT,
-            conflict_type varchar(50) NOT NULL,
-            b24_product_id int DEFAULT NULL,
-            local_product_id int DEFAULT NULL,
-            local_value decimal(14,2) DEFAULT NULL,
-            b24_value decimal(14,2) DEFAULT NULL,
-            details text,
-            status varchar(20) NOT NULL DEFAULT 'new',
-            created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            PRIMARY KEY (id),
-            KEY idx_conflict_status (status, created_at),
-            KEY idx_conflict_product (b24_product_id, local_product_id, status)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    ");
-}
-
-function upsertConflict($db, $type, $b24ProductId, $localProductId, $localValue, $b24Value, $details) {
-    $sel = $db->prepare("
-        SELECT id
-        FROM b24_sync_conflicts
-        WHERE status = 'new'
-          AND conflict_type = ?
-          AND b24_product_id = ?
-          AND local_product_id = ?
-        ORDER BY id DESC
-        LIMIT 1
-    ");
-    $sel->execute(array($type, intval($b24ProductId), intval($localProductId)));
-    $existing = $sel->fetch(PDO::FETCH_ASSOC);
-    if ($existing) {
-        $db->prepare("
-            UPDATE b24_sync_conflicts
-            SET local_value = ?, b24_value = ?, details = ?, updated_at = NOW()
-            WHERE id = ?
-        ")->execute(array($localValue, $b24Value, $details, intval($existing['id'])));
-        return intval($existing['id']);
-    }
-    $db->prepare("
-        INSERT INTO b24_sync_conflicts
-        (conflict_type, b24_product_id, local_product_id, local_value, b24_value, details, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, 'new', NOW(), NOW())
-    ")->execute(array($type, intval($b24ProductId), intval($localProductId), $localValue, $b24Value, $details));
-    return intval($db->lastInsertId());
-}
-
-ensureSyncCycleTables($db);
+require_once __DIR__ . '/../../functions/b24_sync_conflicts.php';
+ensureB24SyncConflictsSchema($db);
 
 $chunk = isset($_GET['chunk']) ? max(5, min(100, intval($_GET['chunk']))) : 30;
 $runStock = !isset($_GET['stock']) || $_GET['stock'] === '1';
@@ -222,14 +174,14 @@ if ($runPricePullCheck) {
             $localPrice = floatval(isset($local['price_per_meter']) ? $local['price_per_meter'] : 0);
             if (abs($localPrice - $b24Price) > 0.01) {
                 $conflicts++;
-                upsertConflict($db, 'price_mismatch', $b24Id, intval($local['id']), $localPrice, $b24Price, 'Разница цены между приложением и Б24');
+                b24UpsertSyncConflict($db, 'price_mismatch', $b24Id, intval($local['id']), $localPrice, $b24Price, 'Разница цены между приложением и Б24');
             }
             $fieldName = isset($cfg['product_available_field']) ? $cfg['product_available_field'] : 'UF_CRM_STOCK_M';
             $b24Stock = floatval(isset($item[$fieldName]) ? $item[$fieldName] : 0);
             $localStock = floatval(isset($local['free_meters']) ? $local['free_meters'] : 0);
             if (abs($localStock - $b24Stock) > 0.01) {
                 $conflicts++;
-                upsertConflict($db, 'stock_field_mismatch', $b24Id, intval($local['id']), $localStock, $b24Stock, 'Разница остатка между приложением и Б24 (поле товара)');
+                b24UpsertSyncConflict($db, 'stock_field_mismatch', $b24Id, intval($local['id']), $localStock, $b24Stock, 'Разница остатка между приложением и Б24 (поле товара)');
             }
         }
         $next = isset($resp['next']) ? intval($resp['next']) : 0;
