@@ -10,6 +10,11 @@ require_once __DIR__ . '/functions/app_settings.php';
 require_once __DIR__ . '/functions/integration_sync_control.php';
 require_once __DIR__ . '/functions/stock_emergency_kill.php';
 require_once __DIR__ . '/api/bitrix/send.php';
+require_once __DIR__ . '/functions/prg_flash.php';
+
+if (session_status() !== PHP_SESSION_ACTIVE) {
+    session_start();
+}
 
 $dashboardMessage = '';
 $dashboardError = '';
@@ -170,6 +175,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         }
     }
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    prgFlashCommitAndRedirect303(
+        'dashboard.php',
+        array(
+            'success' => $dashboardMessage,
+            'error' => $dashboardError,
+        )
+    );
+}
+
+$__dbFlash = prgFlashConsume();
+if (!empty($__dbFlash['error'])) {
+    $dashboardError = $__dbFlash['error'];
+    $dashboardMessage = '';
+} elseif (!empty($__dbFlash['success'])) {
+    $dashboardMessage = $__dbFlash['success'];
 }
 
 // Простая статистика без сложных запросов

@@ -9,8 +9,14 @@ require_once __DIR__ . '/functions/app_settings.php';
 require_once __DIR__ . '/functions/integration_sync_control.php';
 require_once __DIR__ . '/functions/stock_emergency_kill.php';
 require_once __DIR__ . '/functions/stock_movements.php';
+require_once __DIR__ . '/functions/prg_flash.php';
+
+if (session_status() !== PHP_SESSION_ACTIVE) {
+    session_start();
+}
 
 $productId = intval(isset($_GET['product_id']) ? $_GET['product_id'] : 0);
+$error = '';
 
 // Получаем информацию о товаре
 $stmt = $db->prepare("SELECT * FROM products WHERE id = ?");
@@ -85,6 +91,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } else {
         $error = "Укажите количество рулонов";
     }
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && trim((string)$error) !== '') {
+    prgFlashCommitAndRedirect303WithQuery(
+        'add_stock.php',
+        array('product_id' => $productId),
+        array('error' => $error)
+    );
+}
+
+$fAdd = prgFlashConsume();
+if (!empty($fAdd['error'])) {
+    $error = $fAdd['error'];
 }
 
 // Получаем текущие остатки
@@ -214,7 +233,7 @@ $stock = $stmt->fetch(PDO::FETCH_ASSOC);
     </div>
 
     <div class="container">
-        <?php if (isset($error)): ?>
+        <?php if ($error !== ''): ?>
             <div class="error"><?= htmlspecialchars($error) ?></div>
         <?php endif; ?>
 

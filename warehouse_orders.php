@@ -7,8 +7,12 @@ require __DIR__ . '/db.php';
 require_once __DIR__ . '/api/bitrix/send.php';
 require_once __DIR__ . '/functions/deal_rows_sync_service.php';
 require_once __DIR__ . '/functions/sale_order_allocations.php';
+require_once __DIR__ . '/functions/prg_flash.php';
 
 $db = getDB();
+if (session_status() !== PHP_SESSION_ACTIVE) {
+    session_start();
+}
 $message = '';
 $error = '';
 $page_title = 'Рабочее место кладовщика';
@@ -182,6 +186,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
     }
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    prgFlashCommitAndRedirect303(
+        'warehouse_orders.php',
+        array(
+            'success' => $message,
+            'error' => $error,
+        )
+    );
+}
+
+$__woFlash = prgFlashConsume();
+if (!empty($__woFlash['error'])) {
+    $error = $__woFlash['error'];
+    $message = '';
+} elseif (!empty($__woFlash['success'])) {
+    $message = $__woFlash['success'];
 }
 
 $filterStatusRaw = isset($_GET['status']) ? trim($_GET['status']) : '';

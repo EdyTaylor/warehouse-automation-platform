@@ -14,6 +14,7 @@ $db = getDB();
 
 require_once __DIR__ . '/includes/stock_operations_core.php';
 require_once __DIR__ . '/functions/integration_sync_control.php';
+require_once __DIR__ . '/functions/prg_flash.php';
 
 $successMsg = '';
 $errorMsg = '';
@@ -318,8 +319,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     }
 }
 
+/**
+ * После любой отправки основных форм этой страницы — только GET (F5 без повтора POST).
+ */
+if ($_SERVER['REQUEST_METHOD'] === 'POST'
+    && isset($_POST['action'])
+    && in_array((string)$_POST['action'], array('retry_b24_sync', 'delete_doc', 'create_receipt', 'create_writeoff'), true)
+) {
+    prgFlashCommitAndRedirect303(
+        'stock_operations.php',
+        array(
+            'success' => $successMsg,
+            'error' => $errorMsg,
+        )
+    );
+}
+
 if (session_status() !== PHP_SESSION_ACTIVE) {
     session_start();
+}
+$__prgFlashSo = prgFlashConsume();
+if (!empty($__prgFlashSo['error'])) {
+    $errorMsg = $__prgFlashSo['error'];
+    $successMsg = '';
+} elseif (!empty($__prgFlashSo['success'])) {
+    $successMsg = $__prgFlashSo['success'];
 }
 $receiptToken = ensureFormToken('create_receipt');
 $writeoffToken = ensureFormToken('create_writeoff');

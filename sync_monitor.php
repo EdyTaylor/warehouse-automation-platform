@@ -10,7 +10,11 @@ require_once __DIR__ . '/functions/integration_workflow_gates.php';
 require_once __DIR__ . '/functions/integration_bitrix_funnels.php';
 require_once __DIR__ . '/functions/integration_sync_control.php';
 require_once __DIR__ . '/functions/stock_emergency_kill.php';
+require_once __DIR__ . '/functions/prg_flash.php';
 $db = getDB();
+if (session_status() !== PHP_SESSION_ACTIVE) {
+    session_start();
+}
 webhookLogEnsureSchema($db);
 
 $bitrixCfg = require __DIR__ . '/api/bitrix/config.php';
@@ -293,6 +297,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             }
         }
     }
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
+    $prgQm = array();
+    if ($bulkReceiptUiDefault) {
+        $prgQm['bulk'] = '1';
+    }
+    if (isset($_GET['limit'])) {
+        $lm = intval($_GET['limit']);
+        if ($lm > 0) {
+            $prgQm['limit'] = (string)$lm;
+        }
+    }
+    prgFlashCommitAndRedirect303WithQuery(
+        'sync_monitor.php',
+        $prgQm,
+        array(
+            'success' => $successMsg,
+            'error' => $errorMsg,
+        )
+    );
+}
+
+$__syFlash = prgFlashConsume();
+if (!empty($__syFlash['error'])) {
+    $errorMsg = $__syFlash['error'];
+    $successMsg = '';
+} elseif (!empty($__syFlash['success'])) {
+    $successMsg = $__syFlash['success'];
 }
 
 $stockEmergencyStopMsg = stockEmergencyRollCreationStoppedMessage($db);

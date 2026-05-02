@@ -6,12 +6,18 @@ header('Content-Type: text/html; charset=utf-8');
 
 require 'db.php';
 $db = getDB();
+if (session_status() !== PHP_SESSION_ACTIVE) {
+    session_start();
+}
+$success_msg = '';
+$error_msg = '';
 require_once __DIR__ . '/functions/stock_movements.php';
 require_once __DIR__ . '/functions/pricing.php';
 require_once __DIR__ . '/functions/app_settings.php';
 require_once __DIR__ . '/functions/integration_sync_control.php';
 require_once __DIR__ . '/functions/stock_emergency_kill.php';
 require_once __DIR__ . '/api/bitrix/send.php';
+require_once __DIR__ . '/functions/prg_flash.php';
 
 // Compatibility wrapper for legacy calls in this file.
 function getPrice($row, $qty) {
@@ -350,6 +356,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     $success_msg .= ' Откройте «Продажи Б24» (раздел расхождений) или «Настройки» → найденные расхождения.';
 }
 
+/* Любой POST этого экрана (приход, списание, продажи, удаление рулона, скан Б24) — только GET после ответа. */
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    prgFlashCommitAndRedirect303(
+        'warehouse.php',
+        array(
+            'success' => $success_msg,
+            'error' => $error_msg,
+        )
+    );
+}
+
+$__whFlash = prgFlashConsume();
+if (!empty($__whFlash['error'])) {
+    $error_msg = $__whFlash['error'];
+    $success_msg = '';
+} elseif (!empty($__whFlash['success'])) {
+    $success_msg = $__whFlash['success'];
+}
+
 // Фильтры списка рулонов
 $filterProductId = intval(isset($_GET['product_id']) ? $_GET['product_id'] : 0);
 $filterStatus = isset($_GET['status']) ? trim($_GET['status']) : '';
@@ -491,12 +516,12 @@ require 'includes/header.php';
 <main class="container">
         <h1>🏭 Управление складом</h1>
 
-        <?php if (isset($success_msg)): ?>
-            <div class="alert alert-success"><?php echo $success_msg; ?></div>
+        <?php if ($success_msg !== ''): ?>
+            <div class="alert alert-success"><?php echo htmlspecialchars((string)$success_msg); ?></div>
         <?php endif; ?>
 
-        <?php if (isset($error_msg)): ?>
-            <div class="alert alert-danger"><?php echo $error_msg; ?></div>
+        <?php if ($error_msg !== ''): ?>
+            <div class="alert alert-danger"><?php echo htmlspecialchars((string)$error_msg); ?></div>
         <?php endif; ?>
 
         <div class="card">
