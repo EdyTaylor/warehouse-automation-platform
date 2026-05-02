@@ -1,0 +1,10 @@
+# https://editorconfig.org — сохранять PHP как UTF-8 без BOM (иначе session/header на Beget).
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+
+[*.php]
+charset = utf-8
