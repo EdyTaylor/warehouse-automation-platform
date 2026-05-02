@@ -1,6 +1,7 @@
 ﻿<?php
 /** Shared: stock tables, Bitrix document sync, receipt product helpers. */
 
+require_once __DIR__ . '/../functions/app_settings.php';
 require_once __DIR__ . '/../functions/stock_movements.php';
 
 function ensureColumnExists($db, $tableName, $columnName, $columnSql) {
@@ -58,6 +59,23 @@ function ensureStockOperationTables($db) {
     ensureColumnExists($db, 'sales', 'cost_fact', '`cost_fact` decimal(14,2) NOT NULL DEFAULT 0');
     ensureColumnExists($db, 'sales', 'gross_profit', '`gross_profit` decimal(14,2) NOT NULL DEFAULT 0');
     ensureColumnExists($db, 'sales', 'gross_margin_percent', '`gross_margin_percent` decimal(8,2) NOT NULL DEFAULT 0');
+
+    $wk = trim((string)getAppSetting($db, 'stock_operation_b24_worker_secret', ''));
+    if ($wk === '' && function_exists('random_bytes')) {
+        try {
+            setAppSetting($db, 'stock_operation_b24_worker_secret', bin2hex(random_bytes(16)));
+        } catch (Exception $e) {
+            // ignore — тогда синк только внутри того же HTTP-запроса
+        }
+    } elseif ($wk === '' && function_exists('openssl_random_pseudo_bytes')) {
+        try {
+            $raw = openssl_random_pseudo_bytes(16);
+            if ($raw !== false) {
+                setAppSetting($db, 'stock_operation_b24_worker_secret', bin2hex($raw));
+            }
+        } catch (Exception $e) {
+        }
+    }
 }
 
 function getUsdToKgsRate($db) {
@@ -119,6 +137,111 @@ function resolveDocTypeCodeFromBitrix($logicalType) {
     }
 
     return '';
+}
+
+/**
+ * Одна складская строка Б24 по одному elementId → суммируем локальные строки одного product_id,
+ * чтобы не плодить дубли строк и уменьшить число element.add при большом приходе/списканий.
+ *
+ * @param array $lineRows ключи как в stock_operation_lines
+ * @return array
+ */
+function mergeStockOperationLineRowsForBitrixSku(array $lineRows) {
+    if (empty($lineRows)) {
+        return array();
+    }
+
+    $groups = array();
+    $groupOrder = array();
+
+    foreach ($lineRows as $line) {
+        if (!is_array($line)) {
+            continue;
+        }
+        $pid = intval(isset($line['product_id']) ? $line['product_id'] : 0);
+        if ($pid <= 0) {
+            continue;
+        }
+
+        $amount = floatval(isset($line['quantity_m']) ? $line['quantity_m'] : 0);
+        if ($amount <= 0) {
+            $amount = floatval(isset($line['qty_rolls']) ? $line['qty_rolls'] : 0);
+        }
+        if ($amount <= 0) {
+            continue;
+        }
+
+        $rolls = intval(isset($line['qty_rolls']) ? $line['qty_rolls'] : 0);
+        $rl = floatval(isset($line['roll_length']) ? $line['roll_length'] : 0);
+        $lineTotal = floatval(isset($line['line_total']) ? $line['line_total'] : 0);
+        $priceRoll = floatval(isset($line['price_per_roll']) ? $line['price_per_roll'] : 0);
+        $deliveryRoll = floatval(isset($line['delivery_price_per_roll']) ? $line['delivery_price_per_roll'] : 0);
+
+        if (!isset($groups[$pid])) {
+            $groupOrder[] = $pid;
+            $groups[$pid] = array(
+                'tpl' => $line,
+                'sum_amount' => 0.0,
+                'sum_line_total' => 0.0,
+                'sum_rolls' => 0,
+                'price_roll_roll_weight' => 0.0,
+                'delivery_roll_roll_weight' => 0.0,
+                'roll_weight_for_roll_prices' => 0,
+            );
+        }
+
+        $g = &$groups[$pid];
+        $g['sum_amount'] += $amount;
+        $g['sum_line_total'] += $lineTotal;
+        if ($rolls > 0) {
+            $g['sum_rolls'] += $rolls;
+            $rw = intval($rolls);
+            $g['roll_weight_for_roll_prices'] += $rw;
+            $g['price_roll_roll_weight'] += $priceRoll * floatval($rw);
+            $g['delivery_roll_roll_weight'] += $deliveryRoll * floatval($rw);
+        }
+
+        unset($g);
+    }
+
+    $out = array();
+    foreach ($groupOrder as $pid) {
+        $g = $groups[$pid];
+        $qtyMsum = round(floatval($g['sum_amount']), 6);
+        if ($qtyMsum <= 0) {
+            continue;
+        }
+
+        $row = isset($g['tpl']) && is_array($g['tpl']) ? $g['tpl'] : array();
+
+        $row['product_id'] = $pid;
+        $row['quantity_m'] = $qtyMsum;
+        $row['line_total'] = round(floatval($g['sum_line_total']), 4);
+
+        $sumRolls = intval($g['sum_rolls']);
+        $rwForPrice = intval($g['roll_weight_for_roll_prices']);
+
+        $row['qty_rolls'] = $sumRolls;
+
+        $avgRl = 0.0;
+        if ($sumRolls > 0) {
+            $avgRl = $qtyMsum / floatval($sumRolls);
+        }
+        if ($avgRl > 0) {
+            $row['roll_length'] = round($avgRl, 6);
+        }
+
+        if ($rwForPrice > 0) {
+            $pr = round(floatval($g['price_roll_roll_weight']) / floatval(max(1, $rwForPrice)), 6);
+            $dr = round(floatval($g['delivery_roll_roll_weight']) / floatval(max(1, $rwForPrice)), 6);
+            $row['price_per_roll'] = $pr;
+            $row['delivery_price_per_roll'] = $dr;
+        }
+
+        $out[] = $row;
+    }
+
+    return $out;
 }
 
 function calculateDocumentTotalFromLines($lineRows) {
@@ -945,6 +1068,8 @@ function syncOperationDocumentToBitrix($db, $docId, $docType, $docNumber, $comme
     }
     $b24DocType = $docMap[$docType];
 
+    $lineRows = mergeStockOperationLineRowsForBitrixSku(is_array($lineRows) ? $lineRows : array());
+
     $docResp = sendToBitrix('catalog.document.add', array(
         'fields' => array(
             'docType' => $b24DocType,
@@ -1173,6 +1298,8 @@ function addLinesAndConductExistingB24Document($db, $b24DocId, $docType, $lineRo
     $storeTo = intval(getAppSetting($db, 'default_store_to_id', '1'));
     $currency = (string)getAppSetting($db, 'default_currency', 'KGS');
 
+    $lineRows = mergeStockOperationLineRowsForBitrixSku(is_array($lineRows) ? $lineRows : array());
+
     if ($docType === 'receipt') {
         ensureDocumentSupplierForReceipt(intval($b24DocId), $supplierName);
     }
@@ -1380,6 +1507,9 @@ function resolveB24SyncStatus($syncResult) {
     if (is_array($syncResult) && !empty($syncResult['local_only'])) {
         return 'skipped';
     }
+    if (is_array($syncResult) && (!empty($syncResult['queued']) || !empty($syncResult['b24_background_queued']))) {
+        return 'queued';
+    }
     if (is_array($syncResult) && isset($syncResult['ok']) && $syncResult['ok']) {
         return 'sent';
     }
@@ -1387,6 +1517,154 @@ function resolveB24SyncStatus($syncResult) {
         return 'partial';
     }
     return 'error';
+}
+
+/**
+ * Публичный URL сайта для фонового curl (при пустом app_settings stock_b24_worker_public_base_url).
+ *
+ * @return string
+ */
+function stockOperationsGuessPublicSiteUrl() {
+    if (empty($_SERVER['HTTP_HOST'])) {
+        return '';
+    }
+    $host = preg_replace('#^/+|/+$#', '', (string)$_SERVER['HTTP_HOST']);
+    if ($host === '') {
+        return '';
+    }
+    $https = false;
+    if (!empty($_SERVER['HTTPS']) && strtolower((string)$_SERVER['HTTPS']) !== 'off') {
+        $https = true;
+    }
+    if (!$https && isset($_SERVER['SERVER_PORT']) && (string)$_SERVER['SERVER_PORT'] === '443') {
+        $https = true;
+    }
+    return ($https ? 'https://' : 'http://') . $host;
+}
+
+/**
+ * Запуск фонового HTTP-запроса к api/stock_operation_b24_worker.php (обход таймаута прокси на длинном синке).
+ *
+ * @param PDO $db
+ * @param int $docId
+ * @return bool true если exec/curl вызван
+ */
+function stockOperationsDispatchB24WarehouseWorker(PDO $db, $docId) {
+    $docId = intval($docId);
+    if ($docId <= 0) {
+        return false;
+    }
+    if (!function_exists('exec')) {
+        return false;
+    }
+    $secret = trim((string)getAppSetting($db, 'stock_operation_b24_worker_secret', ''));
+    if ($secret === '') {
+        return false;
+    }
+    $base = trim((string)getAppSetting($db, 'stock_b24_worker_public_base_url', ''));
+    if ($base === '') {
+        $base = stockOperationsGuessPublicSiteUrl();
+    }
+    if ($base === '') {
+        return false;
+    }
+    $base = rtrim($base, '/');
+    $q = http_build_query(array(
+        'doc_id' => $docId,
+        'secret' => $secret,
+    ));
+    $url = $base . '/api/stock_operation_b24_worker.php?' . $q;
+
+    $isWin = (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN');
+    if ($isWin) {
+        $cmd = 'start /B curl -fsS --max-time 600 --connect-timeout 10 ' . escapeshellarg($url);
+    } else {
+        $cmd = 'curl -fsS --max-time 600 --connect-timeout 10 ' . escapeshellarg($url) . ' >/dev/null 2>&1 &';
+    }
+    @exec($cmd);
+    return true;
+}
+
+/**
+ * Синк документа прихода/списания с Б24 (как кнопки «Повторить» / «Дофиксировать»).
+ *
+ * @param PDO $db
+ * @param array $doc строка stock_operation_docs
+ * @param array $lineRows
+ * @param string $retryStrategy full|portal_by_number_only
+ * @return array
+ */
+function stockOperationsExecuteB24SyncWithLines(PDO $db, array $doc, array $lineRows, $retryStrategy) {
+    $retryStrategy = strtolower(trim((string)$retryStrategy));
+    if ($retryStrategy !== 'portal_by_number_only') {
+        $retryStrategy = 'full';
+    }
+    $b24ResolvedId = stockOperationsResolveB24DocumentIdForRetry($db, $doc, $retryStrategy);
+    $b24ResolvedIdAfterSync = 0;
+    if ($b24ResolvedId > 0) {
+        $b24ResolvedIdAfterSync = $b24ResolvedId;
+        $syncResult = addLinesAndConductExistingB24Document(
+            $db,
+            $b24ResolvedId,
+            (string)$doc['operation_type'],
+            $lineRows,
+            isset($doc['supplier']) ? (string)$doc['supplier'] : ''
+        );
+    } else {
+        $syncResult = syncOperationDocumentToBitrix(
+            $db,
+            intval($doc['id']),
+            (string)$doc['operation_type'],
+            (string)$doc['doc_number'],
+            (string)$doc['comment_text'],
+            $lineRows,
+            isset($doc['supplier']) ? (string)$doc['supplier'] : ''
+        );
+    }
+    $syncResult = tryFinalizePartialDocument(
+        $db,
+        (string)$doc['operation_type'],
+        $syncResult,
+        $lineRows,
+        isset($doc['supplier']) ? (string)$doc['supplier'] : ''
+    );
+    if (is_array($syncResult)) {
+        $syncResult['retry_strategy_requested'] = $retryStrategy;
+        if ($b24ResolvedIdAfterSync > 0) {
+            $syncResult['retry_reused_b24_document_id'] = $b24ResolvedIdAfterSync;
+            if (intval(isset($doc['b24_document_id']) ? $doc['b24_document_id'] : 0) <= 0) {
+                $fromJson = stockOperationsExtractB24DocumentIdFromSavedSyncJson(
+                    isset($doc['b24_sync_response']) ? (string)$doc['b24_sync_response'] : ''
+                );
+                $syncResult['retry_b24_document_id_source'] =
+                    (intval($fromJson) === $b24ResolvedIdAfterSync) ? 'stored_json' : 'doc_number_lookup';
+            }
+        }
+    }
+    return $syncResult;
+}
+
+/**
+ * После проведённого прихода в Б24 подтянуть остатки по товарам в каталог/магазин портала.
+ *
+ * @param PDO $db
+ * @param array $lineRows как из stock_operation_lines
+ */
+function stockOperationsSyncReceiptCatalogTotalsToBitrix(PDO $db, array $lineRows) {
+    $seen = array();
+    foreach ($lineRows as $line) {
+        if (!is_array($line)) {
+            continue;
+        }
+        $pid = intval(isset($line['product_id']) ? $line['product_id'] : 0);
+        if ($pid <= 0) {
+            continue;
+        }
+        $seen[$pid] = true;
+    }
+    foreach (array_keys($seen) as $pidPush) {
+        syncProductAvailableToBitrix($db, intval($pidPush));
+    }
 }
 
 function localizeOperationType($operationType) {
@@ -2150,6 +2428,40 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
             return $outBase;
         }
 
+        $deferEnabled = trim((string)getAppSetting($db, 'stock_receipt_b24_worker_enabled', '1')) === '1';
+        $deferMinLines = intval(getAppSetting($db, 'stock_receipt_b24_worker_min_lines', '22'));
+        if ($deferMinLines < 1) {
+            $deferMinLines = 22;
+        }
+        $cntDeferLines = intval($db->query("SELECT COUNT(*) AS c FROM stock_operation_lines WHERE doc_id=" . intval($docId))->fetchColumn());
+
+        $successMessageBase = 'Документ прихода #' . $docId . ' проведен. Валюта ввода: ' . $receiptCurrency . '. Курс USD: ' . number_format($usdToKgsRate, 2, '.', ' ') . ' | Сумма: ' . number_format($totalAmount, 2, '.', ' ') . ' KGS';
+
+        if ($deferEnabled && $cntDeferLines >= $deferMinLines && stockOperationsDispatchB24WarehouseWorker($db, $docId)) {
+            $syncResult = array(
+                'ok' => true,
+                'queued' => true,
+                'b24_background_queued' => true,
+                'hint' => 'Создание и проведение документа в Битрикс24 выполняется отдельным запросом, чтобы nginx не вернул 504.',
+                'approx_line_rows' => $cntDeferLines,
+            );
+            $syncStatus = resolveB24SyncStatus($syncResult);
+            $db->prepare("UPDATE stock_operation_docs SET b24_sync_status = ?, b24_sync_response = ? WHERE id = ?")
+                ->execute(array($syncStatus, json_encode($syncResult, JSON_UNESCAPED_UNICODE), $docId));
+
+            $outBase['ok'] = true;
+            $outBase['doc_id'] = $docId;
+            $outBase['sync_result'] = $syncResult;
+            $outBase['sync_status'] = $syncStatus;
+            $outBase['total_amount_kgs'] = $totalAmount;
+            $outBase['b24_background_queued'] = true;
+            $outBase['b24_document_id'] = null;
+            $outBase['success_message'] = $successMessageBase
+                . ' | Синхронизация с Битрикс24 (документ + проведение) запущена в фоне — подождите 1–3 мин. и обновите страницу; статус сменится на «Отправлено».';
+            $outBase['error_message'] = '';
+            return $outBase;
+        }
+
         $syncResult = syncOperationDocumentToBitrix($db, $docId, 'receipt', $docNumber, $commentText, $lineRowsForSync, $supplier);
         $syncResult = tryFinalizePartialDocument($db, 'receipt', $syncResult, $lineRowsForSync, $supplier);
         $syncStatus = resolveB24SyncStatus($syncResult);
@@ -2165,24 +2477,22 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
         // Остаток в каталоге/магазине Б24 — после успешного проведения складского документа (иначе долгая серия запросов
         // до document.conduct даёт таймаут хостинга и документ в Б24 не создаётся).
         if (!$localOnly && $syncStatus === 'sent' && !empty($receiptProductIdsNeedCatalogPush)) {
-            foreach (array_keys($receiptProductIdsNeedCatalogPush) as $pidForCatalog) {
-                syncProductAvailableToBitrix($db, intval($pidForCatalog));
-            }
+            stockOperationsSyncReceiptCatalogTotalsToBitrix($db, $lineRowsForSync);
         }
-
-        $successMessage = 'Документ прихода #' . $docId . ' проведен. Валюта ввода: ' . $receiptCurrency . '. Курс USD: ' . number_format($usdToKgsRate, 2, '.', ' ') . ' | Сумма: ' . number_format($totalAmount, 2, '.', ' ') . ' KGS';
-        $errorMessage = '';
 
         $outBase['ok'] = true;
         $outBase['doc_id'] = $docId;
         $outBase['sync_result'] = $syncResult;
         $outBase['sync_status'] = $syncStatus;
         $outBase['total_amount_kgs'] = $totalAmount;
-        $outBase['success_message'] = $successMessage;
+        $outBase['success_message'] = $successMessageBase;
         $outBase['b24_document_id'] = isset($syncResult['b24_document_id']) ? intval($syncResult['b24_document_id']) : null;
 
-        if ($syncStatus === 'sent') {
-            $outBase['success_message'] = $successMessage . ' | Б24 документ #' . intval($syncResult['b24_document_id']);
+        if ($syncStatus === 'queued') {
+            $outBase['success_message'] = $successMessageBase
+                . ' | Синхронизация с Битрикс24 (создание и проведение документа) запущена в фоне — подождите 1–3 мин. и обновите страницу; статус сменится на «Отправлено».';
+        } elseif ($syncStatus === 'sent') {
+            $outBase['success_message'] = $successMessageBase . ' | Б24 документ #' . intval($syncResult['b24_document_id']);
         } elseif ($syncStatus === 'partial') {
             $outBase['error_message'] = 'Приход создан в Б24 (#' . intval($syncResult['b24_document_id']) . '), но фиксация строк/проведение завершились с ошибкой.';
         } else {

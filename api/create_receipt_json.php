@@ -11,7 +11,9 @@
  * Безопасность: ключ app_settings stock_receipt_api_secret (задаётся в sync_monitor.php), заголовок
  * X-Stock-Receipt-Secret или для отладки тот же ключ в query ?secret=
  *
- * Для больших приходов добавьте в корень JSON: "local_only": true — меньше 504 при обращении к Б24.
+ * Для больших приходов: по умолчанию при ≥ строк (app_settings stock_receipt_b24_worker_min_lines, обычно 22) синк Б24
+ * уходит в фоновый запрос api/stock_operation_b24_worker.php (ответ HTTP не ждёт проведения — нет 504 у nginx).
+ * Либо добавьте в JSON: "local_only": true — без документа в Б24 вообще.
  * Чанковый режим (несколько документов подряд, короче один HTTP-ответ): "lines_per_chunk": 28 (или 25–80),
  * опционально "max_roll_units_per_chunk": 350 (не более суммы qty_rolls в партии); 0 там = брать безопасный дефолт.
  * При чанках doc_number пустой → стабильные ACHK-…-C1ofN по хешу тела; заданный doc_number → суффиксы -C1ofN (до 64 символов).
@@ -166,6 +168,7 @@ if ($wantChunkPreview['active']) {
         'total_amount_kgs' => isset($result['total_amount_kgs']) ? $result['total_amount_kgs'] : null,
         'success_message' => isset($result['success_message']) ? $result['success_message'] : '',
         'error_message' => isset($result['error_message']) ? $result['error_message'] : '',
+        'b24_background_queued' => !empty($result['b24_background_queued']),
     );
 
     if (!$response['ok'] && isset($result['sync_result'])) {

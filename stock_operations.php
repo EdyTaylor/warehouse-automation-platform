@@ -69,48 +69,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 throw new Exception('У документа нет строк для синка.');
             }
 
-            $b24ResolvedIdAfterSync = 0;
-            if ($b24ResolvedId > 0) {
-                $b24ResolvedIdAfterSync = $b24ResolvedId;
-                $syncResult = addLinesAndConductExistingB24Document(
-                    $db,
-                    $b24ResolvedId,
-                    (string)$doc['operation_type'],
-                    $lineRows,
-                    isset($doc['supplier']) ? (string)$doc['supplier'] : ''
+            $deferEnabled = trim((string)getAppSetting($db, 'stock_receipt_b24_worker_enabled', '1')) === '1';
+            $deferMinLines = intval(getAppSetting($db, 'stock_receipt_b24_worker_min_lines', '22'));
+            if ($deferMinLines < 1) {
+                $deferMinLines = 22;
+            }
+            $isReceiptDefer = $deferEnabled
+                && (string)$doc['operation_type'] === 'receipt'
+                && count($lineRows) >= $deferMinLines;
+
+            if ($isReceiptDefer && stockOperationsDispatchB24WarehouseWorker($db, $docId)) {
+                $syncResult = array(
+                    'ok' => true,
+                    'queued' => true,
+                    'b24_background_queued' => true,
+                    'hint' => 'Повторный синк выполняется отдельным запросом (нет 504).',
+                    'retry_strategy_requested' => $retryStrategy,
+                    'approx_line_rows' => count($lineRows),
                 );
+                $syncStatus = resolveB24SyncStatus($syncResult);
             } else {
-                $syncResult = syncOperationDocumentToBitrix(
-                    $db,
-                    $docId,
-                    (string)$doc['operation_type'],
-                    (string)$doc['doc_number'],
-                    (string)$doc['comment_text'],
-                    $lineRows,
-                    isset($doc['supplier']) ? (string)$doc['supplier'] : ''
-                );
+                $syncResult = stockOperationsExecuteB24SyncWithLines($db, $doc, $lineRows, $retryStrategy);
+                $syncStatus = resolveB24SyncStatus($syncResult);
             }
-            $syncResult = tryFinalizePartialDocument(
-                $db,
-                (string)$doc['operation_type'],
-                $syncResult,
-                $lineRows,
-                isset($doc['supplier']) ? (string)$doc['supplier'] : ''
-            );
-            if (is_array($syncResult)) {
-                $syncResult['retry_strategy_requested'] = $retryStrategy;
-                if ($b24ResolvedIdAfterSync > 0) {
-                    $syncResult['retry_reused_b24_document_id'] = $b24ResolvedIdAfterSync;
-                    if (intval(isset($doc['b24_document_id']) ? $doc['b24_document_id'] : 0) <= 0) {
-                        $fromJson = stockOperationsExtractB24DocumentIdFromSavedSyncJson(
-                            isset($doc['b24_sync_response']) ? (string)$doc['b24_sync_response'] : ''
-                        );
-                        $syncResult['retry_b24_document_id_source'] =
-                            (intval($fromJson) === $b24ResolvedIdAfterSync) ? 'stored_json' : 'doc_number_lookup';
-                    }
-                }
-            }
-            $syncStatus = resolveB24SyncStatus($syncResult);
+
             $db->prepare("UPDATE stock_operation_docs SET b24_document_id = ?, b24_sync_status = ?, b24_sync_response = ? WHERE id = ?")
                 ->execute(array(
                     isset($syncResult['b24_document_id']) ? intval($syncResult['b24_document_id']) : null,
@@ -125,6 +107,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
 
             if ($syncStatus === 'sent') {
                 $successMsg = 'Повторный синк документа #' . $docId . ' выполнен. Б24 документ #' . intval($syncResult['b24_document_id']);
+            } elseif ($syncStatus === 'queued') {
+                $successMsg = 'Документ #' . $docId . ': синхронизация с Битрикс24 запущена в фоне (обычно 1–3 мин). Обновите страницу.';
             } elseif ($syncStatus === 'partial') {
                 $errorMsg = 'Документ #' . $docId . ' уже создан в Б24 (#' . intval($syncResult['b24_document_id']) . '), но есть ошибка в фиксации данных.';
             } else {
