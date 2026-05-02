@@ -35,10 +35,20 @@ function sendToBitrix($method, $data = array()) {
     if (isset($config['method_urls']) && isset($config['method_urls'][$method])) {
         $url = $config['method_urls'][$method];
     } else {
-        $isCatalogMethod = strpos((string)$method, 'catalog.') === 0;
+        $methodStr = (string)$method;
+        $isCatalogMethod = strpos($methodStr, 'catalog.') === 0;
+        // crm.product.* на «узком» CRM-входе иногда не даёт полноценно привести карточку к виду для СУ;
+        // второй вход (CRM+каталог) — см. api/bitrix/config.php catalog_webhook / use_catalog_webhook_for_crm_product.
+        $crmProductViaCatalog = false;
+        if (isset($config['use_catalog_webhook_for_crm_product']) && $config['use_catalog_webhook_for_crm_product']) {
+            if (strpos($methodStr, 'crm.product.') === 0) {
+                $crmProductViaCatalog = true;
+            }
+        }
         $webhook = '';
-        if ($isCatalogMethod && isset($config['catalog_webhook']) && trim((string)$config['catalog_webhook']) !== '') {
-            $webhook = $config['catalog_webhook'];
+        $catUrl = isset($config['catalog_webhook']) ? trim((string)$config['catalog_webhook']) : '';
+        if ($catUrl !== '' && ($isCatalogMethod || $crmProductViaCatalog)) {
+            $webhook = $catUrl;
         } else {
             $webhook = isset($config['webhook']) ? $config['webhook'] : '';
         }

@@ -7,6 +7,8 @@ return [
     'webhook' => 'https://llumar.bitrix24.kz/rest/13/s845opt8ba3jchft/',
     // Universal Catalog+CRM webhook (catalog + crm scopes).
     'catalog_webhook' => 'https://llumar.bitrix24.kz/rest/13/8l0ds7zlh54wl1ou/',
+    // Все crm.product.* (get/list/add/update) через catalog_webhook — один контур с catalog.document.* и типом для СУ.
+    'use_catalog_webhook_for_crm_product' => true,
 
     // Optional method-specific overrides. Keep empty when using universal webhooks above.
     'method_urls' => [],
