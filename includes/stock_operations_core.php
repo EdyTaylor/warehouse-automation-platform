@@ -972,6 +972,32 @@ function forceCreateStockCloneProduct($db, $localProductId, $currentName, $price
     if (stripos($cloneName, '[stock]') === false) {
         $cloneName .= ' [stock]';
     }
+
+    /**
+     * Уже есть crm.product с таким точным именем (например после прошлого ретрая) — не создаём второй дубль.
+     * Проверяем тип для СУ (1) или пробуем ремонт в точку, как у исходной карточки.
+     */
+    $reuseId = stockOperationsFindCrmProductIdByExactName($cloneName);
+    if ($reuseId > 0) {
+        $reuseOk = false;
+        if (getB24ProductType($reuseId) === 1) {
+            $reuseOk = true;
+        } elseif (repairB24ProductTypeToWarehouseInPlace($reuseId) > 0) {
+            $reuseOk = true;
+        }
+        if ($reuseOk) {
+            if (stockReceiptShouldPushCrmCatalogPrice($db) && floatval($pricePerMeter) > 0) {
+                sendToBitrix('crm.product.update', array(
+                    'id' => $reuseId,
+                    'fields' => array('PRICE' => floatval($pricePerMeter))
+                ));
+            }
+            $db->prepare("UPDATE products SET b24_product_id = ? WHERE id = ?")
+                ->execute(array($reuseId, intval($localProductId)));
+            return $reuseId;
+        }
+    }
+
     $fields = array(
         'NAME' => $cloneName,
         'TYPE' => 1
@@ -1075,6 +1101,12 @@ function forkB24CrmProductToWarehouseTypeClone($sourceB24ProductId) {
     if (stripos($nm, '[stock]') === false) {
         $nm .= ' [stock]';
     }
+
+    $reuseFk = stockOperationsFindCrmProductIdByExactName($nm);
+    if ($reuseFk > 0 && (getB24ProductType($reuseFk) === 1 || repairB24ProductTypeToWarehouseInPlace($reuseFk) > 0)) {
+        return $reuseFk;
+    }
+
     $fields = array(
         'NAME' => $nm,
         'TYPE' => 1
