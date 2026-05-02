@@ -1724,6 +1724,70 @@ function localizeOperationType($operationType) {
 }
 
 /**
+ * Текстовая подпись к колонке «Битрикс24» в списке документов (проведён ли складской документ и т.д.).
+ *
+ * @param array $docRow строка документа как в SELECT (достаточно b24_sync_status, b24_document_id, b24_sync_response)
+ * @return string UTF-8, пусто если добавлять нечего для «sent» / «skipped»
+ */
+function stockOperationsB24ListingHumanHint(array $docRow) {
+    $st = isset($docRow['b24_sync_status']) ? strtolower(trim((string)$docRow['b24_sync_status'])) : '';
+    $b24Id = intval(isset($docRow['b24_document_id']) ? $docRow['b24_document_id'] : 0);
+    $rawJson = isset($docRow['b24_sync_response']) ? trim((string)$docRow['b24_sync_response']) : '';
+
+    $stage = '';
+    if ($rawJson !== '') {
+        $dec = json_decode($rawJson, true);
+        if (is_array($dec) && isset($dec['stage'])) {
+            $stage = strtolower(trim((string)$dec['stage']));
+        }
+    }
+
+    if ($st === 'sent') {
+        return '';
+    }
+    if ($st === 'skipped') {
+        return '';
+    }
+
+    if ($st === 'queued') {
+        return 'Битрикс24: синхронизация в фоне; документ на портале может быть ещё не создан или не проведён.';
+    }
+
+    if ($st === 'partial') {
+        if ($stage === 'document.conduct') {
+            return 'Битрикс24: документ есть, но не проведён (черновик).';
+        }
+        if ($stage === 'document.element.add') {
+            return 'Битрикс24: не все строки записаны в документ; проведён он не может быть.';
+        }
+        if ($b24Id > 0) {
+            return 'Битрикс24: документ есть, возможно не проведён или не дописан — проверьте в портале.';
+        }
+        return 'Битрикс24: синхронизация неполная.';
+    }
+
+    if ($st === 'error') {
+        if ($stage === 'post_commit_exception') {
+            return 'Битрикс24: отправка после сохранения не завершена; складской документ на портале, скорее всего, не проведён.';
+        }
+        if ($b24Id > 0) {
+            return 'Битрикс24: ошибка синхронизации; документ создан, но может быть не проведён.';
+        }
+        return 'Битрикс24: ошибка; складской документ не отправлен или не проведён.';
+    }
+
+    if ($st === 'pending') {
+        return 'Битрикс24: ожидается синхронизация.';
+    }
+
+    if ($st !== '') {
+        return 'Битрикс24: проверьте состояние (статус «' . $st . '»).';
+    }
+
+    return '';
+}
+
+/**
  * Если задан &$deferBitrixProductPrices — HTTP к Битриксу (crm.product.*) выполняется ПОСЛЕ commit транзакции прихода,
  * иначе MySQL рвёт idle-сессию во время HTTP к Bitrix («MySQL server has gone away», wait_timeout на шаринге).
  *

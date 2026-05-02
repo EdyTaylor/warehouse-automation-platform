@@ -541,6 +541,12 @@ require 'includes/header.php';
                                 <?php else: ?>
                                     <?= htmlspecialchars((string)$d['b24_sync_status']) ?>
                                 <?php endif; ?>
+                                <?php
+                                $__b24hint = stockOperationsB24ListingHumanHint($d);
+                                if ($__b24hint !== '') {
+                                    echo '<br><small class="text-muted">' . htmlspecialchars($__b24hint) . '</small>';
+                                }
+                                ?>
                             </td>
                             <td><?= htmlspecialchars((string)$d['created_at']) ?></td>
                             <td>
