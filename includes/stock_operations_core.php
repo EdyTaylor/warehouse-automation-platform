@@ -415,13 +415,25 @@ function stockOperationsFindB24DocumentIdByDocNumber($db, $docNumber, $operation
 }
 
 /**
- * Определить id документа Б24 для кнопки «Повторить»: колонка, JSON ответа, поиск по номеру.
+ * Определить id документа Б24 для синка операции со склада.
+ *
+ * strategy:
+ * - full — учитываем колонку b24_document_id, JSON ответ и поиск по doc_number («Дофиксировать» к существующему документу).
+ * - portal_by_number_only — только поиск активного документа по номеру в портале; игнорируем устаревший id после удаления в Б24 («Повторить» заново или присоединиться к уже созданному только по номеру).
  *
  * @param PDO $db
  * @param array $doc строка stock_operation_docs
+ * @param string $strategy full|portal_by_number_only
  * @return int
  */
-function stockOperationsResolveB24DocumentIdForRetry($db, array $doc) {
+function stockOperationsResolveB24DocumentIdForRetry($db, array $doc, $strategy = 'full') {
+    $strategy = strtolower(trim((string)$strategy));
+    if ($strategy === 'portal_by_number_only') {
+        $op = isset($doc['operation_type']) ? (string)$doc['operation_type'] : '';
+        $num = isset($doc['doc_number']) ? (string)$doc['doc_number'] : '';
+        return stockOperationsFindB24DocumentIdByDocNumber($db, $num, $op);
+    }
+
     $fromCol = intval(isset($doc['b24_document_id']) ? $doc['b24_document_id'] : 0);
     if ($fromCol > 0) {
         return $fromCol;
@@ -436,6 +448,55 @@ function stockOperationsResolveB24DocumentIdForRetry($db, array $doc) {
     $op = isset($doc['operation_type']) ? (string)$doc['operation_type'] : '';
     $num = isset($doc['doc_number']) ? (string)$doc['doc_number'] : '';
     return stockOperationsFindB24DocumentIdByDocNumber($db, $num, $op);
+}
+
+/**
+ * После синка складского документа пробросить локальное имя и розничную цену в crm.product (упрощённо: один id товара, без SKU-офферов).
+ *
+ * @param PDO $db
+ * @param array $lineRows stock_operation_lines
+ */
+function stockOperationsPushReceiptProductsNamePriceToB24Catalog($db, array $lineRows) {
+    $seen = array();
+    foreach ($lineRows as $line) {
+        $pid = intval(isset($line['product_id']) ? $line['product_id'] : 0);
+        if ($pid <= 0 || isset($seen[$pid])) {
+            continue;
+        }
+        $seen[$pid] = true;
+
+        $st = $db->prepare('SELECT id, name, b24_product_id, price_per_meter FROM products WHERE id = ? LIMIT 1');
+        $st->execute(array($pid));
+        $pr = $st->fetch(PDO::FETCH_ASSOC);
+        if (!$pr || !is_array($pr)) {
+            continue;
+        }
+
+        $b24 = intval(isset($pr['b24_product_id']) ? $pr['b24_product_id'] : 0);
+        if ($b24 <= 0) {
+            continue;
+        }
+
+        $nm = trim(isset($pr['name']) ? (string)$pr['name'] : '');
+        if ($nm === '' || strpos($nm, 'Товар Б24 #') === 0) {
+            continue;
+        }
+
+        $fields = array('NAME' => $nm);
+        $ppm = round(floatval(isset($pr['price_per_meter']) ? $pr['price_per_meter'] : 0), 4);
+        if ($ppm > 0) {
+            $fields['PRICE'] = $ppm;
+            $cid = strtoupper(trim((string)getAppSetting($db, 'default_currency', 'KGS')));
+            if ($cid !== '') {
+                $fields['CURRENCY_ID'] = $cid;
+            }
+        }
+
+        sendToBitrix('crm.product.update', array(
+            'id' => $b24,
+            'fields' => $fields
+        ));
+    }
 }
 
 function ensureB24CompanyId($supplierName) {

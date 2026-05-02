@@ -43,7 +43,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 throw new Exception('Повторный синк доступен только для прихода и списания.');
             }
 
-            $b24ResolvedId = stockOperationsResolveB24DocumentIdForRetry($db, $doc);
+            $retryStrategy = isset($_POST['retry_strategy']) ? strtolower(trim((string)$_POST['retry_strategy'])) : 'full';
+            if ($retryStrategy !== 'portal_by_number_only') {
+                $retryStrategy = 'full';
+            }
+            $b24ResolvedId = stockOperationsResolveB24DocumentIdForRetry($db, $doc, $retryStrategy);
 
             if (intval(isset($doc['b24_document_id']) ? $doc['b24_document_id'] : 0) > 0 && (string)$doc['b24_sync_status'] === 'sent') {
                 throw new Exception('Документ уже синхронизирован в Б24: #' . intval($doc['b24_document_id']));
@@ -90,6 +94,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                     isset($doc['supplier']) ? (string)$doc['supplier'] : ''
                 );
             }
+            if (is_array($syncResult)) {
+                $syncResult['retry_strategy_requested'] = $retryStrategy;
+            }
             $syncStatus = resolveB24SyncStatus($syncResult);
             $db->prepare("UPDATE stock_operation_docs SET b24_document_id = ?, b24_sync_status = ?, b24_sync_response = ? WHERE id = ?")
                 ->execute(array(
@@ -98,6 +105,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                     json_encode($syncResult, JSON_UNESCAPED_UNICODE),
                     $docId
                 ));
+
+            if ($syncStatus === 'sent' || $syncStatus === 'partial') {
+                stockOperationsPushReceiptProductsNamePriceToB24Catalog($db, $lineRows);
+            }
 
             if ($syncStatus === 'sent') {
                 $successMsg = 'Повторный синк документа #' . $docId . ' выполнен. Б24 документ #' . intval($syncResult['b24_document_id']);
@@ -533,11 +544,12 @@ require 'includes/header.php';
                             </td>
                             <td>
                                 <?php if ((string)$d['b24_sync_status'] !== 'sent' && in_array((string)$d['operation_type'], array('receipt', 'writeoff'), true)): ?>
-                                    <form method="POST" style="display:inline;">
+                                    <form method="POST" class="stock-doc-retry-forms" style="display:inline-flex; flex-wrap:wrap; gap:6px; align-items:center;">
                                         <input type="hidden" name="action" value="retry_b24_sync">
                                         <input type="hidden" name="form_token" value="<?= htmlspecialchars($retryToken) ?>">
                                         <input type="hidden" name="doc_id" value="<?= intval($d['id']) ?>">
-                                        <button type="submit" class="btn btn-warning btn-sm"><?= intval(isset($d['b24_document_id']) ? $d['b24_document_id'] : 0) > 0 ? 'Дофиксировать' : 'Повторить' ?></button>
+                                        <button type="submit" name="retry_strategy" value="full" class="btn btn-warning btn-sm" title="Сохранённый номер документа Б24 или из ответа/поиска по номеру: дозалить строки и провести">Дофиксировать</button>
+                                        <button type="submit" name="retry_strategy" value="portal_by_number_only" class="btn btn-outline btn-sm" title="Если документ удалили в портале: не использовать старый id из базы — только активный документ с этим номером или создание нового; затем можно «Дофиксировать». После отправки синка — имя и цена в CRM">Повторить</button>
                                     </form>
                                 <?php else: ?>
                                     -
