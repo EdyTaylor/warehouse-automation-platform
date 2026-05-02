@@ -614,40 +614,40 @@ require 'includes/header.php';
     <details class="card integration-section integration-flow-monitor" id="sec-mov-errors" open>
         <summary class="integration-section-summary">Ошибки отправки в Б24</summary>
         <div class="integration-section-body">
-            <table class="table">
-                <tr><th>ID</th><th>Product</th><th>Тип</th><th>Deal</th><th>Статус</th><th>Ответ</th><th>Время</th></tr>
-                <?php foreach ($movementErrors as $row): ?>
-                    <tr>
-                        <td><?= (int)$row['id'] ?></td>
-                        <td><?= (int)$row['product_id'] ?></td>
-                        <td><?= htmlspecialchars($row['movement_type']) ?></td>
-                        <td><?= (int)$row['deal_id'] ?></td>
-                        <td><?= htmlspecialchars($row['bitrix_status']) ?></td>
-                        <td><pre style="white-space:pre-wrap;max-width:420px;"><?= htmlspecialchars((string)$row['bitrix_response']) ?></pre></td>
-                        <td><?= htmlspecialchars($row['created_at']) ?></td>
-                    </tr>
-                <?php endforeach; ?>
-            </table>
-        </div>
+        <table class="table">
+            <tr><th>ID</th><th>Product</th><th>Тип</th><th>Deal</th><th>Статус</th><th>Ответ</th><th>Время</th></tr>
+            <?php foreach ($movementErrors as $row): ?>
+                <tr>
+                    <td><?= (int)$row['id'] ?></td>
+                    <td><?= (int)$row['product_id'] ?></td>
+                    <td><?= htmlspecialchars($row['movement_type']) ?></td>
+                    <td><?= (int)$row['deal_id'] ?></td>
+                    <td><?= htmlspecialchars($row['bitrix_status']) ?></td>
+                    <td><pre style="white-space:pre-wrap;max-width:420px;"><?= htmlspecialchars((string)$row['bitrix_response']) ?></pre></td>
+                    <td><?= htmlspecialchars($row['created_at']) ?></td>
+                </tr>
+            <?php endforeach; ?>
+        </table>
+    </div>
     </details>
 
     <details class="card integration-section integration-flow-monitor" id="sec-pending" open>
         <summary class="integration-section-summary">Ожидают отправки</summary>
         <div class="integration-section-body">
-            <table class="table">
-                <tr><th>ID</th><th>Product</th><th>Тип</th><th>Deal</th><th>Статус</th><th>Время</th></tr>
-                <?php foreach ($movementPending as $row): ?>
-                    <tr>
-                        <td><?= (int)$row['id'] ?></td>
-                        <td><?= (int)$row['product_id'] ?></td>
-                        <td><?= htmlspecialchars($row['movement_type']) ?></td>
-                        <td><?= (int)$row['deal_id'] ?></td>
-                        <td><?= htmlspecialchars($row['bitrix_status']) ?></td>
-                        <td><?= htmlspecialchars($row['created_at']) ?></td>
-                    </tr>
-                <?php endforeach; ?>
-            </table>
-        </div>
+        <table class="table">
+            <tr><th>ID</th><th>Product</th><th>Тип</th><th>Deal</th><th>Статус</th><th>Время</th></tr>
+            <?php foreach ($movementPending as $row): ?>
+                <tr>
+                    <td><?= (int)$row['id'] ?></td>
+                    <td><?= (int)$row['product_id'] ?></td>
+                    <td><?= htmlspecialchars($row['movement_type']) ?></td>
+                    <td><?= (int)$row['deal_id'] ?></td>
+                    <td><?= htmlspecialchars($row['bitrix_status']) ?></td>
+                    <td><?= htmlspecialchars($row['created_at']) ?></td>
+                </tr>
+            <?php endforeach; ?>
+        </table>
+    </div>
     </details>
 
     <details class="card integration-section integration-flow-monitor" id="sec-conflicts" open>

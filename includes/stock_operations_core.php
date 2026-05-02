@@ -1611,7 +1611,7 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
                 $outBase['b24_document_id'] = $extB24 > 0 ? $extB24 : null;
                 $outBase['total_amount_kgs'] = null;
                 $outBase['success_message'] = 'Повторный запрос игнорирован: приход с номером «'
-                    . $docNumber . '» уже есть (документ #' . $extId . '). Дубликаты не созданы.';
+                    . $docNumber . '» уже есть (документ #' . $extId . '). Новый локальный документ и повторная отправка в Битрикс24 не выполнялись.';
                 $outBase['error_message'] = '';
                 stockReceiptMysqlReleaseLock($db, $advisoryLockName);
                 return $outBase;
@@ -1619,6 +1619,8 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
         }
 
     $isoTweakedForReceipt = false;
+    $docId = 0;
+    $receiptCommitted = false;
     try {
         // Чтобы другой запрос (сохранение паузы / «прервать приход») увиделся внутри длинной транзакции
         @$db->exec('SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED');
@@ -1798,6 +1800,7 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
         $db->prepare("UPDATE stock_operation_docs SET total_amount = ? WHERE id = ?")
             ->execute(array($totalAmount, $docId));
         $db->commit();
+        $receiptCommitted = true;
 
         if (!empty($deferBitrixProductPrices)) {
             stockOperationsFlushDeferredEnsureProductBitrix($db, $deferBitrixProductPrices);
@@ -1876,6 +1879,39 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
                 $db->rollBack();
             }
         } catch (Exception $eRb) {
+        }
+        // После commit() локальный приход уже в БД; исключение в post-commit (Битрикс, PDO вне транзакции)
+        // не должно возвращать ok=false «как будто прихода не было».
+        if ($receiptCommitted && intval($docId) > 0) {
+            $payloadErr = array(
+                'ok' => false,
+                'stage' => 'post_commit_exception',
+                'message' => $e->getMessage(),
+                'file' => $e->getFile(),
+                'line' => $e->getLine(),
+            );
+            try {
+                $db->prepare("UPDATE stock_operation_docs SET b24_sync_status = 'error', b24_sync_response = ? WHERE id = ?")
+                    ->execute(array(json_encode($payloadErr, JSON_UNESCAPED_UNICODE), intval($docId)));
+            } catch (Exception $eDoc) {
+            }
+            $outBase['ok'] = true;
+            $outBase['doc_id'] = intval($docId);
+            $outBase['sync_status'] = 'error';
+            $outBase['sync_result'] = $payloadErr;
+            $outBase['error_message'] = 'Приход сохранён в приложении (документ #' . intval($docId)
+                . '), но при обработке после сохранения произошла ошибка: ' . $e->getMessage();
+            $outBase['success_message'] = 'Документ #' . intval($docId) . ' создан локально; синхронизация с Б24 прервана ошибкой — см. детали ниже или кнопку «Повторить».';
+            try {
+                $stTa = $db->prepare('SELECT total_amount FROM stock_operation_docs WHERE id = ? LIMIT 1');
+                $stTa->execute(array(intval($docId)));
+                $rowTa = $stTa->fetch(PDO::FETCH_ASSOC);
+                if (is_array($rowTa) && isset($rowTa['total_amount'])) {
+                    $outBase['total_amount_kgs'] = floatval($rowTa['total_amount']);
+                }
+            } catch (Exception $eTa) {
+            }
+            return $outBase;
         }
         $outBase['error_message'] = $e->getMessage();
         return $outBase;
