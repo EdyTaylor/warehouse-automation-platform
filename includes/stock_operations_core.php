@@ -2110,14 +2110,15 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
         $db->commit();
         $receiptCommitted = true;
 
-        if (!empty($deferBitrixProductPrices)) {
-            stockOperationsFlushDeferredEnsureProductBitrix($db, $deferBitrixProductPrices);
+        if (!$localOnly) {
+            @set_time_limit(0);
+            if (function_exists('ini_set')) {
+                @ini_set('max_execution_time', '0');
+            }
         }
 
-        if (!$localOnly && !empty($receiptProductIdsNeedCatalogPush)) {
-            foreach (array_keys($receiptProductIdsNeedCatalogPush) as $pidForCatalog) {
-                syncProductAvailableToBitrix($db, intval($pidForCatalog));
-            }
+        if (!empty($deferBitrixProductPrices)) {
+            stockOperationsFlushDeferredEnsureProductBitrix($db, $deferBitrixProductPrices);
         }
 
         $lineRowsForSync = $db->query("SELECT product_id, qty_rolls, quantity_m, roll_length, price_per_roll, delivery_price_per_roll, line_total FROM stock_operation_lines WHERE doc_id=" . intval($docId))->fetchAll(PDO::FETCH_ASSOC);
@@ -2160,6 +2161,14 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
                 json_encode($syncResult, JSON_UNESCAPED_UNICODE),
                 $docId
             ));
+
+        // Остаток в каталоге/магазине Б24 — после успешного проведения складского документа (иначе долгая серия запросов
+        // до document.conduct даёт таймаут хостинга и документ в Б24 не создаётся).
+        if (!$localOnly && $syncStatus === 'sent' && !empty($receiptProductIdsNeedCatalogPush)) {
+            foreach (array_keys($receiptProductIdsNeedCatalogPush) as $pidForCatalog) {
+                syncProductAvailableToBitrix($db, intval($pidForCatalog));
+            }
+        }
 
         $successMessage = 'Документ прихода #' . $docId . ' проведен. Валюта ввода: ' . $receiptCurrency . '. Курс USD: ' . number_format($usdToKgsRate, 2, '.', ' ') . ' | Сумма: ' . number_format($totalAmount, 2, '.', ' ') . ' KGS';
         $errorMessage = '';

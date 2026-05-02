@@ -28,6 +28,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         $errorMsg = 'Некорректный документ для повторного синка.';
     } else {
         try {
+            @set_time_limit(0);
+            if (function_exists('ini_set')) {
+                @ini_set('max_execution_time', '0');
+            }
             $docStmt = $db->prepare("
                 SELECT id, operation_type, doc_number, comment_text, supplier, b24_sync_status, b24_document_id, b24_sync_response
                 FROM stock_operation_docs
@@ -65,7 +69,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 throw new Exception('У документа нет строк для синка.');
             }
 
+            $b24ResolvedIdAfterSync = 0;
             if ($b24ResolvedId > 0) {
+                $b24ResolvedIdAfterSync = $b24ResolvedId;
                 $syncResult = addLinesAndConductExistingB24Document(
                     $db,
                     $b24ResolvedId,
@@ -73,16 +79,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                     $lineRows,
                     isset($doc['supplier']) ? (string)$doc['supplier'] : ''
                 );
-                if (is_array($syncResult)) {
-                    $syncResult['retry_reused_b24_document_id'] = $b24ResolvedId;
-                    if (intval(isset($doc['b24_document_id']) ? $doc['b24_document_id'] : 0) <= 0) {
-                        $fromJson = stockOperationsExtractB24DocumentIdFromSavedSyncJson(
-                            isset($doc['b24_sync_response']) ? (string)$doc['b24_sync_response'] : ''
-                        );
-                        $syncResult['retry_b24_document_id_source'] =
-                            (intval($fromJson) === $b24ResolvedId) ? 'stored_json' : 'doc_number_lookup';
-                    }
-                }
             } else {
                 $syncResult = syncOperationDocumentToBitrix(
                     $db,
@@ -94,8 +90,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                     isset($doc['supplier']) ? (string)$doc['supplier'] : ''
                 );
             }
+            $syncResult = tryFinalizePartialDocument(
+                $db,
+                (string)$doc['operation_type'],
+                $syncResult,
+                $lineRows,
+                isset($doc['supplier']) ? (string)$doc['supplier'] : ''
+            );
             if (is_array($syncResult)) {
                 $syncResult['retry_strategy_requested'] = $retryStrategy;
+                if ($b24ResolvedIdAfterSync > 0) {
+                    $syncResult['retry_reused_b24_document_id'] = $b24ResolvedIdAfterSync;
+                    if (intval(isset($doc['b24_document_id']) ? $doc['b24_document_id'] : 0) <= 0) {
+                        $fromJson = stockOperationsExtractB24DocumentIdFromSavedSyncJson(
+                            isset($doc['b24_sync_response']) ? (string)$doc['b24_sync_response'] : ''
+                        );
+                        $syncResult['retry_b24_document_id_source'] =
+                            (intval($fromJson) === $b24ResolvedIdAfterSync) ? 'stored_json' : 'doc_number_lookup';
+                    }
+                }
             }
             $syncStatus = resolveB24SyncStatus($syncResult);
             $db->prepare("UPDATE stock_operation_docs SET b24_document_id = ?, b24_sync_status = ?, b24_sync_response = ? WHERE id = ?")
