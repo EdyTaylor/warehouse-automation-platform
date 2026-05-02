@@ -90,7 +90,7 @@ if ($rLock === false || intval($rLock[0]) !== 1) {
 
 try {
     $linesStmt = $db->prepare("
-        SELECT product_id, qty_rolls, quantity_m, roll_length, price_per_roll, delivery_price_per_roll, line_total
+        SELECT product_id, product_name, qty_rolls, quantity_m, roll_length, price_per_roll, delivery_price_per_roll, line_total
         FROM stock_operation_lines
         WHERE doc_id = ?
         ORDER BY id ASC

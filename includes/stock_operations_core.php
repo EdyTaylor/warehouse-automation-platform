@@ -258,6 +258,30 @@ function stockOperationsMergeLineRowsPerB24CatalogId(PDO $db, array $lineRows) {
     if (empty($lineRows)) {
         return array();
     }
+    $pidToBestLineName = array();
+    foreach ($lineRows as $line) {
+        if (!is_array($line)) {
+            continue;
+        }
+        $pid = intval(isset($line['product_id']) ? $line['product_id'] : 0);
+        if ($pid <= 0) {
+            continue;
+        }
+        $pn = isset($line['product_name']) ? trim((string)$line['product_name']) : '';
+        if ($pn === '') {
+            continue;
+        }
+        $lenPn = function_exists('mb_strlen') ? mb_strlen($pn) : strlen($pn);
+        $lenPrev = -1;
+        if (isset($pidToBestLineName[$pid])) {
+            $prev = $pidToBestLineName[$pid];
+            $lenPrev = function_exists('mb_strlen') ? mb_strlen($prev) : strlen($prev);
+        }
+        if (!isset($pidToBestLineName[$pid]) || $lenPn > $lenPrev) {
+            $pidToBestLineName[$pid] = $pn;
+        }
+    }
+
     $uniquePids = array();
     foreach ($lineRows as $line) {
         if (!is_array($line)) {
@@ -280,11 +304,12 @@ function stockOperationsMergeLineRowsPerB24CatalogId(PDO $db, array $lineRows) {
         if ($bid <= 0) {
             continue;
         }
+        $hintNm = isset($pidToBestLineName[$pid]) ? $pidToBestLineName[$pid] : (isset($prod['name']) ? (string)$prod['name'] : '');
         ensureUsableB24ProductId(
             $db,
             $pid,
             $bid,
-            isset($prod['name']) ? (string)$prod['name'] : '',
+            $hintNm,
             floatval(isset($prod['price_per_meter']) ? $prod['price_per_meter'] : 0)
         );
     }
@@ -1504,16 +1529,22 @@ function repairB24ProductTypeToWarehouseInPlace($b24ProductId) {
  * Уменьшает «Неверный тип товара» при первом проведении из приложения.
  * Не выполняется при нажатии «Провести» только в UI Битрикс24 — нужен синк/кнопка из приложения.
  * Отключить: app_settings stock_b24_preconduct_repair_line_types = 0
- * Лимит позиций (уникальных elementId): stock_b24_preconduct_repair_max_elements (по умолчанию 22).
+ * Лимит позиций (уникальных elementId): stock_b24_preconduct_repair_max_elements (по умолчанию 80).
  * При большем числе пропускаем — иначе Beget/nginx даёт 504; типы добивает цикл после ошибки conduct.
  *
  * @param PDO $db
  * @param int $b24DocId
+ * @param string $docType receipt|writeoff|'' — для замены родителя каталога на SKU в строках черновика
  * @return array repaired_ids, skipped
  */
-function stockB24RepairAllLineCatalogProductTypesForDocument(PDO $db, $b24DocId) {
+function stockB24RepairAllLineCatalogProductTypesForDocument(PDO $db, $b24DocId, $docType = '') {
     $bid = intval($b24DocId);
-    $out = array('repaired' => array(), 'already_ok' => array(), 'failed' => array());
+    $out = array(
+        'repaired' => array(),
+        'already_ok' => array(),
+        'failed' => array(),
+        'parent_offer_replaced' => array(),
+    );
     if ($bid <= 0) {
         return $out;
     }
@@ -1529,7 +1560,7 @@ function stockB24RepairAllLineCatalogProductTypesForDocument(PDO $db, $b24DocId)
         }
     }
     $nUniq = count($uniqIds);
-    $maxEl = intval(getAppSetting($db, 'stock_b24_preconduct_repair_max_elements', '22'));
+    $maxEl = intval(getAppSetting($db, 'stock_b24_preconduct_repair_max_elements', '80'));
     if ($maxEl > 0 && $nUniq > $maxEl) {
         $out['skipped'] = true;
         $out['skip_reason'] = 'element_count_exceeds_max';
@@ -1537,6 +1568,37 @@ function stockB24RepairAllLineCatalogProductTypesForDocument(PDO $db, $b24DocId)
         $out['max_elements'] = $maxEl;
         return $out;
     }
+
+    $dt = strtolower(trim((string)$docType));
+    if (trim((string)getAppSetting($db, 'stock_b24_preconduct_replace_parent_catalog_ids', '1')) === '1'
+        && ($dt === 'receipt' || $dt === 'writeoff')
+    ) {
+        foreach (array_keys($uniqIds) as $eidPre) {
+            $eidPre = intval($eidPre);
+            if ($eidPre <= 0) {
+                continue;
+            }
+            $resolvedPre = stockOperationsResolveB24CatalogParentToOfferSku($db, 0, $eidPre, '');
+            if ($resolvedPre > 0 && intval($resolvedPre) !== $eidPre) {
+                if (replaceInvalidElementInB24Document($db, $bid, $eidPre, intval($resolvedPre), $dt)) {
+                    $out['parent_offer_replaced'][] = array('from' => $eidPre, 'to' => intval($resolvedPre));
+                }
+                pauseBetweenB24DocumentLineAdds($db);
+            }
+        }
+        $map = fetchB24DocumentElementsMap($bid);
+        if (!is_array($map) || empty($map)) {
+            return $out;
+        }
+        $uniqIds = array();
+        foreach (array_keys($map) as $k2) {
+            $ik2 = intval($k2);
+            if ($ik2 > 0) {
+                $uniqIds[$ik2] = true;
+            }
+        }
+    }
+
     $seen = array();
     foreach (array_keys($map) as $eidRaw) {
         $eid = intval($eidRaw);
@@ -1577,6 +1639,44 @@ function stockNormalizeProductNameForB24OfferMatch($name) {
 }
 
 /**
+ * Имя из строки прихода для сопоставления с SKU в Б24 (обычно полнее, чем products.name).
+ *
+ * @param array $line
+ * @param string $prodNameFallback из products.name
+ * @return string
+ */
+function stockOperationsB24HintNameFromLine(array $line, $prodNameFallback) {
+    $ln = isset($line['product_name']) ? trim((string)$line['product_name']) : '';
+    if ($ln !== '') {
+        return $ln;
+    }
+    return trim((string)$prodNameFallback);
+}
+
+/**
+ * Офферы складского документа — приоритет позициям каталога type=1 («товар»), если REST отдаёт type.
+ *
+ * @param array $cands
+ * @return array
+ */
+function stockFilterCatalogOfferCandidatesWarehouseEligible(array $cands) {
+    if (empty($cands)) {
+        return $cands;
+    }
+    $typed1 = array();
+    foreach ($cands as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        $t = isset($row['type']) ? $row['type'] : (isset($row['TYPE']) ? $row['TYPE'] : null);
+        if ($t !== null && intval($t) === 1) {
+            $typed1[] = $row;
+        }
+    }
+    return !empty($typed1) ? $typed1 : $cands;
+}
+
+/**
  * @param array|null $catalogGetResp как ответ sendToBitrix('catalog.product.get', ...)
  * @return array|null
  */
@@ -1609,10 +1709,12 @@ function stockBitrixCatalogCollectChildOffersForParent($parentCatalogId, $iblock
     $iblockId = intval($iblockId);
     $filterVariants = array();
     if ($iblockId > 0) {
+        $filterVariants[] = array('=parentId' => $parentCatalogId, 'iblockId' => $iblockId);
         $filterVariants[] = array('parentId' => $parentCatalogId, 'iblockId' => $iblockId);
         $filterVariants[] = array('parentProductId' => $parentCatalogId, 'iblockId' => $iblockId);
         $filterVariants[] = array('PARENT_ID' => $parentCatalogId, 'iblockId' => $iblockId);
     }
+    $filterVariants[] = array('=parentId' => $parentCatalogId);
     $filterVariants[] = array('parentId' => $parentCatalogId);
     $filterVariants[] = array('parentProductId' => $parentCatalogId);
     $filterVariants[] = array('PARENT_ID' => $parentCatalogId);
@@ -1739,6 +1841,23 @@ function stockPickDeterministicOfferIdFromCandidates($parentName, $hintName, arr
         }
     }
 
+    /** Однозначное вхождение: полное имя в строке прихода совпало с суффиксом/вариантом одного SKU */
+    if ($hn !== '') {
+        $subHits = array();
+        foreach ($byId as $rid => $info) {
+            $on = stockNormalizeProductNameForB24OfferMatch($info['name']);
+            if ($on === '') {
+                continue;
+            }
+            if (strpos($hn, $on) !== false || strpos($on, $hn) !== false) {
+                $subHits[] = intval($rid);
+            }
+        }
+        if (count($subHits) === 1) {
+            return intval($subHits[0]);
+        }
+    }
+
     return 0;
 }
 
@@ -1783,9 +1902,6 @@ function stockOperationsResolveB24CatalogParentToOfferSku($db, $localProductId, 
         $ptype = intval($row['TYPE']);
     }
     $parentMust = stockOperationsBitrixCatalogParentWithOffersTypeValue($db);
-    if ($ptype === null || intval($ptype) !== intval($parentMust)) {
-        return $idIn;
-    }
 
     $parentName = '';
     if (isset($row['name'])) {
@@ -1794,13 +1910,26 @@ function stockOperationsResolveB24CatalogParentToOfferSku($db, $localProductId, 
     $iblockChild = intval(isset($row['iblockId']) ? $row['iblockId'] : (isset($row['iblock']) ? $row['iblock'] : 0));
 
     $cands = stockBitrixCatalogCollectChildOffersForParent($idIn, $iblockChild);
-    if (empty($cands)) {
+    $cands = stockFilterCatalogOfferCandidatesWarehouseEligible($cands);
+
+    $hasChildSkus = !empty($cands);
+    $isDeclaredParentWithOffers = ($ptype !== null && intval($ptype) === intval($parentMust));
+
+    if (!$hasChildSkus) {
+        return $idIn;
+    }
+
+    /**
+     * Раньше резолвили только при type=3 у родителя; на части порталов дерево SKU есть при другом коде типа —
+     * если REST вернул дочерние SKU, считаем id родителя непригодным для СУ.
+     */
+    if (!$isDeclaredParentWithOffers && trim((string)getAppSetting($db, 'stock_b24_resolve_parent_only_when_catalog_lists_children', '1')) !== '1') {
         return $idIn;
     }
 
     $picked = stockPickDeterministicOfferIdFromCandidates($parentName, $hintName, $cands);
-    /** Явное «первая SKU по мин. id»: app_settings stock_b24_offer_pick_min_id_fallback = 1 */
-    if ($picked <= 0 && trim((string)getAppSetting($db, 'stock_b24_offer_pick_min_id_fallback', '0')) === '1') {
+    /** По умолчанию включено: родитель безопаснее заменить на мин. id SKU, чем падать проведением; отключить: stock_b24_offer_pick_min_id_fallback = 0 */
+    if ($picked <= 0 && trim((string)getAppSetting($db, 'stock_b24_offer_pick_min_id_fallback', '1')) === '1') {
         $mine = null;
         foreach ($cands as $cr) {
             if (!is_array($cr)) {
@@ -1910,7 +2039,7 @@ function conductAndEnsurePosted($db, $b24DocId, $docType, $supplierName) {
         pauseBeforeConduct($db);
     }
     if (trim((string)getAppSetting($db, 'stock_b24_preconduct_repair_line_types', '1')) === '1') {
-        stockB24RepairAllLineCatalogProductTypesForDocument($db, intval($b24DocId));
+        stockB24RepairAllLineCatalogProductTypesForDocument($db, intval($b24DocId), (string)$docType);
         pauseBeforeConduct($db);
     }
     $conductResp = sendToBitrix('catalog.document.conduct', array('id' => intval($b24DocId)));
@@ -2090,11 +2219,12 @@ function syncOperationDocumentToBitrix($db, $docId, $docType, $docNumber, $comme
             );
             continue;
         }
+        $hintForSku = stockOperationsB24HintNameFromLine($line, isset($prod['name']) ? (string)$prod['name'] : '');
         $resolvedB24ProductId = ensureUsableB24ProductId(
             $db,
             $localProductId,
             $b24ProductId,
-            isset($prod['name']) ? (string)$prod['name'] : '',
+            $hintForSku,
             floatval(isset($prod['price_per_meter']) ? $prod['price_per_meter'] : 0)
         );
         if ($resolvedB24ProductId <= 0) {
@@ -2312,11 +2442,12 @@ function addLinesAndConductExistingB24Document($db, $b24DocId, $docType, $lineRo
             $lineResponses[] = array('product_id' => $localProductId, 'status' => 'skip_no_b24_product_id');
             continue;
         }
+        $hintForSku = stockOperationsB24HintNameFromLine($line, isset($prod['name']) ? (string)$prod['name'] : '');
         $resolvedB24ProductId = ensureUsableB24ProductId(
             $db,
             $localProductId,
             $b24ProductId,
-            isset($prod['name']) ? (string)$prod['name'] : '',
+            $hintForSku,
             floatval(isset($prod['price_per_meter']) ? $prod['price_per_meter'] : 0)
         );
         if ($resolvedB24ProductId <= 0) {
@@ -3684,7 +3815,7 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
             stockOperationsFlushDeferredEnsureProductBitrix($db, $deferBitrixProductPrices);
         }
 
-        $lineRowsForSync = $db->query("SELECT product_id, qty_rolls, quantity_m, roll_length, price_per_roll, delivery_price_per_roll, line_total FROM stock_operation_lines WHERE doc_id=" . intval($docId))->fetchAll(PDO::FETCH_ASSOC);
+        $lineRowsForSync = $db->query("SELECT product_id, product_name, qty_rolls, quantity_m, roll_length, price_per_roll, delivery_price_per_roll, line_total FROM stock_operation_lines WHERE doc_id=" . intval($docId))->fetchAll(PDO::FETCH_ASSOC);
 
         if ($localOnly) {
             $syncResult = array(
