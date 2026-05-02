@@ -1506,8 +1506,8 @@ function stockReceiptMysqlReleaseLock(PDO $db, $lockName) {
  * - receipt_currency: USD или KGS
  * - min_full: мин. остаток рулона (м), по умолчанию 0.5
  * - lines[]: массив строк, каждая с полями:
- *     product_id (локальный; 0 можно не указывать, если задан b24_product_id),
- *     b24_product_id — ID товара в Б24: находит или создаёт минимальную строку в products без «связки» с таблицами прайса,
+ *     product_id (локальный; подсказка; если указан и b24_product_id — приоритет у b24, чужой product_id игнорируется),
+ *     b24_product_id — ID товара в Б24: ищется локальный products по b24_product_id или создаётся минимальная строка,
  *     product_name (для нового локального товара или подписи),
  *     qty_rolls, roll_length,
  *     purchase_per_roll и delivery_per_roll — в выбранной receipt_currency (как поля закупки/доставки за рулон на форме)
@@ -1687,14 +1687,20 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
             $productName = isset($row['product_name']) ? trim((string)$row['product_name']) : (isset($row['productName']) ? trim((string)$row['productName']) : '');
             $b24LineId = intval(isset($row['b24_product_id']) ? $row['b24_product_id'] : (isset($row['b24ProductId']) ? $row['b24ProductId'] : 0));
 
-            if ($productId <= 0 && $b24LineId > 0) {
-                $stB24 = $db->prepare('SELECT id, name FROM products WHERE b24_product_id = ? LIMIT 1');
+            // Если в строке указан Bitrix-ID товара — приход всегда вешаем на локальную карточку с этим b24_product_id
+            // (каталог приложения ↔ Б24), даже если в JSON ошибочно передан другой product_id.
+            // Имя для строки документа берём из каталога, чтобы не плодить «другие» подписи при отличии написания в Excel.
+            if ($b24LineId > 0) {
+                $stB24 = $db->prepare('SELECT id, name FROM products WHERE b24_product_id = ? ORDER BY id ASC LIMIT 1');
                 $stB24->execute(array($b24LineId));
                 $foundByB24 = $stB24->fetch(PDO::FETCH_ASSOC);
-                if ($foundByB24) {
-                    $productId = intval($foundByB24['id']);
-                    if ($productName === '' && isset($foundByB24['name'])) {
-                        $productName = trim((string)$foundByB24['name']);
+                if (is_array($foundByB24)) {
+                    $productId = intval(isset($foundByB24['id']) ? $foundByB24['id'] : 0);
+                    $dbNm = isset($foundByB24['name']) ? trim((string)$foundByB24['name']) : '';
+                    if ($dbNm !== '') {
+                        $productName = $dbNm;
+                    } elseif ($productName === '') {
+                        $productName = $dbNm;
                     }
                 } else {
                     $nmIns = ($productName !== '') ? $productName : ('Товар Б24 #' . $b24LineId);
