@@ -12,21 +12,35 @@ if (function_exists('set_time_limit')) {
 header('Content-Type: application/json; charset=utf-8');
 
 require_once dirname(__DIR__) . '/db.php';
-require_once dirname(__DIR__) . '/functions/stock_movements.php';
-require_once dirname(__DIR__) . '/api/bitrix/send.php';
 require_once dirname(__DIR__) . '/functions/app_settings.php';
-require_once dirname(__DIR__) . '/includes/stock_operations_core.php';
 
 $db = getDB();
-ensureStockOperationTables($db);
 
-$docId = intval(isset($_GET['doc_id']) ? $_GET['doc_id'] : (isset($_REQUEST['doc_id']) ? $_REQUEST['doc_id'] : 0));
 $secret = isset($_GET['secret']) ? trim((string)$_GET['secret']) : '';
 $expected = trim((string)getAppSetting($db, 'stock_operation_b24_worker_secret', ''));
 
-if ($docId <= 0 || $expected === '' || !hash_equals((string)$expected, (string)$secret)) {
+if ($expected === '' || !hash_equals((string)$expected, (string)$secret)) {
     http_response_code(403);
     echo json_encode(array('ok' => false, 'error' => 'Forbidden'), JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/** До тяжёлых include — быстрый ping для stockOperationsDispatchB24WarehouseWorker(). */
+if (isset($_GET['ping']) && trim((string)$_GET['ping']) === '1') {
+    echo json_encode(array('ok' => true, 'ping' => true), JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+require_once dirname(__DIR__) . '/functions/stock_movements.php';
+require_once dirname(__DIR__) . '/api/bitrix/send.php';
+require_once dirname(__DIR__) . '/includes/stock_operations_core.php';
+
+ensureStockOperationTables($db);
+
+$docId = intval(isset($_GET['doc_id']) ? $_GET['doc_id'] : (isset($_REQUEST['doc_id']) ? $_REQUEST['doc_id'] : 0));
+if ($docId <= 0) {
+    http_response_code(400);
+    echo json_encode(array('ok' => false, 'error' => 'doc_id required'), JSON_UNESCAPED_UNICODE);
     exit;
 }
 
@@ -115,9 +129,10 @@ try {
     try {
         $syncResult = stockOperationsExecuteB24SyncWithLines($db, $doc, $lineRows, $retryStrategy);
         $syncStatus = resolveB24SyncStatus($syncResult);
+        $persistWk = stockOperationsEffectiveB24DocumentIdForPersist($doc, $syncResult);
         $db->prepare("UPDATE stock_operation_docs SET b24_document_id = ?, b24_sync_status = ?, b24_sync_response = ? WHERE id = ?")
             ->execute(array(
-                isset($syncResult['b24_document_id']) ? intval($syncResult['b24_document_id']) : null,
+                $persistWk,
                 $syncStatus,
                 json_encode($syncResult, JSON_UNESCAPED_UNICODE),
                 $docId

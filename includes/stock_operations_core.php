@@ -2512,6 +2512,80 @@ function resolveB24SyncStatus($syncResult) {
 }
 
 /**
+ * Не затирать b24_document_id в MySQL значением NULL, если ответ синка без id (очередь в фон, ошибка после частичного создания и т.д.).
+ *
+ * @param array $prevDocRow строка stock_operation_docs или фрагмент с ключом b24_document_id
+ * @param array $syncResult
+ * @return int|null готовое значение для UPDATE (null = действительно пустой id)
+ */
+function stockOperationsEffectiveB24DocumentIdForPersist(array $prevDocRow, array $syncResult) {
+    $incoming = isset($syncResult['b24_document_id']) ? intval($syncResult['b24_document_id']) : 0;
+    if ($incoming > 0) {
+        return $incoming;
+    }
+    $prev = isset($prevDocRow['b24_document_id']) ? intval($prevDocRow['b24_document_id']) : 0;
+    if ($prev > 0) {
+        return $prev;
+    }
+    return null;
+}
+
+/**
+ * Проверка, что api/stock_operation_b24_worker.php доступен с тем же secret (перед фоновым exec+curl).
+ *
+ * @param PDO $db
+ * @return bool
+ */
+function stockOperationsProbeB24WorkerReachable(PDO $db) {
+    $secret = trim((string)getAppSetting($db, 'stock_operation_b24_worker_secret', ''));
+    if ($secret === '') {
+        return false;
+    }
+    $base = trim((string)getAppSetting($db, 'stock_b24_worker_public_base_url', ''));
+    if ($base === '') {
+        $base = stockOperationsGuessPublicSiteUrl();
+    }
+    if ($base === '') {
+        return false;
+    }
+    $url = rtrim($base, '/') . '/api/stock_operation_b24_worker.php?' . http_build_query(array(
+        'secret' => $secret,
+        'ping' => '1',
+    ));
+    $raw = false;
+    if (function_exists('curl_init')) {
+        $ch = curl_init($url);
+        if ($ch === false) {
+            return false;
+        }
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 6);
+        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 5);
+        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
+        $raw = @curl_exec($ch);
+        $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        if ($raw === false || $code !== 200) {
+            return false;
+        }
+    } else {
+        $ctx = stream_context_create(array(
+            'http' => array(
+                'timeout' => 6,
+                'method' => 'GET',
+            ),
+        ));
+        $raw = @file_get_contents($url, false, $ctx);
+        if ($raw === false || $raw === '') {
+            return false;
+        }
+    }
+    $j = json_decode((string)$raw, true);
+    return is_array($j) && !empty($j['ok']) && !empty($j['ping']);
+}
+
+/**
  * Публичный URL сайта для фонового curl (при пустом app_settings stock_b24_worker_public_base_url).
  *
  * @return string
@@ -2573,6 +2647,20 @@ function stockOperationsDispatchB24WarehouseWorker(PDO $db, $docId, $retryStrate
         return false;
     }
     $base = rtrim($base, '/');
+
+    /** Без успешного ping считали синк «в фоне» выполненным, хотя curl/exec мог не дойти до воркера (типично Beget). */
+    static $workerReachable = null;
+    if ($workerReachable === null) {
+        if (trim((string)getAppSetting($db, 'stock_b24_worker_ping_before_spawn', '1')) === '0') {
+            $workerReachable = true;
+        } else {
+            $workerReachable = stockOperationsProbeB24WorkerReachable($db);
+        }
+    }
+    if (!$workerReachable) {
+        return false;
+    }
+
     $qs = array(
         'doc_id' => $docId,
         'secret' => $secret,
@@ -3663,9 +3751,10 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
         $syncResult = tryFinalizePartialDocument($db, 'receipt', $syncResult, $lineRowsForSync, $supplier);
         $syncStatus = resolveB24SyncStatus($syncResult);
 
+        $persistReceipt = stockOperationsEffectiveB24DocumentIdForPersist(array(), $syncResult);
         $db->prepare("UPDATE stock_operation_docs SET b24_document_id = ?, b24_sync_status = ?, b24_sync_response = ? WHERE id = ?")
             ->execute(array(
-                isset($syncResult['b24_document_id']) ? intval($syncResult['b24_document_id']) : null,
+                $persistReceipt,
                 $syncStatus,
                 json_encode($syncResult, JSON_UNESCAPED_UNICODE),
                 $docId

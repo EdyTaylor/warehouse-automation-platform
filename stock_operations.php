@@ -98,12 +98,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 $syncStatus = resolveB24SyncStatus($syncResult);
             } else {
                 $syncResult = stockOperationsExecuteB24SyncWithLines($db, $doc, $lineRows, $retryStrategy);
+                if ($isReceiptDefer && trim((string)getAppSetting($db, 'stock_b24_worker_ping_before_spawn', '1')) !== '0') {
+                    $syncResult['deferred_wanted_but_inline_fallback'] = true;
+                    $syncResult['inline_fallback_hint'] = 'Фон не вызвался или ping воркера не прошёл; синк выполнен в этом запросе. При таймауте задайте app_settings stock_b24_worker_public_base_url (https://…) или временно выключите фон stock_receipt_b24_worker_enabled=0.';
+                }
                 $syncStatus = resolveB24SyncStatus($syncResult);
             }
 
+            $persistBid = stockOperationsEffectiveB24DocumentIdForPersist($doc, $syncResult);
             $db->prepare("UPDATE stock_operation_docs SET b24_document_id = ?, b24_sync_status = ?, b24_sync_response = ? WHERE id = ?")
                 ->execute(array(
-                    isset($syncResult['b24_document_id']) ? intval($syncResult['b24_document_id']) : null,
+                    $persistBid,
                     $syncStatus,
                     json_encode($syncResult, JSON_UNESCAPED_UNICODE),
                     $docId
@@ -295,9 +300,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         $syncResult = syncOperationDocumentToBitrix($db, $docId, 'writeoff', $docNumber, $commentText, $lineRowsForSync, '');
         $syncResult = tryFinalizePartialDocument($db, 'writeoff', $syncResult, $lineRowsForSync, '');
         $syncStatus = resolveB24SyncStatus($syncResult);
+        $persistW = stockOperationsEffectiveB24DocumentIdForPersist(array(), $syncResult);
         $db->prepare("UPDATE stock_operation_docs SET b24_document_id = ?, b24_sync_status = ?, b24_sync_response = ? WHERE id = ?")
             ->execute(array(
-                isset($syncResult['b24_document_id']) ? intval($syncResult['b24_document_id']) : null,
+                $persistW,
                 $syncStatus,
                 json_encode($syncResult, JSON_UNESCAPED_UNICODE),
                 $docId
