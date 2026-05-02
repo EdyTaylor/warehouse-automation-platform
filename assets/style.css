@@ -61,6 +61,11 @@ body {
     min-height: 100vh;
 }
 
+/* Чтобы после #якоря и при восстановлении скролла контент не прятался под sticky-шапкой */
+main {
+    scroll-margin-top: 76px;
+}
+
 /* Контейнер */
 .container {
     max-width: 1400px;
