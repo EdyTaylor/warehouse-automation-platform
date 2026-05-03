@@ -835,7 +835,7 @@ function stockOperationsPushReceiptProductsNamePriceToB24Catalog($db, array $lin
         }
 
         $nm = trim(isset($pr['name']) ? (string)$pr['name'] : '');
-        if ($nm === '' || strpos($nm, 'Товар Б24 #') === 0) {
+        if (stockReceiptIsPlaceholderB24ProductName($nm)) {
             continue;
         }
 
@@ -1149,6 +1149,14 @@ function stockReceiptIsPlaceholderB24ProductName($name) {
         return true;
     }
     if (strpos($n, 'Товар Б24 #') === 0) {
+        return true;
+    }
+    /** Локальный/CRM autoplaceholder из clone (forceCreateStockCloneProduct) — избегать пушить в каталог как нормальное имя. */
+    if (preg_match('/^Товар\s*#\s*\d+\s*$/u', $n)) {
+        return true;
+    }
+    /** Латиница после импортов */
+    if (preg_match('/^Product\s*#\s*\d+\s*$/i', $n)) {
         return true;
     }
     return false;
@@ -1901,6 +1909,66 @@ function stockPickDeterministicOfferIdFromCandidates($parentName, $hintName, arr
     return 0;
 }
 
+/**
+ * После remap родитель → SKU восстановить нормальное NAME у оффера в crm.product, если в Б24 висит заглушка «Товар #N» /
+ * пусто, а из прихода есть человекочитаемое название ($hint).
+ * Отключить: app_settings stock_b24_sync_offer_name_after_parent_resolve = 0
+ *
+ * @param PDO $db
+ * @param int $skuId выбранный id оффера
+ * @param string $hintName из строки прихода / products.name
+ * @param string $parentName имя родителя в каталоге (резерв)
+ * @return bool true если отправлен update
+ */
+function stockOperationsRepairCrmOfferNameAfterParentResolve(PDO $db, $skuId, $hintName, $parentName) {
+    $skuId = intval($skuId);
+    if ($skuId <= 0) {
+        return false;
+    }
+    if (trim((string)getAppSetting($db, 'stock_b24_sync_offer_name_after_parent_resolve', '1')) === '0') {
+        return false;
+    }
+
+    $hint = trim((string)$hintName);
+    $fallback = trim((string)$parentName);
+
+    $preferred = '';
+    if ($hint !== '' && !stockReceiptIsPlaceholderB24ProductName($hint)) {
+        $preferred = $hint;
+    } elseif ($fallback !== '' && !stockReceiptIsPlaceholderB24ProductName($fallback)) {
+        /** Редкий случай: подсказка пустая, но лучше имя родителя, чем «Товар #4» у оффера */
+        $preferred = $fallback;
+    }
+    if ($preferred === '') {
+        return false;
+    }
+
+    $crmNowTrim = trim((string)stockReceiptFetchCrmProductName($skuId));
+    $needRepair = ($crmNowTrim === '' || stockReceiptIsPlaceholderB24ProductName($crmNowTrim));
+    if (!$needRepair) {
+        $pn = stockNormalizeProductNameForB24OfferMatch((string)$parentName);
+        $cn = stockNormalizeProductNameForB24OfferMatch($crmNowTrim);
+        /** Оффер случайно остался с тем же текстом имени что и родитель — подменить на точное имя варианта из прихода */
+        if ($hint !== ''
+            && $pn !== ''
+            && $cn === $pn
+            && stockNormalizeProductNameForB24OfferMatch($hint) !== $pn
+        ) {
+            $needRepair = true;
+        }
+    }
+
+    if (!$needRepair || $preferred === $crmNowTrim) {
+        return false;
+    }
+
+    sendToBitrix('crm.product.update', array(
+        'id' => intval($skuId),
+        'fields' => array('NAME' => $preferred),
+    ));
+    return true;
+}
+
 /** Тип родителя «товар с предложениями» в торговом каталоге REST (обычно 3). Через app_settings stock_b24_catalog_parent_offer_type можно переопределить. */
 function stockOperationsBitrixCatalogParentWithOffersTypeValue(PDO $db) {
     $v = intval(getAppSetting($db, 'stock_b24_catalog_parent_offer_type', '3'));
@@ -1996,6 +2064,8 @@ function stockOperationsResolveB24CatalogParentToOfferSku($db, $localProductId, 
         $db->prepare('UPDATE products SET b24_product_id = ? WHERE id = ?')
             ->execute(array($picked, $localPid));
     }
+
+    stockOperationsRepairCrmOfferNameAfterParentResolve($db, intval($picked), $hintName, $parentName);
 
     return $picked;
 }
