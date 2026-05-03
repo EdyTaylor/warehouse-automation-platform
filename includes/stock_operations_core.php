@@ -2536,6 +2536,17 @@ function addLinesAndConductExistingB24Document($db, $b24DocId, $docType, $lineRo
         ensureDocumentSupplierForReceipt(intval($b24DocId), $supplierName);
     }
 
+    /**
+     * Черновик в Б24 мог быть создан с elementId = родитель каталога (type 3). Перед сравнением «уже есть строка»
+     * и document.element.add заменяем такие позиции на складской SKU (оффер) и выравниваем TYPE — иначе
+     * skip_existing_element смотрит на другой id, чем ensureUsableB24ProductId для прихода, и получаются дубли / ошибки проведения.
+     * Тот же проход выполняется перед conduct; повтор здесь идемпотентен и дешёвле, чем чинить после ошибки.
+     */
+    if (trim((string)getAppSetting($db, 'stock_b24_refresh_doc_elements_before_retry_lines', '1')) === '1') {
+        stockB24RepairAllLineCatalogProductTypesForDocument($db, intval($b24DocId), (string)$docType);
+        pauseBeforeConduct($db);
+    }
+
     $lineResponses = array();
     $existingElements = fetchB24DocumentElementsMap($b24DocId);
     foreach ($lineRows as $line) {
