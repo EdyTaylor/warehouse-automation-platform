@@ -1053,6 +1053,33 @@ function bitrixCatalogDocumentGetResultAsRow($resp) {
 }
 
 /**
+ * Текст ошибки REST указывает, что складского документа с таким id нет (рус/англ).
+ *
+ * @param string $desc
+ * @return bool
+ */
+function bitrixCatalogDocumentErrorDescriptionImpliesMissing($desc) {
+    $d = function_exists('mb_strtolower') ? mb_strtolower(trim((string)$desc), 'UTF-8') : strtolower(trim((string)$desc));
+    if ($d === '') {
+        return false;
+    }
+    $needles = array(
+        'документ не найден',
+        'не найден',
+        'not found',
+        'document not found',
+        'does not exist',
+        'не существует',
+    );
+    foreach ($needles as $n) {
+        if (strpos($d, $n) !== false) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
  * Проверка существования складского документа в портале по id (preflight перед element.add).
  * «missing» — только явный ответ REST о несуществующем документе; иные ошибки — «error» (без автосоздания дубликата).
  *
@@ -1079,6 +1106,9 @@ function bitrixCatalogDocumentPresenceById($b24DocId) {
         $code = (string)$resp['error'];
         $desc = isset($resp['error_description']) ? (string)$resp['error_description'] : '';
         $d = function_exists('mb_strtolower') ? mb_strtolower($desc, 'UTF-8') : strtolower($desc);
+        if (bitrixCatalogDocumentErrorDescriptionImpliesMissing($desc)) {
+            return array('kind' => 'missing', 'response' => $resp);
+        }
         if ($code === 'ERROR_DOCUMENT_STATUS' && strpos($d, 'not found') !== false) {
             return array('kind' => 'missing', 'response' => $resp);
         }
@@ -1086,6 +1116,16 @@ function bitrixCatalogDocumentPresenceById($b24DocId) {
     }
     $row = bitrixCatalogDocumentGetResultAsRow($resp);
     if ($row !== null && is_array($row)) {
+        $docIdInRow = 0;
+        if (isset($row['id'])) {
+            $docIdInRow = intval($row['id']);
+        } elseif (isset($row['ID'])) {
+            $docIdInRow = intval($row['ID']);
+        }
+        /** Портал иногда отдаёт result.document как пустой массив — это не «документ есть». */
+        if (count($row) === 0 || $docIdInRow <= 0) {
+            return array('kind' => 'missing', 'row' => $row, 'response' => $resp);
+        }
         return array('kind' => 'exists', 'row' => $row, 'response' => $resp);
     }
     return array('kind' => 'error', 'response' => $resp);
@@ -2966,6 +3006,12 @@ function stockOperationsExecuteB24ConductOnly(PDO $db, array &$doc) {
             'retry_mode' => 'conduct_only',
             'b24_resolve_id_used' => intval($b24DocId),
         );
+    }
+    if (isset($res['ok']) && !$res['ok'] && isset($res['response'])) {
+        $conductErr = extractBitrixErrorText($res['response']);
+        if (bitrixCatalogDocumentErrorDescriptionImpliesMissing($conductErr)) {
+            $res['user_hint_doc_missing'] = 'Черновик склада по id #' . intval($b24DocId) . ' в портале уже нет («Документ не найден»). Кнопка «Провести документ» только вызывает conduct по старому id и не создаёт новый — нажмите «Повторить» (поиск по номеру или новый черновик), затем при необходимости «Дофиксировать».';
+        }
     }
     $res['retry_mode'] = 'conduct_only';
     $res['b24_resolve_id_used'] = intval($b24DocId);
