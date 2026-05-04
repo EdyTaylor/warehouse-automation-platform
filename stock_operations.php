@@ -53,8 +53,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 $retryStrategy = 'full';
             }
 
-            if (intval(isset($doc['b24_document_id']) ? $doc['b24_document_id'] : 0) > 0 && (string)$doc['b24_sync_status'] === 'sent') {
-                throw new Exception('Документ уже синхронизирован в Б24: #' . intval($doc['b24_document_id']));
+            $forceSentResync = !empty($_POST['force_sent_b24_resync']);
+            $dispatchExtra = array();
+            $inlineSyncOpts = array();
+            if ($forceSentResync) {
+                $dispatchExtra['force_sent_b24_resync'] = '1';
+            }
+            if (!empty($_POST['b24_cancel_conduct_first'])) {
+                $dispatchExtra['cancel_b24_conduct_first'] = '1';
+                $inlineSyncOpts['cancel_b24_conduct_first'] = true;
+            }
+
+            if (intval(isset($doc['b24_document_id']) ? $doc['b24_document_id'] : 0) > 0 && (string)$doc['b24_sync_status'] === 'sent' && !$forceSentResync) {
+                throw new Exception('Документ уже синхронизирован в Б24: #' . intval($doc['b24_document_id']) . '. Для дозаливки строк нажмите «Дозалить строки в Б24» в таблице.');
             }
 
             $linesStmt = $db->prepare("
@@ -91,9 +102,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
 
             $workerSpawnBaseInfo = stockOperationsResolveWorkerPublicBase($db);
 
+            $mergeQueuedForceMeta = function ($arr) use ($forceSentResync, $dispatchExtra) {
+                if (!$forceSentResync) {
+                    return $arr;
+                }
+                $arr['force_sent_b24_resync_requested'] = true;
+                if (!empty($dispatchExtra['cancel_b24_conduct_first'])) {
+                    $arr['cancel_b24_conduct_first_requested'] = true;
+                }
+                return $arr;
+            };
+
             if ($retryStrategy === 'conduct_only') {
-                if ($deferConductOk && stockOperationsDispatchB24WarehouseWorker($db, $docId, 'conduct_only', $probeWorkerPing)) {
-                    $syncResult = array(
+                if ($deferConductOk && stockOperationsDispatchB24WarehouseWorker($db, $docId, 'conduct_only', $probeWorkerPing, $dispatchExtra)) {
+                    $syncResult = $mergeQueuedForceMeta(array(
                         'ok' => true,
                         'queued' => true,
                         'b24_background_queued' => true,
@@ -101,7 +123,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                         'retry_strategy_requested' => $retryStrategy,
                         'worker_spawn_http_base' => $workerSpawnBaseInfo,
                         'worker_spawn_path_note' => 'Фоновый curl бьёт в {base}/api/stock_operation_b24_worker.php — при сайте в подпапке base должен включать её (например …/LLumar). Иначе задайте app_settings stock_b24_worker_public_base_url.',
-                    );
+                    ));
                     $syncStatus = resolveB24SyncStatus($syncResult);
                 } else {
                     @set_time_limit(0);
@@ -115,8 +137,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                     }
                     $syncStatus = resolveB24SyncStatus($syncResult);
                 }
-            } elseif ($deferRetryFullPortal && stockOperationsDispatchB24WarehouseWorker($db, $docId, $retryStrategy, $probeWorkerPing)) {
-                $syncResult = array(
+            } elseif ($deferRetryFullPortal && stockOperationsDispatchB24WarehouseWorker($db, $docId, $retryStrategy, $probeWorkerPing, $dispatchExtra)) {
+                $syncResult = $mergeQueuedForceMeta(array(
                     'ok' => true,
                     'queued' => true,
                     'b24_background_queued' => true,
@@ -125,14 +147,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                     'approx_line_rows' => count($lineRows),
                     'worker_spawn_http_base' => $workerSpawnBaseInfo,
                     'worker_spawn_path_note' => 'Фоновый curl бьёт в {base}/api/stock_operation_b24_worker.php — при сайте в подпапке base должен включать её (например …/LLumar). Иначе задайте app_settings stock_b24_worker_public_base_url.',
-                );
+                ));
                 $syncStatus = resolveB24SyncStatus($syncResult);
             } else {
                 @set_time_limit(0);
                 if (function_exists('ini_set')) {
                     @ini_set('max_execution_time', '0');
                 }
-                $syncResult = stockOperationsExecuteB24SyncWithLines($db, $doc, $lineRows, $retryStrategy);
+                $syncResult = stockOperationsExecuteB24SyncWithLines($db, $doc, $lineRows, $retryStrategy, $inlineSyncOpts);
                 if ($deferRetryFullPortal) {
                     $syncResult['deferred_wanted_but_inline_fallback'] = true;
                     $syncResult['inline_fallback_hint'] = 'Не удалось поставить синк в фон — выполнено в этом запросе (возможен 504 при большом приходе). Проверьте воркер и stock_operation_b24_worker_secret.';
@@ -162,6 +184,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 }
             } elseif ($syncStatus === 'queued') {
                 $successMsg = 'Документ #' . $docId . ': синхронизация с Битрикс24 выполняется в фоне (обычно 1–3 мин). Страница уже сохранила заказ задачи — обновите список (F5): долгое ожидание ответа не требуется. Когда синк закончится, в колонке «Б24» статус станет «Отправлено».';
+                if ($forceSentResync) {
+                    $successMsg .= ' Запрошена дозаливка строк при уже сохранённом документе в Б24.';
+                }
+                if (!empty($_POST['b24_cancel_conduct_first'])) {
+                    $successMsg .= ' Сначала в портале будет отменено проведение (если документ проведён), затем — дозаливка.';
+                }
             } elseif ($syncStatus === 'partial') {
                 $errorMsg = 'Документ #' . $docId . ' уже создан в Б24 (#' . intval($syncResult['b24_document_id']) . '), но есть ошибка в фиксации данных.';
             } else {
@@ -659,7 +687,12 @@ require 'includes/header.php';
                                 <a href="stock_operation_print.php?id=<?= intval($d['id']) ?>" class="btn btn-light btn-sm" target="_blank">Открыть</a>
                             </td>
                             <td>
-                                <?php if ((string)$d['b24_sync_status'] !== 'sent' && in_array((string)$d['operation_type'], array('receipt', 'writeoff'), true)): ?>
+                                <?php
+                                $__tblOp = isset($d['operation_type']) ? (string)$d['operation_type'] : '';
+                                $__tblB24St = isset($d['b24_sync_status']) ? (string)$d['b24_sync_status'] : '';
+                                $__tblCanRetry = in_array($__tblOp, array('receipt', 'writeoff'), true);
+                                ?>
+                                <?php if ($__tblCanRetry && $__tblB24St !== 'sent'): ?>
                                     <form method="POST" class="stock-doc-retry-forms" style="display:inline-flex; flex-wrap:wrap; gap:6px; align-items:center;">
                                         <input type="hidden" name="action" value="retry_b24_sync">
                                         <input type="hidden" name="form_token" value="<?= htmlspecialchars($retryToken) ?>">
@@ -668,6 +701,26 @@ require 'includes/header.php';
                                         <button type="submit" name="retry_strategy" value="portal_by_number_only" class="btn btn-outline btn-sm" title="Актуальный документ в Б24 по номеру (или создание нового прихода); большие приходы уходят в фон — без 504.">Повторить</button>
                                         <button type="submit" name="retry_strategy" value="conduct_only" class="btn btn-primary btn-sm" title="Только проведение (conduct) уже созданного документа со строками. Строки не добавляет — если они не добавлены, нажмите «Дофиксировать».">Провести документ</button>
                                     </form>
+                                <?php elseif ($__tblCanRetry && $__tblB24St === 'sent'): ?>
+                                    <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center; max-width:22rem;">
+                                        <form method="POST" style="display:inline;" class="stock-doc-retry-forms" onsubmit="return confirm(&quot;Дозалить в Битрикс24 недостающие строки из приложения в тот же документ? Если портал не разрешает добавлять строки к уже провёденному документу, синк может завершиться ошибкой — тогда воспользуйтесь второй кнопкой «Отменить проведение в Б24 и дозалить».&quot;);">
+                                            <input type="hidden" name="action" value="retry_b24_sync">
+                                            <input type="hidden" name="form_token" value="<?= htmlspecialchars($retryToken) ?>">
+                                            <input type="hidden" name="doc_id" value="<?= intval($d['id']) ?>">
+                                            <input type="hidden" name="retry_strategy" value="full">
+                                            <input type="hidden" name="force_sent_b24_resync" value="1">
+                                            <button type="submit" class="btn btn-warning btn-sm">Дозалить в Б24</button>
+                                        </form>
+                                        <form method="POST" style="display:inline;" class="stock-doc-retry-forms" onsubmit="return confirm(&quot;ОТМЕНА ПРОВЕДЕНИЯ в Битрикс24: складские остатки в портале могут измениться по правилам отмены. Затем будут добавлены строки из приложения и документ снова проведён. Это нужно только если простая дозаливка блокируется. Продолжить?&quot;);">
+                                            <input type="hidden" name="action" value="retry_b24_sync">
+                                            <input type="hidden" name="form_token" value="<?= htmlspecialchars($retryToken) ?>">
+                                            <input type="hidden" name="doc_id" value="<?= intval($d['id']) ?>">
+                                            <input type="hidden" name="retry_strategy" value="full">
+                                            <input type="hidden" name="force_sent_b24_resync" value="1">
+                                            <input type="hidden" name="b24_cancel_conduct_first" value="1">
+                                            <button type="submit" class="btn btn-danger btn-sm">Отменить проведение и дозалить</button>
+                                        </form>
+                                    </div>
                                 <?php else: ?>
                                     -
                                 <?php endif; ?>

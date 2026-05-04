@@ -63,7 +63,16 @@ if (!in_array((string)$doc['operation_type'], array('receipt', 'writeoff'), true
     exit;
 }
 
-if (intval(isset($doc['b24_document_id']) ? $doc['b24_document_id'] : 0) > 0 && (string)$doc['b24_sync_status'] === 'sent') {
+$forceSentB24ResyncWorker = isset($_GET['force_sent_b24_resync']) && trim((string)$_GET['force_sent_b24_resync']) === '1';
+$workerSyncOpts = array();
+if ($forceSentB24ResyncWorker) {
+    $workerSyncOpts['force_sent_resync'] = true;
+}
+if (isset($_GET['cancel_b24_conduct_first']) && trim((string)$_GET['cancel_b24_conduct_first']) === '1') {
+    $workerSyncOpts['cancel_b24_conduct_first'] = true;
+}
+
+if (!$forceSentB24ResyncWorker && intval(isset($doc['b24_document_id']) ? $doc['b24_document_id'] : 0) > 0 && (string)$doc['b24_sync_status'] === 'sent') {
     echo json_encode(array('ok' => true, 'skipped' => 'already_sent'), JSON_UNESCAPED_UNICODE);
     exit;
 }
@@ -113,7 +122,7 @@ try {
     if (is_array($docFresh)) {
         $doc = $docFresh;
     }
-    if (intval(isset($doc['b24_document_id']) ? $doc['b24_document_id'] : 0) > 0 && (string)$doc['b24_sync_status'] === 'sent') {
+    if (!$forceSentB24ResyncWorker && intval(isset($doc['b24_document_id']) ? $doc['b24_document_id'] : 0) > 0 && (string)$doc['b24_sync_status'] === 'sent') {
         echo json_encode(array('ok' => true, 'skipped' => 'already_sent_after_lock'), JSON_UNESCAPED_UNICODE);
         exit;
     }
@@ -168,7 +177,7 @@ try {
         }
 
         try {
-            $syncResult = stockOperationsExecuteB24SyncWithLines($db, $doc, $lineRows, $retryStrategy);
+            $syncResult = stockOperationsExecuteB24SyncWithLines($db, $doc, $lineRows, $retryStrategy, $workerSyncOpts);
         $syncStatus = resolveB24SyncStatus($syncResult);
         $persistWk = stockOperationsEffectiveB24DocumentIdForPersist($doc, $syncResult);
         $db->prepare("UPDATE stock_operation_docs SET b24_document_id = ?, b24_sync_status = ?, b24_sync_response = ? WHERE id = ?")

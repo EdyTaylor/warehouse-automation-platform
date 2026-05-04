@@ -3030,9 +3030,10 @@ function stockOperationsResolveWorkerPublicBase(PDO $db) {
  * @param int $docId
  * @param string|null $retryStrategy full|portal_by_number_only|null — ту же что у «Дофиксировать»/«Повторить»; null = stock_b24_worker_retry_strategy
  * @param bool $probeBeforeSpawn false — не дергать ping, сразу exec/curl (быстрый ответ формы после POST)
+ * @param array $extraQuery доп. GET для воркера: force_sent_b24_resync, cancel_b24_conduct_first
  * @return bool true если exec/curl вызван
  */
-function stockOperationsDispatchB24WarehouseWorker(PDO $db, $docId, $retryStrategy = null, $probeBeforeSpawn = true) {
+function stockOperationsDispatchB24WarehouseWorker(PDO $db, $docId, $retryStrategy = null, $probeBeforeSpawn = true, array $extraQuery = array()) {
     $docId = intval($docId);
     if ($docId <= 0) {
         return false;
@@ -3071,6 +3072,18 @@ function stockOperationsDispatchB24WarehouseWorker(PDO $db, $docId, $retryStrate
     if ($strategyParam !== '') {
         $qs['retry_strategy'] = $strategyParam;
     }
+    $allowedExtra = array('force_sent_b24_resync' => true, 'cancel_b24_conduct_first' => true);
+    if (!empty($extraQuery) && is_array($extraQuery)) {
+        foreach ($extraQuery as $ek => $ev) {
+            $key = (string)$ek;
+            if (!isset($allowedExtra[$key])) {
+                continue;
+            }
+            if ($ev === '1' || $ev === 1 || $ev === true) {
+                $qs[$key] = '1';
+            }
+        }
+    }
     $q = http_build_query($qs);
     $url = $base . '/api/stock_operation_b24_worker.php?' . $q;
 
@@ -3100,9 +3113,10 @@ function stockOperationsDispatchB24WarehouseWorker(PDO $db, $docId, $retryStrate
  * @param array $doc строка stock_operation_docs
  * @param array $lineRows
  * @param string $retryStrategy full|portal_by_number_only
+ * @param array $syncOpts cancel_b24_conduct_first — вызвать catalog.document.cancel перед дозаливкой (проведённый документ)
  * @return array
  */
-function stockOperationsExecuteB24SyncWithLines(PDO $db, array &$doc, array $lineRows, $retryStrategy) {
+function stockOperationsExecuteB24SyncWithLines(PDO $db, array &$doc, array $lineRows, $retryStrategy, array $syncOpts = array()) {
     $retryStrategy = strtolower(trim((string)$retryStrategy));
     if ($retryStrategy !== 'portal_by_number_only') {
         $retryStrategy = 'full';
@@ -3131,6 +3145,15 @@ function stockOperationsExecuteB24SyncWithLines(PDO $db, array &$doc, array $lin
         }
     }
 
+    $precallExtras = array();
+    if (!empty($syncOpts['cancel_b24_conduct_first'])) {
+        $bidPre = intval($b24ResolvedId);
+        if ($bidPre > 0 && isB24DocumentConducted($bidPre)) {
+            $precallExtras['precall_catalog_document_cancel_id'] = $bidPre;
+            $precallExtras['precall_catalog_document_cancel_response'] = sendToBitrix('catalog.document.cancel', array('id' => $bidPre));
+        }
+    }
+
     $b24ResolvedIdAfterSync = 0;
     if ($b24ResolvedId > 0) {
         $b24ResolvedIdAfterSync = $b24ResolvedId;
@@ -3142,6 +3165,11 @@ function stockOperationsExecuteB24SyncWithLines(PDO $db, array &$doc, array $lin
             isset($doc['supplier']) ? (string)$doc['supplier'] : '',
             isset($doc['doc_number']) ? (string)$doc['doc_number'] : ''
         );
+        if (!empty($precallExtras)) {
+            foreach ($precallExtras as $__pk => $__pv) {
+                $syncResult[$__pk] = $__pv;
+            }
+        }
     } else {
         $syncResult = syncOperationDocumentToBitrix(
             $db,
