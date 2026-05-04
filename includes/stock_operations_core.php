@@ -637,6 +637,103 @@ function parseBitrixListRows($resp) {
 }
 
 /**
+ * Следующий offset для Bitrix REST list (result.next или start + count).
+ *
+ * @param array $listResp сырой ответ sendToBitrix
+ * @param int $start текущий start
+ * @param int $rowsCount число строк на странице
+ * @return int
+ */
+function bitrixListResponseNextStart($listResp, $start, $rowsCount) {
+    $next = null;
+    if (is_array($listResp)) {
+        if (isset($listResp['next'])) {
+            $next = intval($listResp['next']);
+        } elseif (isset($listResp['result']) && is_array($listResp['result']) && array_key_exists('next', $listResp['result'])) {
+            $next = intval($listResp['result']['next']);
+        }
+    }
+    if ($next !== null && $next > intval($start)) {
+        return $next;
+    }
+    $inc = max(0, intval($rowsCount));
+    if ($inc <= 0) {
+        return intval($start);
+    }
+    return intval($start) + $inc;
+}
+
+/**
+ * Все строки складского документа в Б24: catalog.document.element.list с пагинацией
+ * (без этого в карту попадают только первые ~20 позиций — остальные ошибочно дозаливаются/дублируются).
+ *
+ * @param int $b24DocId
+ * @param array $select поля select для list
+ * @return array список ассоциативных строк
+ */
+function fetchB24DocumentElementListRowsAll($b24DocId, array $select) {
+    $docId = intval($b24DocId);
+    if ($docId <= 0) {
+        return array();
+    }
+
+    $maxPages = 500;
+    if (function_exists('getDB')) {
+        try {
+            $dbMp = getDB();
+            if ($dbMp) {
+                $mp = intval(getAppSetting($dbMp, 'stock_b24_document_element_list_max_pages', '500'));
+                if ($mp >= 1 && $mp <= 5000) {
+                    $maxPages = $mp;
+                }
+            }
+        } catch (Exception $eMp) {
+        }
+    }
+
+    $accum = array();
+    $start = 0;
+    for ($page = 0; $page < $maxPages; $page++) {
+        $payload = array(
+            'filter' => array('docId' => $docId),
+            'select' => $select,
+            'start' => $start,
+        );
+        $resp = sendToBitrix('catalog.document.element.list', $payload);
+        if ($page === 0 && (!is_array($resp) || isset($resp['error']) || !isset($resp['result']))) {
+            $resp = sendToBitrix('catalog.document.element.list', array(
+                'docId' => $docId,
+                'start' => $start,
+            ));
+        }
+
+        if (!is_array($resp) || isset($resp['error']) || !isset($resp['result'])) {
+            break;
+        }
+
+        $rows = parseBitrixListRows($resp);
+        if (empty($rows) || !is_array($rows)) {
+            break;
+        }
+
+        $prevStart = $start;
+        foreach ($rows as $row) {
+            if (is_array($row)) {
+                $accum[] = $row;
+            }
+        }
+
+        $nextStart = bitrixListResponseNextStart($resp, $start, count($rows));
+        if ($nextStart <= $prevStart) {
+            break;
+        }
+        $start = $nextStart;
+    }
+
+    return $accum;
+}
+
+/**
  * Рекурсивно вытащить id складского документа из сохранённого JSON ответа (частый случай:
  * документ уже создан в Б24, но b24_document_id в MySQL так и не записали после сбоя).
  *
@@ -1495,11 +1592,7 @@ function stockB24ConductBulkRepairInvalidProductTypes(PDO $db, $b24DocId, $docTy
 }
 
 function replaceInvalidElementInB24Document($db, $b24DocId, $oldB24ProductId, $newB24ProductId, $docType) {
-    $rowsResp = sendToBitrix('catalog.document.element.list', array(
-        'filter' => array('docId' => intval($b24DocId)),
-        'select' => array('id', 'elementId', 'amount', 'price', 'purchasingPrice', 'currency')
-    ));
-    $rows = parseBitrixListRows($rowsResp);
+    $rows = fetchB24DocumentElementListRowsAll(intval($b24DocId), array('id', 'elementId', 'amount', 'price', 'purchasingPrice', 'currency'));
     if (empty($rows)) {
         return false;
     }
@@ -2559,15 +2652,7 @@ function isB24DocumentConducted($b24DocId) {
 
 function fetchB24DocumentElementsMap($b24DocId) {
     $map = array();
-    $resp = sendToBitrix('catalog.document.element.list', array(
-        'filter' => array('docId' => intval($b24DocId)),
-        'select' => array('id', 'elementId', 'amount')
-    ));
-    if (!is_array($resp) || isset($resp['error']) || !isset($resp['result']) || !is_array($resp['result'])) {
-        // Fallback for portals that expect flat docId parameter.
-        $resp = sendToBitrix('catalog.document.element.list', array('docId' => intval($b24DocId)));
-    }
-    $rows = parseBitrixListRows($resp);
+    $rows = fetchB24DocumentElementListRowsAll(intval($b24DocId), array('id', 'elementId', 'amount'));
     if (empty($rows)) {
         return $map;
     }
