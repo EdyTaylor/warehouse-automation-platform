@@ -2985,18 +2985,15 @@ function stockOperationsGuessPublicSiteUrl() {
 }
 
 /**
- * Запуск фонового HTTP-запроса к api/stock_operation_b24_worker.php (обход таймаута прокси на длинном синке).
+ * Запуск фонового HTTP к api/stock_operation_b24_worker.php (обход таймаута прокси).
  *
  * @param PDO $db
  * @param int $docId
+ * @param string|null $retryStrategy full|portal_by_number_only|null — ту же что у «Дофиксировать»/«Повторить»; null = stock_b24_worker_retry_strategy
+ * @param bool $probeBeforeSpawn false — не дергать ping, сразу exec/curl (быстрый ответ формы после POST)
  * @return bool true если exec/curl вызван
  */
-/**
- * @param PDO $db
- * @param int $docId
- * @param string|null $retryStrategy full|portal_by_number_only|null — передать ту же стратегию, что у кнопки «Дофиксировать»/«Повторить»; null = только app_settings stock_b24_worker_retry_strategy (как раньше).
- */
-function stockOperationsDispatchB24WarehouseWorker(PDO $db, $docId, $retryStrategy = null) {
+function stockOperationsDispatchB24WarehouseWorker(PDO $db, $docId, $retryStrategy = null, $probeBeforeSpawn = true) {
     $docId = intval($docId);
     if ($docId <= 0) {
         return false;
@@ -3024,16 +3021,10 @@ function stockOperationsDispatchB24WarehouseWorker(PDO $db, $docId, $retryStrate
     }
     $base = rtrim($base, '/');
 
-    /** Без успешного ping считали синк «в фоне» выполненным, хотя curl/exec мог не дойти до воркера (типично Beget). */
-    static $workerReachable = null;
-    if ($workerReachable === null) {
-        if (trim((string)getAppSetting($db, 'stock_b24_worker_ping_before_spawn', '1')) === '0') {
-            $workerReachable = true;
-        } else {
-            $workerReachable = stockOperationsProbeB24WorkerReachable($db);
-        }
-    }
-    if (!$workerReachable) {
+    /** Ping можно отключить глобально или для одного вызова — иначе ложное «воркер недоступен» даёт синхронный fallback и 504. */
+    $pingSettingOn = trim((string)getAppSetting($db, 'stock_b24_worker_ping_before_spawn', '1')) !== '0';
+    $doProbe = ($probeBeforeSpawn !== false) && $pingSettingOn;
+    if ($doProbe && !stockOperationsProbeB24WorkerReachable($db)) {
         return false;
     }
 

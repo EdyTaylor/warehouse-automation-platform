@@ -33,10 +33,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         $errorMsg = 'Некорректный документ для повторного синка.';
     } else {
         try {
-            @set_time_limit(0);
-            if (function_exists('ini_set')) {
-                @ini_set('max_execution_time', '0');
-            }
             $docStmt = $db->prepare("
                 SELECT id, operation_type, doc_number, comment_text, supplier, b24_sync_status, b24_document_id, b24_sync_response
                 FROM stock_operation_docs
@@ -78,46 +74,62 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             if ($deferMinLines < 1) {
                 $deferMinLines = 2;
             }
-            /** Приход/списание при «Повторить»/«Дофиксировать» — в фон, чтобы nginx не отдавал 504. «Провести документ» — только conduct, тоже в фон. */
+            /**
+             * «Повторить» / «Дофиксировать» / «Провести» — при включённом воркере уходят в фон без ожидания Б24 → нет долгого POST и 504.
+             * stock_b24_retry_always_enqueue_when_worker_ready=0 — только при числе строк не ниже stock_receipt_b24_worker_min_lines (старое поведение).
+             * stock_b24_retry_enqueue_skip_worker_ping=1 (по умолчанию) — не ждём ping перед exec/curl, быстрый редирект после кнопки.
+             */
             $lineCountRetry = count($lineRows);
             $deferDocKind = in_array((string)$doc['operation_type'], array('receipt', 'writeoff'), true);
-            $deferLinesOk = $deferEnabled && $deferDocKind && $lineCountRetry >= $deferMinLines
-                && ($retryStrategy === 'full' || $retryStrategy === 'portal_by_number_only');
+            $retryAlwaysEnqueue = trim((string)getAppSetting($db, 'stock_b24_retry_always_enqueue_when_worker_ready', '1')) === '1';
+            $deferRetryFullPortal = $deferEnabled && $deferDocKind && ($retryStrategy === 'full' || $retryStrategy === 'portal_by_number_only')
+                && ($retryAlwaysEnqueue || $lineCountRetry >= $deferMinLines);
             $deferConductOk = $deferEnabled && $deferDocKind && $retryStrategy === 'conduct_only';
 
+            /** true = выполнить HTTP-ping перед фоном; false = сразу background curl (мгновенный ответ UI) */
+            $probeWorkerPing = trim((string)getAppSetting($db, 'stock_b24_retry_enqueue_skip_worker_ping', '1')) !== '1';
+
             if ($retryStrategy === 'conduct_only') {
-                if ($deferConductOk && stockOperationsDispatchB24WarehouseWorker($db, $docId, 'conduct_only')) {
+                if ($deferConductOk && stockOperationsDispatchB24WarehouseWorker($db, $docId, 'conduct_only', $probeWorkerPing)) {
                     $syncResult = array(
                         'ok' => true,
                         'queued' => true,
                         'b24_background_queued' => true,
-                        'hint' => 'Проведение в Битрикс24 выполняется отдельным запросом (нет 504).',
+                        'hint' => 'Фон.',
                         'retry_strategy_requested' => $retryStrategy,
                     );
                     $syncStatus = resolveB24SyncStatus($syncResult);
                 } else {
+                    @set_time_limit(0);
+                    if (function_exists('ini_set')) {
+                        @ini_set('max_execution_time', '0');
+                    }
                     $syncResult = stockOperationsExecuteB24ConductOnly($db, $doc);
-                    if ($deferConductOk && trim((string)getAppSetting($db, 'stock_b24_worker_ping_before_spawn', '1')) !== '0') {
+                    if ($deferConductOk) {
                         $syncResult['deferred_wanted_but_inline_fallback'] = true;
-                        $syncResult['inline_fallback_hint'] = 'Фон не вызвался или ping воркера не прошёл. Задайте app_settings stock_b24_worker_public_base_url (https://…) и stock_operation_b24_worker_secret или проверьте exec/curl на хостинге.';
+                        $syncResult['inline_fallback_hint'] = 'Не удалось фоново запустить воркер (exec/curl? secret? URL?). Проверьте api/stock_operation_b24_worker.php и app_settings.';
                     }
                     $syncStatus = resolveB24SyncStatus($syncResult);
                 }
-            } elseif ($deferLinesOk && stockOperationsDispatchB24WarehouseWorker($db, $docId, $retryStrategy)) {
+            } elseif ($deferRetryFullPortal && stockOperationsDispatchB24WarehouseWorker($db, $docId, $retryStrategy, $probeWorkerPing)) {
                 $syncResult = array(
                     'ok' => true,
                     'queued' => true,
                     'b24_background_queued' => true,
-                    'hint' => 'Повторный синк выполняется отдельным запросом (нет 504).',
+                    'hint' => 'Фон.',
                     'retry_strategy_requested' => $retryStrategy,
                     'approx_line_rows' => count($lineRows),
                 );
                 $syncStatus = resolveB24SyncStatus($syncResult);
             } else {
+                @set_time_limit(0);
+                if (function_exists('ini_set')) {
+                    @ini_set('max_execution_time', '0');
+                }
                 $syncResult = stockOperationsExecuteB24SyncWithLines($db, $doc, $lineRows, $retryStrategy);
-                if ($deferLinesOk && trim((string)getAppSetting($db, 'stock_b24_worker_ping_before_spawn', '1')) !== '0') {
+                if ($deferRetryFullPortal) {
                     $syncResult['deferred_wanted_but_inline_fallback'] = true;
-                    $syncResult['inline_fallback_hint'] = 'Фон не вызвался или ping воркера не прошёл; синк выполнен в этом запросе. При таймауте задайте app_settings stock_b24_worker_public_base_url (https://…) или временно выключите фон stock_receipt_b24_worker_enabled=0.';
+                    $syncResult['inline_fallback_hint'] = 'Не удалось поставить синк в фон — выполнено в этом запросе (возможен 504 при большом приходе). Проверьте воркер и stock_operation_b24_worker_secret.';
                 }
                 $syncStatus = resolveB24SyncStatus($syncResult);
             }
@@ -143,7 +155,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                     $successMsg = 'Повторный синк документа #' . $docId . ' выполнен. Б24 документ #' . intval($syncResult['b24_document_id']);
                 }
             } elseif ($syncStatus === 'queued') {
-                $successMsg = 'Документ #' . $docId . ': синхронизация с Битрикс24 запущена в фоне (обычно 1–3 мин). Обновите страницу.';
+                $successMsg = 'Документ #' . $docId . ': синхронизация с Битрикс24 выполняется в фоне (обычно 1–3 мин). Страница уже сохранила заказ задачи — обновите список (F5): долгое ожидание ответа не требуется. Когда синк закончится, в колонке «Б24» статус станет «Отправлено».';
             } elseif ($syncStatus === 'partial') {
                 $errorMsg = 'Документ #' . $docId . ' уже создан в Б24 (#' . intval($syncResult['b24_document_id']) . '), но есть ошибка в фиксации данных.';
             } else {
