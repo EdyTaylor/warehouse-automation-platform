@@ -21,14 +21,19 @@
  * Только розничная цена за метр (отдельный файл для своего импорта в MySQL):
  *   node build_sales_tiers_only_sql.js --price-per-meter-only
  * → products_full_import_price_per_meter_only_usd_x88.sql (ступени не трогает).
+ * Значения берутся только из products_full_import_prices_usd_x88.sql (дамп products.sql не подмешивается).
+ * Если нужно старое поведение с подстановкой price_per_meter из дампа для id вне LLumar-файла:
+ *   ... --price-per-meter-only --price-per-meter-fill-from-dump
  *
- * Usage: node build_sales_tiers_only_sql.js [--without-meter] [--tier-fallback-from-meter-roll] [--price-per-meter-only]
+ * Usage: node build_sales_tiers_only_sql.js [--without-meter] [--tier-fallback-from-meter-roll] [--price-per-meter-only [--price-per-meter-fill-from-dump]]
  */
 var fs = require('fs');
 var path = require('path');
 
 var argv = process.argv.slice(2);
 var pricePerMeterOnly = argv.indexOf('--price-per-meter-only') >= 0;
+var pricePerMeterFillFromDump =
+  argv.indexOf('--price-per-meter-fill-from-dump') >= 0 && pricePerMeterOnly;
 var includePricePerMeter = pricePerMeterOnly ? true : argv.indexOf('--without-meter') < 0;
 var tierFallbackFromMeterRoll =
   argv.indexOf('--tier-fallback-from-meter-roll') >= 0 && !pricePerMeterOnly;
@@ -198,9 +203,23 @@ function assignsFromFilledTiers(f14, f59, f1019, f20p, ppmRaw, withMeter) {
   return assigns;
 }
 
-/** Одно поле `price_per_meter` — для режима --price-per-meter-only. */
+/**
+ * Одно поле `price_per_meter` — для режима --price-per-meter-only.
+ * Если в исходной строке UPDATE уже литерал `'12.34'` — подставляем как в LLumar-SQL без пересчёта.
+ */
 function assignsPricePerMeterOnly(ppmRaw) {
   var assigns = [];
+  if (ppmRaw === null || ppmRaw === undefined) {
+    return assigns;
+  }
+  var ts = String(ppmRaw).trim();
+  if (/^NULL$/i.test(ts)) {
+    return assigns;
+  }
+  if (ts.length >= 2 && ts[0] === "'" && ts[ts.length - 1] === "'") {
+    assigns.push('`price_per_meter` = ' + ts);
+    return assigns;
+  }
   if (isNullishDumpPrice(ppmRaw)) {
     return assigns;
   }
@@ -262,20 +281,42 @@ if (fs.existsSync(fullImportPath)) {
     );
     recordUpdate(byId, row.id, assignsUsd);
   }
-  process.stderr.write('Loaded tiers from LLumar SQL: ' + Object.keys(byId).length + ' ids.\n');
-} else {
   process.stderr.write(
-    'WARN: не найден ' +
-      fullImportPath +
-      '\nБерём только dump products.sql: у строк с NULL в тирах в дампе в этом SQL не будет UPDATE по ступеням.\n' +
-      'Положите products_full_import_prices_usd_x88.sql сюда (или сгенерируйте локально: node build_products_prices_usd_x88.js).' +
-      '\nИли добавьте флаг --tier-fallback-from-meter-roll (ступени из price_per_meter×roll из дампа).\n'
+    (pricePerMeterOnly ? 'Loaded price_per_meter from LLumar SQL: ' : 'Loaded tiers from LLumar SQL: ') +
+      Object.keys(byId).length +
+      ' ids.\n'
   );
+} else {
+  if (pricePerMeterOnly && !pricePerMeterFillFromDump) {
+    process.stderr.write(
+      'ERROR: не найден ' +
+        fullImportPath +
+        '\nРежим --price-per-meter-only без --price-per-meter-fill-from-dump берёт цены за м только оттуда.\n' +
+        'Положите актуальный products_full_import_prices_usd_x88.sql в example/new/ или сгенерируйте: node build_products_prices_usd_x88.js\n'
+    );
+  } else {
+    process.stderr.write(
+      'WARN: не найден ' +
+        fullImportPath +
+        '\nБерём только dump products.sql: у строк с NULL в тирах в дампе в этом SQL не будет UPDATE по ступеням.\n' +
+        'Положите products_full_import_prices_usd_x88.sql сюда (или сгенерируйте локально: node build_products_prices_usd_x88.js).' +
+        '\nИли добавьте флаг --tier-fallback-from-meter-roll (ступени из price_per_meter×roll из дампа).\n'
+    );
+  }
 }
 
-var raw = fs.readFileSync(srcPath, 'utf8');
-var lines = raw.split(/\r?\n/);
+if (pricePerMeterOnly && !pricePerMeterFillFromDump && !fs.existsSync(fullImportPath)) {
+  process.stderr.write('Аборт: нет ' + path.basename(fullImportPath) + ' — нечего писать в meter-only.\n');
+  process.exit(1);
+}
+
+var raw = '';
+var lines = [];
 var gotInsert = false;
+if (!pricePerMeterOnly || pricePerMeterFillFromDump) {
+  raw = fs.readFileSync(srcPath, 'utf8');
+  lines = raw.split(/\r?\n/);
+}
 
 for (var li = 0; li < lines.length; li++) {
   var L = lines[li];
@@ -316,6 +357,9 @@ for (var li = 0; li < lines.length; li++) {
     var priceMeter = parts[9];
 
     if (pricePerMeterOnly) {
+      if (!pricePerMeterFillFromDump) {
+        continue;
+      }
       if (byId[dumpId] !== undefined) {
         continue;
       }
@@ -387,9 +431,11 @@ if (pricePerMeterOnly) {
   hdr =
     '-- Только розничная цена за метр: price_per_meter.\n' +
     '-- price_1_4 … price_20_plus, закуп и purchase_delivered_per_meter не трогаем.\n' +
-    '-- Источник: products_full_import_prices_usd_x88.sql + недостающие id из products.sql (колонка цены за м в дампе).\n' +
+    (pricePerMeterFillFromDump
+      ? '-- Источник: products_full_import_prices_usd_x88.sql + id только из products.sql (цена за м из дампа).\n'
+      : '-- Источник: только products_full_import_prices_usd_x88.sql (литерал price_per_meter как в LLumar-файле).\n') +
     '-- Применение: phpMyAdmin → SQL или mysql CLI на своей БД.\n' +
-    '-- Regenerate: node example/new/build_sales_tiers_only_sql.js --price-per-meter-only\n' +
+    '-- Regenerate: node example/new/build_sales_tiers_only_sql.js --price-per-meter-only [--price-per-meter-fill-from-dump]\n' +
     '-- Rows: ' +
     ids.length +
     ' UPDATE statements.\n' +
