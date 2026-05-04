@@ -233,6 +233,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     }
 }
 
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'apply_receipt_to_warehouse') {
+    if (!validateFormToken('apply_receipt_to_warehouse', isset($_POST['form_token']) ? $_POST['form_token'] : '')) {
+        $errorMsg = 'Сессия формы устарела. Обновите страницу и повторите.';
+    } else {
+        $docIdWh = intval(isset($_POST['doc_id']) ? $_POST['doc_id'] : 0);
+        if ($docIdWh <= 0) {
+            $errorMsg = 'Некорректный документ.';
+        } else {
+            $ap = stockReceiptApplyDeferredRollsToWarehouse($db, $docIdWh);
+            if (!empty($ap['ok'])) {
+                $successMsg = 'Документ #' . $docIdWh . ': на склад приложения добавлено рулонов — '
+                    . intval(isset($ap['rolls_added']) ? $ap['rolls_added'] : 0) . '.';
+                if (!empty($ap['backfilled_legacy'])) {
+                    $successMsg = 'Документ #' . $docIdWh . ': рулоны уже были отмечены как на складе (старый формат).';
+                }
+            } else {
+                $errorMsg = isset($ap['error_message']) ? (string)$ap['error_message'] : 'Не удалось поставить приход на склад.';
+            }
+        }
+    }
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'create_receipt') {
     if (!validateFormToken('create_receipt', isset($_POST['form_token']) ? $_POST['form_token'] : '')) {
         $errorMsg = 'Сессия формы устарела. Обновите страницу и повторите.';
@@ -405,7 +427,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
  */
 if ($_SERVER['REQUEST_METHOD'] === 'POST'
     && isset($_POST['action'])
-    && in_array((string)$_POST['action'], array('retry_b24_sync', 'delete_doc', 'create_receipt', 'create_writeoff'), true)
+    && in_array((string)$_POST['action'], array('retry_b24_sync', 'delete_doc', 'create_receipt', 'create_writeoff', 'apply_receipt_to_warehouse'), true)
 ) {
     prgFlashCommitAndRedirect303(
         'stock_operations.php',
@@ -430,6 +452,7 @@ $receiptToken = ensureFormToken('create_receipt');
 $writeoffToken = ensureFormToken('create_writeoff');
 $deleteToken = ensureFormToken('delete_doc');
 $retryToken = ensureFormToken('retry_b24_sync');
+$applyWarehouseToken = ensureFormToken('apply_receipt_to_warehouse');
 
 $products = $db->query("SELECT id, name, roll_length, purchase_price, delivery_price FROM products ORDER BY name ASC")->fetchAll(PDO::FETCH_ASSOC);
 $usdToKgsRate = getUsdToKgsRate($db);
@@ -464,11 +487,60 @@ $stockRolls = $db->query("
 $integrationSyncPaused = integrationAllSyncPaused($db);
 
 $recentDocs = $db->query("
-    SELECT id, operation_type, doc_number, supplier, total_amount, status, created_at, b24_document_id, b24_sync_status, b24_sync_response
+    SELECT id, operation_type, doc_number, supplier, total_amount, status, created_at, b24_document_id, b24_sync_status, b24_sync_response,
+           receipt_local_only, receipt_rolls_applied_at
     FROM stock_operation_docs
     ORDER BY id DESC
     LIMIT 20
 ")->fetchAll(PDO::FETCH_ASSOC);
+
+/** Старые приходы: рулоны уже есть, receipt_rolls_applied_at не стоял — один раз проставляем, чтобы не было кнопки и дубля. */
+if (!empty($recentDocs)) {
+    $idsRecent = array();
+    foreach ($recentDocs as $__rd) {
+        $idsRecent[] = intval($__rd['id']);
+    }
+    $rollCountByDoc = array();
+    $inListRc = implode(',', $idsRecent);
+    if ($inListRc !== '') {
+        $rcStmt = $db->query(
+            'SELECT receipt_doc_id, COUNT(*) AS c FROM rolls WHERE receipt_doc_id IN (' . $inListRc . ') GROUP BY receipt_doc_id'
+        );
+        if ($rcStmt) {
+            foreach ($rcStmt->fetchAll(PDO::FETCH_ASSOC) as $__rr) {
+                $rollCountByDoc[intval($__rr['receipt_doc_id'])] = intval($__rr['c']);
+            }
+        }
+    }
+    $stampApprox = date('Y-m-d H:i:s');
+    foreach ($recentDocs as $rdx => $rdFix) {
+        if ((string)$rdFix['operation_type'] !== 'receipt') {
+            continue;
+        }
+        if (intval(isset($rdFix['receipt_local_only']) ? $rdFix['receipt_local_only'] : 0)) {
+            continue;
+        }
+        $raFix = isset($rdFix['receipt_rolls_applied_at']) ? $rdFix['receipt_rolls_applied_at'] : null;
+        if ($raFix !== null && trim((string)$raFix) !== '') {
+            continue;
+        }
+        $docIdFix = intval($rdFix['id']);
+        if ($docIdFix <= 0) {
+            continue;
+        }
+        $rcFix = isset($rollCountByDoc[$docIdFix]) ? intval($rollCountByDoc[$docIdFix]) : 0;
+        if ($rcFix <= 0) {
+            continue;
+        }
+        try {
+            $db->prepare(
+                'UPDATE stock_operation_docs SET receipt_rolls_applied_at = COALESCE(receipt_rolls_applied_at, CURRENT_TIMESTAMP) WHERE id = ? AND receipt_rolls_applied_at IS NULL'
+            )->execute(array($docIdFix));
+            $recentDocs[$rdx]['receipt_rolls_applied_at'] = $stampApprox;
+        } catch (Exception $eLeg) {
+        }
+    }
+}
 
 // 0 = не дергать Б24 при каждом открытии страницы (меньше 504 на Beget). Включить: app_settings stock_b24_reconcile_on_doc_list_max = 1..3
 $reconcileListMax = intval(getAppSetting($db, 'stock_b24_reconcile_on_doc_list_max', '0'));
@@ -543,6 +615,9 @@ require 'includes/header.php';
                 <input type="text" name="comment_text" placeholder="Примечание к приходу">
             </div>
             <p class="text-muted">Ввод цен в выбранной валюте. Отчет и синк в Б24 всегда в KGS. Курс USD из страницы «Настройки»: <strong><?= htmlspecialchars(number_format($usdToKgsRate, 2, '.', ' ')) ?></strong>.</p>
+            <?php if (!$integrationSyncPaused): ?>
+                <p class="text-muted">Если снята галочка «Только локально», склад приложения пополняется <strong>только после</strong> успешной отправки прихода в Битрикс24 и вашей кнопки «Отправить товар на склад» в списке документов (повтор «Повторить» сам по себе не удваивает рулоны).</p>
+            <?php endif; ?>
             <?php if ($integrationSyncPaused): ?>
                 <div class="alert alert-warning">Синхронизация <strong>выключена</strong>. Приход с Б24 недоступен. Чтобы при этом создавать рулоны, в Центре интеграции должна быть включена опция <strong>«Разрешить локальный приход при паузе»</strong>, и здесь нужна галочка «Только локально». Иначе приход будет отклонён.</div>
             <?php endif; ?>
@@ -665,6 +740,7 @@ require 'includes/header.php';
                         <th>Сумма</th>
                         <th>Статус</th>
                         <th>Б24</th>
+                        <th>Склад приложения</th>
                         <th>Дата</th>
                         <th>Документ</th>
                         <th>Синк Б24</th>
@@ -691,6 +767,32 @@ require 'includes/header.php';
                                 $__b24hint = stockOperationsB24ListingHumanHint($d);
                                 if ($__b24hint !== '') {
                                     echo '<br><small class="text-muted">' . htmlspecialchars($__b24hint) . '</small>';
+                                }
+                                ?>
+                            </td>
+                            <td>
+                                <?php
+                                $__dtOp = isset($d['operation_type']) ? (string)$d['operation_type'] : '';
+                                $__recLoc = intval(isset($d['receipt_local_only']) ? $d['receipt_local_only'] : 0) === 1;
+                                $__recAt = isset($d['receipt_rolls_applied_at']) ? $d['receipt_rolls_applied_at'] : null;
+                                $__b24stCell = isset($d['b24_sync_status']) ? (string)$d['b24_sync_status'] : '';
+                                if ($__dtOp !== 'receipt') {
+                                    echo '<span class="text-muted">—</span>';
+                                } elseif ($__recLoc) {
+                                    echo '<span class="text-muted" title="Приход только локально">Сразу (локально)</span>';
+                                } elseif ($__recAt !== null && trim((string)$__recAt) !== '') {
+                                    echo '<span class="text-success" title="Рулоны на складе">✓ ' . htmlspecialchars((string)$__recAt) . '</span>';
+                                } elseif ($__b24stCell === 'sent') {
+                                    ?>
+                                    <form method="POST" style="display:inline;" onsubmit="return confirm('Добавить рулоны этого прихода на склад приложения? Операция безопасна для повторного нажатия только если первая не прошла.');">
+                                        <input type="hidden" name="action" value="apply_receipt_to_warehouse">
+                                        <input type="hidden" name="form_token" value="<?= htmlspecialchars($applyWarehouseToken) ?>">
+                                        <input type="hidden" name="doc_id" value="<?= intval($d['id']) ?>">
+                                        <button type="submit" class="btn btn-success btn-sm">Отправить товар на склад</button>
+                                    </form>
+                                    <?php
+                                } else {
+                                    echo '<small class="text-muted">Дождитесь статуса Б24 «Отправлено»</small>';
                                 }
                                 ?>
                             </td>

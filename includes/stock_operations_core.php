@@ -50,6 +50,24 @@ function ensureStockOperationTables($db) {
     ensureColumnExists($db, 'stock_operation_docs', 'b24_document_id', '`b24_document_id` int DEFAULT NULL');
     ensureColumnExists($db, 'stock_operation_docs', 'b24_sync_status', '`b24_sync_status` varchar(20) NOT NULL DEFAULT \'pending\'');
     ensureColumnExists($db, 'stock_operation_docs', 'b24_sync_response', '`b24_sync_response` longtext');
+    ensureColumnExists(
+        $db,
+        'stock_operation_docs',
+        'receipt_min_full',
+        '`receipt_min_full` decimal(10,2) NOT NULL DEFAULT \'0.50\''
+    );
+    ensureColumnExists(
+        $db,
+        'stock_operation_docs',
+        'receipt_local_only',
+        '`receipt_local_only` tinyint(1) NOT NULL DEFAULT 0'
+    );
+    ensureColumnExists(
+        $db,
+        'stock_operation_docs',
+        'receipt_rolls_applied_at',
+        '`receipt_rolls_applied_at` datetime DEFAULT NULL'
+    );
     ensureColumnExists($db, 'stock_operation_lines', 'delivery_price_per_roll', '`delivery_price_per_roll` decimal(14,2) NOT NULL DEFAULT 0');
     ensureColumnExists($db, 'stock_operation_lines', 'price_per_roll_usd', '`price_per_roll_usd` decimal(14,2) NOT NULL DEFAULT 0');
     ensureColumnExists($db, 'stock_operation_lines', 'delivery_price_per_roll_usd', '`delivery_price_per_roll_usd` decimal(14,2) NOT NULL DEFAULT 0');
@@ -4132,6 +4150,278 @@ function stockReceiptMysqlReleaseLock(PDO $db, $lockName) {
 }
 
 /**
+ * Строки stock_operation_lines документа прихода → рулоны + движения receipt в журнале.
+ *
+ * @param bool $localReceiptMovements true — приход только локально (local_only): метаданные движения как раньше
+ * @return int число добавленных рулонов
+ */
+function stockReceiptInsertRollsAndMovementsForDocLine(
+    PDO $db,
+    $docId,
+    $localProductId,
+    $rollLength,
+    $qtyRolls,
+    $minFull,
+    $deliveryPricePerRoll,
+    $pricePerRoll,
+    $localReceiptMovements
+) {
+    $created = 0;
+    $qtyRolls = intval($qtyRolls);
+    $rollLength = floatval($rollLength);
+    $minFull = floatval($minFull);
+    $localProductId = intval($localProductId);
+    $docId = intval($docId);
+
+    if ($qtyRolls <= 0 || $rollLength <= 0 || $localProductId <= 0 || $docId <= 0) {
+        return 0;
+    }
+
+    $effectiveRollPrice = (floatval($deliveryPricePerRoll) > 0 ? floatval($deliveryPricePerRoll) : floatval($pricePerRoll));
+    $costPerMeter = $rollLength > 0 ? ($effectiveRollPrice / $rollLength) : 0;
+    $insRoll = $db->prepare(
+        '
+        INSERT INTO rolls (product_id, original_length, current_length, min_full_length, status, receipt_doc_id, cost_per_meter)
+        VALUES (?, ?, ?, ?, \'active\', ?, ?)
+    '
+    );
+
+    for ($r = 0; $r < $qtyRolls; $r++) {
+        $insRoll->execute(array($localProductId, $rollLength, $rollLength, $minFull, $docId, $costPerMeter));
+        $rollId = intval($db->lastInsertId());
+
+        $movPayload = array(
+            'product_id' => $localProductId,
+            'roll_id' => $rollId,
+            'movement_type' => 'receipt',
+            'quantity_m' => $rollLength,
+            'quantity_rolls' => 1,
+            'price_per_unit' => (floatval($deliveryPricePerRoll) > 0 ? floatval($deliveryPricePerRoll) : floatval($pricePerRoll)),
+            'total' => (floatval($deliveryPricePerRoll) > 0 ? floatval($deliveryPricePerRoll) : floatval($pricePerRoll)),
+            'comment' => 'Оприходование через документ #' . $docId,
+        );
+
+        $movBulk = logStockMovement($db, $movPayload);
+        $updBulk = $db->prepare('UPDATE stock_movements SET bitrix_status = ?, bitrix_response = ? WHERE id = ?');
+        if ($localReceiptMovements) {
+            $updBulk->execute(
+                array(
+                    'sent',
+                    json_encode(
+                        array(
+                            'skipped' => 'local_only_receipt',
+                            'hint' => 'Битрикс24 не вызывался (local_only).',
+                        )
+                    ),
+                    $movBulk,
+                )
+            );
+        } else {
+            $updBulk->execute(
+                array(
+                    'sent',
+                    json_encode(
+                        array(
+                            'skipped' => 'receipt_after_b24_local_stock',
+                            'hint' => 'Рулоны внесены после успешной отправки прихода в Битрикс24.',
+                        )
+                    ),
+                    $movBulk,
+                )
+            );
+        }
+        $created++;
+    }
+
+    return $created;
+}
+
+/**
+ * После синхронизации прихода с Битрикс24 — создаёт локальные рулоны из строк документа (повтор безопасен).
+ *
+ * Документы старого формата: если рулоны уже есть при receipt_doc_id, только проставляет receipt_rolls_applied_at.
+ *
+ * @param PDO $db
+ * @param int $docId
+ * @return array ok, error_message, rolls_added, backfilled_legacy (bool)
+ */
+function stockReceiptApplyDeferredRollsToWarehouse(PDO $db, $docId) {
+    require_once dirname(__DIR__) . '/functions/stock_emergency_kill.php';
+
+    $out = array(
+        'ok' => false,
+        'error_message' => '',
+        'rolls_added' => 0,
+        'backfilled_legacy' => false,
+    );
+
+    $emergency = stockEmergencyRollCreationStoppedMessage($db);
+    if ($emergency !== '') {
+        $out['error_message'] = $emergency;
+        return $out;
+    }
+
+    $docId = intval($docId);
+    if ($docId <= 0) {
+        $out['error_message'] = 'Некорректный документ.';
+        return $out;
+    }
+
+    $docStmt = $db->prepare(
+        '
+        SELECT id, operation_type, b24_sync_status,
+               receipt_local_only, receipt_rolls_applied_at, receipt_min_full
+        FROM stock_operation_docs
+        WHERE id = ?
+        LIMIT 1
+    '
+    );
+    $docStmt->execute(array($docId));
+    $docRow = $docStmt->fetch(PDO::FETCH_ASSOC);
+
+    if (!$docRow || !is_array($docRow)) {
+        $out['error_message'] = 'Документ не найден.';
+        return $out;
+    }
+    if ((string)$docRow['operation_type'] !== 'receipt') {
+        $out['error_message'] = 'Можно поставить на склад только приход.';
+        return $out;
+    }
+
+    $localOnly = intval(isset($docRow['receipt_local_only']) ? $docRow['receipt_local_only'] : 0) === 1;
+    $appliedRaw = isset($docRow['receipt_rolls_applied_at']) ? $docRow['receipt_rolls_applied_at'] : null;
+
+    /** Уже выполнено (или прежнее поведение: рулоны есть, метку не ставили — подставим только дату). */
+    if ($appliedRaw !== null && trim((string)$appliedRaw) !== '') {
+        $out['ok'] = true;
+        return $out;
+    }
+
+    $existingRollCnt = intval(
+        $db->query('SELECT COUNT(*) FROM rolls WHERE receipt_doc_id = ' . $docId)->fetchColumn()
+    );
+    if ($existingRollCnt > 0 && ($appliedRaw === null || trim((string)$appliedRaw) === '')) {
+        $db->prepare(
+            '
+            UPDATE stock_operation_docs
+            SET receipt_rolls_applied_at = COALESCE(receipt_rolls_applied_at, CURRENT_TIMESTAMP)
+            WHERE id = ?
+              AND receipt_rolls_applied_at IS NULL
+        '
+        )->execute(array($docId));
+        $out['ok'] = true;
+        $out['rolls_added'] = $existingRollCnt;
+        $out['backfilled_legacy'] = true;
+        return $out;
+    }
+
+    if ($localOnly) {
+        $out['error_message'] = 'Режим «только локально»: рулоны должны быть созданы при проведении. Если их нет — обратитесь в поддержку (неконсистентность).';
+        return $out;
+    }
+
+    $b24st = isset($docRow['b24_sync_status']) ? (string)$docRow['b24_sync_status'] : '';
+    if ($b24st !== 'sent') {
+        $out['error_message'] = 'Ожидание успешной отправки в Битрикс24 (статус «Отправлено»). Текущий: ' . $b24st . '.';
+        return $out;
+    }
+
+    $minFull = isset($docRow['receipt_min_full']) ? floatval($docRow['receipt_min_full']) : 0.5;
+
+    try {
+        $db->beginTransaction();
+
+        $dLock = $db->prepare(
+            '
+            SELECT id, receipt_rolls_applied_at, receipt_local_only
+            FROM stock_operation_docs
+            WHERE id = ?
+            FOR UPDATE
+        '
+        );
+        $dLock->execute(array($docId));
+        $d2 = $dLock->fetch(PDO::FETCH_ASSOC);
+        if (!$d2 || !is_array($d2)) {
+            throw new Exception('Документ пропал при блокировке.');
+        }
+        if (isset($d2['receipt_rolls_applied_at']) && $d2['receipt_rolls_applied_at'] !== null && trim((string)$d2['receipt_rolls_applied_at']) !== '') {
+            $db->rollBack();
+            $out['ok'] = true;
+            return $out;
+        }
+
+        $stillHave = intval($db->query('SELECT COUNT(*) FROM rolls WHERE receipt_doc_id = ' . $docId)->fetchColumn());
+        if ($stillHave > 0) {
+            $db->prepare(
+                '
+                UPDATE stock_operation_docs
+                SET receipt_rolls_applied_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                  AND receipt_rolls_applied_at IS NULL
+            '
+            )->execute(array($docId));
+            $db->commit();
+            $out['ok'] = true;
+            $out['rolls_added'] = $stillHave;
+            $out['backfilled_legacy'] = true;
+            return $out;
+        }
+
+        $lineStmt = $db->prepare(
+            '
+            SELECT product_id, qty_rolls, roll_length, price_per_roll, delivery_price_per_roll
+            FROM stock_operation_lines
+            WHERE doc_id = ?
+            ORDER BY id ASC
+        '
+        );
+        $lineStmt->execute(array($docId));
+        $lines = $lineStmt->fetchAll(PDO::FETCH_ASSOC);
+
+        $totalAdded = 0;
+        foreach ($lines as $ln) {
+            $pid = intval(isset($ln['product_id']) ? $ln['product_id'] : 0);
+            $qr = intval(isset($ln['qty_rolls']) ? $ln['qty_rolls'] : 0);
+            $rlen = floatval(isset($ln['roll_length']) ? $ln['roll_length'] : 0);
+            $pRoll = floatval(isset($ln['price_per_roll']) ? $ln['price_per_roll'] : 0);
+            $dRoll = floatval(isset($ln['delivery_price_per_roll']) ? $ln['delivery_price_per_roll'] : 0);
+            $added = stockReceiptInsertRollsAndMovementsForDocLine(
+                $db,
+                $docId,
+                $pid,
+                $rlen,
+                $qr,
+                $minFull,
+                $dRoll,
+                $pRoll,
+                false
+            );
+            $totalAdded += intval($added);
+        }
+
+        if ($totalAdded <= 0) {
+            throw new Exception('Нечего ставить на склад — ноль рулонов по строкам документа.');
+        }
+
+        $db->prepare('UPDATE stock_operation_docs SET receipt_rolls_applied_at = CURRENT_TIMESTAMP WHERE id = ?')->execute(array($docId));
+        $db->commit();
+        $out['ok'] = true;
+        $out['rolls_added'] = intval($totalAdded);
+
+        return $out;
+    } catch (Exception $eApp) {
+        try {
+            if ($db->inTransaction()) {
+                $db->rollBack();
+            }
+        } catch (Exception $ex) {
+        }
+        $out['error_message'] = $eApp->getMessage();
+        return $out;
+    }
+}
+
+/**
  * Создаёт приход локально (документ, рулоны, движения) и синхронизирует складской документ в Б24
  * (тип «приход», строки с amount=метры, закупочная цена за метр в KGS и валютой из настроек).
  *
@@ -4150,8 +4440,9 @@ function stockReceiptMysqlReleaseLock(PDO $db, $lockName) {
  * Совместимые алиасы в строке: price_per_roll, delivery_price_per_roll, line_price_per_roll_usd, line_delivery_price_per_roll_usd.
  *
  * Параметры:
- *   local_only (bool) — если true: один локальный документ + рулоны + движения, без документа Б24 и без
- *     syncProductAvailable/logAndSyncMovement по Б24 (быстрее, без 504 на больших партиях).
+ *   local_only (bool) — если true: документ Б24 не создаётся; рулоны и движения записываются сразу.
+ *     Если false: строки документа и синк в Б24 как раньше, а рулоны на складе приложения создаются
+ *     только после статуса Б24 «sent» через stockReceiptApplyDeferredRollsToWarehouse (кнопка в операциях).
  *
  * Возвращает массив: ok, doc_id, b24_document_id, sync_status, success_message, error_message, sync_result,
  * duplicate_receipt_skip (bool, если уже был приход с этим doc_number), usd_to_kgs_rate, total_amount_kgs, receipt_currency
@@ -4268,11 +4559,21 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
 
         $heartbeatRollCounter = 0;
 
-        $insDoc = $db->prepare("
-            INSERT INTO stock_operation_docs (operation_type, doc_number, supplier, comment_text, total_amount, status)
-            VALUES ('receipt', ?, ?, ?, 0, 'posted')
-        ");
-        $insDoc->execute(array($docNumber, $supplier, $commentText));
+        $insDoc = $db->prepare(
+            "
+            INSERT INTO stock_operation_docs (operation_type, doc_number, supplier, comment_text, total_amount, status, receipt_min_full, receipt_local_only)
+            VALUES ('receipt', ?, ?, ?, 0, 'posted', ?, ?)
+        "
+        );
+        $insDoc->execute(
+            array(
+                $docNumber,
+                $supplier,
+                $commentText,
+                $minFull,
+                $localOnly ? 1 : 0,
+            )
+        );
         $docId = intval($db->lastInsertId());
 
         $insLine = $db->prepare("
@@ -4401,56 +4702,29 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
                 $lineTotal
             ));
 
-            for ($r = 0; $r < $qtyRolls; $r++) {
-                integrationAssertReceiptAbortEpochUnchanged($db, $receiptAbortEpoch, $abortEpochStmt);
+            if ($localOnly) {
+                for ($r = 0; $r < $qtyRolls; $r++) {
+                    integrationAssertReceiptAbortEpochUnchanged($db, $receiptAbortEpoch, $abortEpochStmt);
 
-                $heartbeatRollCounter++;
-                if ($heartbeatRollCounter % 60 === 0) {
-                    try {
-                        $db->query('SELECT 1');
-                    } catch (Exception $eHb) {
+                    $heartbeatRollCounter++;
+                    if ($heartbeatRollCounter % 60 === 0) {
+                        try {
+                            $db->query('SELECT 1');
+                        } catch (Exception $eHb) {
+                        }
                     }
-                }
 
-                $effectiveRollPrice = ($deliveryPricePerRoll > 0 ? $deliveryPricePerRoll : $pricePerRoll);
-                $costPerMeter = $rollLength > 0 ? ($effectiveRollPrice / $rollLength) : 0;
-                $insRoll = $db->prepare("
-                    INSERT INTO rolls (product_id, original_length, current_length, min_full_length, status, receipt_doc_id, cost_per_meter)
-                    VALUES (?, ?, ?, ?, 'active', ?, ?)
-                ");
-                $insRoll->execute(array($localProductId, $rollLength, $rollLength, $minFull, $docId, $costPerMeter));
-                $rollId = intval($db->lastInsertId());
-
-                $movPayload = array(
-                    'product_id' => $localProductId,
-                    'roll_id' => $rollId,
-                    'movement_type' => 'receipt',
-                    'quantity_m' => $rollLength,
-                    'quantity_rolls' => 1,
-                    'price_per_unit' => ($deliveryPricePerRoll > 0 ? $deliveryPricePerRoll : $pricePerRoll),
-                    'total' => ($deliveryPricePerRoll > 0 ? $deliveryPricePerRoll : $pricePerRoll),
-                    'comment' => 'Оприходование через документ #' . $docId
-                );
-
-                if ($localOnly) {
-                    $movIdLocal = logStockMovement($db, $movPayload);
-                    $updM = $db->prepare('UPDATE stock_movements SET bitrix_status = ?, bitrix_response = ? WHERE id = ?');
-                    $updM->execute(array(
-                        'sent',
-                        json_encode(array('skipped' => 'local_only_receipt', 'hint' => 'Битрикс24 не вызывался (local_only).')),
-                        $movIdLocal
-                    ));
-                } else {
-                    $movBulk = logStockMovement($db, $movPayload);
-                    $updBulk = $db->prepare('UPDATE stock_movements SET bitrix_status = ?, bitrix_response = ? WHERE id = ?');
-                    $updBulk->execute(array(
-                        'sent',
-                        json_encode(array(
-                            'skipped' => 'bulk_receipt_deferred_catalog',
-                            'hint' => 'Остаток в каталоге/магазине Б24 синхронизируется один раз по товару после проведения прихода.'
-                        )),
-                        $movBulk
-                    ));
+                    stockReceiptInsertRollsAndMovementsForDocLine(
+                        $db,
+                        $docId,
+                        $localProductId,
+                        $rollLength,
+                        1,
+                        $minFull,
+                        $deliveryPricePerRoll,
+                        $pricePerRoll,
+                        true
+                    );
                 }
             }
 
@@ -4465,6 +4739,10 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
 
         $db->prepare("UPDATE stock_operation_docs SET total_amount = ? WHERE id = ?")
             ->execute(array($totalAmount, $docId));
+        if ($localOnly) {
+            $db->prepare('UPDATE stock_operation_docs SET receipt_rolls_applied_at = CURRENT_TIMESTAMP WHERE id = ?')
+                ->execute(array($docId));
+        }
         $db->commit();
         $receiptCommitted = true;
 
@@ -4492,7 +4770,7 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
             $db->prepare("UPDATE stock_operation_docs SET b24_document_id = NULL, b24_sync_status = ?, b24_sync_response = ? WHERE id = ?")
                 ->execute(array($syncStatus, json_encode($syncResult, JSON_UNESCAPED_UNICODE), $docId));
 
-            $successMessage = 'Документ прихода #' . $docId . ' проведён только в приложении. Валюта: ' . $receiptCurrency
+            $successMessage = 'Документ прихода #' . $docId . ' проведён только в приложении (рулоны на складе сразу). Валюта: ' . $receiptCurrency
                 . '. Курс USD: ' . number_format($usdToKgsRate, 2, '.', ' ') . ' | Сумма: ' . number_format($totalAmount, 2, '.', ' ') . ' KGS'
                 . ' | Битрикс24 пропущен (local_only).';
 
@@ -4517,6 +4795,8 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
 
         $successMessageBase = 'Документ прихода #' . $docId . ' проведен. Валюта ввода: ' . $receiptCurrency . '. Курс USD: ' . number_format($usdToKgsRate, 2, '.', ' ') . ' | Сумма: ' . number_format($totalAmount, 2, '.', ' ') . ' KGS';
 
+        $receiptWarehouseHintRu = ' Рулоны в приложении появятся после статуса Б24 «Отправлено» и кнопки «Отправить товар на склад» на странице операций (повтор отправки документа в Б24 не добавляет второй складской приход).';
+
         if ($deferEnabled && $cntDeferLines >= $deferMinLines && stockOperationsDispatchB24WarehouseWorker($db, $docId, 'full')) {
             $syncResult = array(
                 'ok' => true,
@@ -4539,7 +4819,8 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
             $outBase['b24_background_queued'] = true;
             $outBase['b24_document_id'] = null;
             $outBase['success_message'] = $successMessageBase
-                . ' | Синхронизация с Битрикс24 (документ + проведение) запущена в фоне — подождите 1–3 мин. и обновите страницу; статус сменится на «Отправлено».';
+                . ' | Синхронизация с Битрикс24 (документ + проведение) запущена в фоне — подождите 1–3 мин. и обновите страницу; статус сменится на «Отправлено».'
+                . $receiptWarehouseHintRu;
             $outBase['error_message'] = '';
             return $outBase;
         }
@@ -4580,17 +4861,20 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
         $outBase['sync_result'] = $syncResult;
         $outBase['sync_status'] = $syncStatus;
         $outBase['total_amount_kgs'] = $totalAmount;
-        $outBase['success_message'] = $successMessageBase;
+        $outBase['success_message'] = $successMessageBase . $receiptWarehouseHintRu;
         $outBase['b24_document_id'] = isset($syncResult['b24_document_id']) ? intval($syncResult['b24_document_id']) : null;
 
         if ($syncStatus === 'queued') {
             $outBase['success_message'] = $successMessageBase
-                . ' | Синхронизация с Битрикс24 (создание и проведение документа) запущена в фоне — подождите 1–3 мин. и обновите страницу; статус сменится на «Отправлено».';
+                . ' | Синхронизация с Битрикс24 (создание и проведение документа) запущена в фоне — подождите 1–3 мин. и обновите страницу; статус сменится на «Отправлено».'
+                . $receiptWarehouseHintRu;
         } elseif ($syncStatus === 'sent') {
-            $outBase['success_message'] = $successMessageBase . ' | Б24 документ #' . intval($syncResult['b24_document_id']);
+            $outBase['success_message'] = $successMessageBase . ' | Б24 документ #' . intval($syncResult['b24_document_id']) . '.' . $receiptWarehouseHintRu;
         } elseif ($syncStatus === 'partial') {
+            $outBase['success_message'] = $successMessageBase . ' Документ в приложении сохранён; рулоны на склад не добавятся, пока Б24 не будет «Отправлено».';
             $outBase['error_message'] = 'Приход создан в Б24 (#' . intval($syncResult['b24_document_id']) . '), но фиксация строк/проведение завершились с ошибкой.';
         } else {
+            $outBase['success_message'] = $successMessageBase . ' Документ в приложении сохранён; рулоны — после успешного синка с Битрикс24.';
             $outBase['error_message'] = 'Приход проведен локально, но синк в Б24 завершился с ошибкой.';
         }
 
