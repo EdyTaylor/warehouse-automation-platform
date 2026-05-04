@@ -18,14 +18,20 @@
  *   price_per_meter × roll_length из дампа (одинаково на всех ступенях — ориентир для CRM).
  *   node build_sales_tiers_only_sql.js --tier-fallback-from-meter-roll
  *
- * Usage: node build_sales_tiers_only_sql.js [--without-meter] [--tier-fallback-from-meter-roll]
+ * Только розничная цена за метр (отдельный файл для своего импорта в MySQL):
+ *   node build_sales_tiers_only_sql.js --price-per-meter-only
+ * → products_full_import_price_per_meter_only_usd_x88.sql (ступени не трогает).
+ *
+ * Usage: node build_sales_tiers_only_sql.js [--without-meter] [--tier-fallback-from-meter-roll] [--price-per-meter-only]
  */
 var fs = require('fs');
 var path = require('path');
 
 var argv = process.argv.slice(2);
-var includePricePerMeter = argv.indexOf('--without-meter') < 0;
-var tierFallbackFromMeterRoll = argv.indexOf('--tier-fallback-from-meter-roll') >= 0;
+var pricePerMeterOnly = argv.indexOf('--price-per-meter-only') >= 0;
+var includePricePerMeter = pricePerMeterOnly ? true : argv.indexOf('--without-meter') < 0;
+var tierFallbackFromMeterRoll =
+  argv.indexOf('--tier-fallback-from-meter-roll') >= 0 && !pricePerMeterOnly;
 
 function parseTuple(line) {
   line = line.replace(/\)\s*[;,]\s*$/, ')'); // strip trailing ), or );
@@ -192,6 +198,20 @@ function assignsFromFilledTiers(f14, f59, f1019, f20p, ppmRaw, withMeter) {
   return assigns;
 }
 
+/** Одно поле `price_per_meter` — для режима --price-per-meter-only. */
+function assignsPricePerMeterOnly(ppmRaw) {
+  var assigns = [];
+  if (isNullishDumpPrice(ppmRaw)) {
+    return assigns;
+  }
+  var pn = parsePriceNum(ppmRaw);
+  if (pn === null || isNaN(pn)) {
+    return assigns;
+  }
+  assigns.push('`price_per_meter` = ' + formatPriceNonNull(moneySql2(pn)));
+  return assigns;
+}
+
 var idComments = {};
 
 function recordUpdate(byIdObj, id, assigns, optionalComment) {
@@ -207,7 +227,9 @@ function recordUpdate(byIdObj, id, assigns, optionalComment) {
 
 var srcPath = path.join(__dirname, 'products.sql');
 var fullImportPath = path.join(__dirname, 'products_full_import_prices_usd_x88.sql');
-var outPath = path.join(__dirname, 'products_full_import_prices_sales_tiers_only_usd_x88.sql');
+var outPath = pricePerMeterOnly
+  ? path.join(__dirname, 'products_full_import_price_per_meter_only_usd_x88.sql')
+  : path.join(__dirname, 'products_full_import_prices_sales_tiers_only_usd_x88.sql');
 var byId = {};
 var tierFallbackCount = 0;
 
@@ -217,6 +239,11 @@ if (fs.existsSync(fullImportPath)) {
   for (qi = 0; qi < fullRaw.length; qi++) {
     var row = parseFullImportUpdateLine(fullRaw[qi]);
     if (!row) {
+      continue;
+    }
+    if (pricePerMeterOnly) {
+      var assignsPpmUsd = assignsPricePerMeterOnly(row.price_per_meter);
+      recordUpdate(byId, row.id, assignsPpmUsd);
       continue;
     }
     var fq = fillTierQuartetFromPartial(
@@ -288,6 +315,14 @@ for (var li = 0; li < lines.length; li++) {
     var price20p = parts[8];
     var priceMeter = parts[9];
 
+    if (pricePerMeterOnly) {
+      if (byId[dumpId] !== undefined) {
+        continue;
+      }
+      recordUpdate(byId, dumpId, assignsPricePerMeterOnly(priceMeter));
+      continue;
+    }
+
     var fqDump = fillTierQuartetFromPartial(price14, price59, price1019, price20p);
     var hasTierFromDump =
       fqDump[0] !== null ||
@@ -347,17 +382,37 @@ for (var li = 0; li < lines.length; li++) {
 var ids = Object.keys(byId).map(Number).sort(function (a, b) {
   return a - b;
 });
-var hdr =
-  '-- Продажа: закупку, доставку, purchase_delivered_per_meter не трогаем.\n' +
-  '-- Обновляет price_per_meter + price_1_4 … price_20_plus (если сборка без --without-meter).\n' +
-  '-- Источник LLumar: products_full_import_prices_usd_x88.sql;\n' +
-  '-- доп. строки из products.sql; без LLumar-файла фолбэк слабее.\n'
-  + '-- Применение: только phpMyAdmin → SQL или mysql CLI на своей БД (сайт этот файл не выполняет сам).\n'
-  + '-- Regenerate: node example/new/build_sales_tiers_only_sql.js [--without-meter] [--tier-fallback-from-meter-roll]'
-  + '\n-- Rows: ' + ids.length + ' UPDATE statements.'
-  + '\n-- Generated: ' + new Date().toISOString()
-  + '\n\nSET NAMES utf8mb4;'
-  + '\nSTART TRANSACTION;\n\n';
+var hdr;
+if (pricePerMeterOnly) {
+  hdr =
+    '-- Только розничная цена за метр: price_per_meter.\n' +
+    '-- price_1_4 … price_20_plus, закуп и purchase_delivered_per_meter не трогаем.\n' +
+    '-- Источник: products_full_import_prices_usd_x88.sql + недостающие id из products.sql (колонка цены за м в дампе).\n' +
+    '-- Применение: phpMyAdmin → SQL или mysql CLI на своей БД.\n' +
+    '-- Regenerate: node example/new/build_sales_tiers_only_sql.js --price-per-meter-only\n' +
+    '-- Rows: ' +
+    ids.length +
+    ' UPDATE statements.\n' +
+    '-- Generated: ' +
+    new Date().toISOString() +
+    '\n\nSET NAMES utf8mb4;\n' +
+    'START TRANSACTION;\n\n';
+} else {
+  hdr =
+    '-- Продажа: закупку, доставку, purchase_delivered_per_meter не трогаем.\n' +
+    '-- Обновляет price_per_meter + price_1_4 … price_20_plus (если сборка без --without-meter).\n' +
+    '-- Источник LLumar: products_full_import_prices_usd_x88.sql;\n' +
+    '-- доп. строки из products.sql; без LLumar-файла фолбэк слабее.\n' +
+    '-- Применение: только phpMyAdmin → SQL или mysql CLI на своей БД (сайт этот файл не выполняет сам).\n' +
+    '-- Regenerate: node example/new/build_sales_tiers_only_sql.js [--without-meter] [--tier-fallback-from-meter-roll]\n' +
+    '-- Rows: ' +
+    ids.length +
+    ' UPDATE statements.\n' +
+    '-- Generated: ' +
+    new Date().toISOString() +
+    '\n\nSET NAMES utf8mb4;\n' +
+    'START TRANSACTION;\n\n';
+}
 
 var body = [];
 for (var j = 0; j < ids.length; j++) {
@@ -372,8 +427,9 @@ fs.writeFileSync(outPath, hdr + body.join('\n') + footer, 'utf8');
 console.log(
   'Wrote ' +
     ids.length +
-    ' UPDATEs to products_full_import_prices_sales_tiers_only_usd_x88.sql' +
-    (includePricePerMeter ? ' (+ price_per_meter)' : ' (tiers without price_per_meter)')
+    ' UPDATEs to ' +
+    path.basename(outPath) +
+    (pricePerMeterOnly ? ' (price_per_meter only)' : includePricePerMeter ? ' (+ price_per_meter)' : ' (tiers without price_per_meter)')
 );
 if (tierFallbackCount > 0) {
   process.stderr.write('Tier fallback ppm×roll rows: ' + tierFallbackCount + '\n');
