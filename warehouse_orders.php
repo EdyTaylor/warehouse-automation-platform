@@ -127,10 +127,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $db->commit();
                     $message = 'Подтверждено и отправлено в Б24.';
                 } catch (Exception $e) {
-                    $db->rollBack();
+                    if ($db->inTransaction()) {
+                        $db->rollBack();
+                    }
                     $error = $e->getMessage();
                 }
             } elseif ($action === 'cancel_reserve') {
+                ensureOrderAllocationsTable($db);
                 $db->beginTransaction();
                 try {
                     // Снимаем резерв через order_allocations + rolls (источник истины для автоподбора).
@@ -170,7 +173,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $db->commit();
                     $message = 'Резерв снят, заявка отменена.';
                 } catch (Exception $e) {
-                    $db->rollBack();
+                    if ($db->inTransaction()) {
+                        $db->rollBack();
+                    }
                     $error = $e->getMessage();
                 }
             } elseif ($action === 'retry_deal_rows_sync') {

@@ -5,7 +5,23 @@
  * Подключается из warehouse_orders и из api/bitrix/deal.php без лишних header().
  */
 
+function orderAllocationsTableExists($db) {
+    try {
+        $stmt = $db->prepare("SHOW TABLES LIKE ?");
+        $stmt->execute(array('order_allocations'));
+        return (bool)$stmt->fetch(PDO::FETCH_NUM);
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
 function ensureOrderAllocationsTable($db) {
+    if (orderAllocationsTableExists($db)) {
+        return;
+    }
+    if ($db->inTransaction()) {
+        throw new Exception('order_allocations table is missing; create it before starting a transaction.');
+    }
     $db->exec("
         CREATE TABLE IF NOT EXISTS order_allocations (
             id int NOT NULL AUTO_INCREMENT,
