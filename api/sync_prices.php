@@ -7,6 +7,7 @@ header('Content-Type: application/json; charset=utf-8');
 require '../db.php';
 require_once 'bitrix/send.php';
 require_once __DIR__ . '/../functions/integration_sync_control.php';
+require_once __DIR__ . '/../functions/pricing.php';
 
 $db = getDB();
 integrationAbortJsonIfAllSyncPaused($db);
@@ -37,16 +38,16 @@ if ($action === 'to_b24') {
         FROM products 
         WHERE b24_product_id IS NOT NULL 
           AND b24_product_id > 0
-          AND price_per_meter > 0
+          AND (price_per_meter > 0 OR purchase_delivered_per_meter > 0 OR (delivery_price > 0 AND roll_length > 0))
     ")->fetch(PDO::FETCH_ASSOC);
     $totalCount = $totalRow ? intval($totalRow['cnt']) : 0;
 
     $stmt = $db->query("
-        SELECT id, name, price_per_meter, b24_product_id
+        SELECT id, name, price_per_meter, b24_product_id, purchase_delivered_per_meter, delivery_price, roll_length
         FROM products 
         WHERE b24_product_id IS NOT NULL 
           AND b24_product_id > 0
-          AND price_per_meter > 0
+          AND (price_per_meter > 0 OR purchase_delivered_per_meter > 0 OR (delivery_price > 0 AND roll_length > 0))
         ORDER BY id ASC
         LIMIT " . intval($limit) . " OFFSET " . intval($offset)
     ");
@@ -59,46 +60,59 @@ if ($action === 'to_b24') {
     
     foreach ($products as $product) {
         $localPrice = floatval($product['price_per_meter']);
-        if ($localPrice <= 0) {
+        $purchasePm = floatval(resolveProductPurchaseDeliveredPerMeter($product));
+        if ($localPrice <= 0 && $purchasePm <= 0) {
             $skipped[] = [
                 'product_id' => intval($product['id']),
                 'name' => $product['name'],
-                'reason' => 'price_per_meter <= 0'
+                'reason' => 'no retail and no purchase per meter'
             ];
             continue;
         }
 
+        $fields = [];
+        if ($localPrice > 0) {
+            $fields['PRICE'] = $localPrice;
+            $fields['CURRENCY_ID'] = 'KGS';
+        }
+        if ($purchasePm > 0) {
+            $fields['PURCHASING_PRICE'] = $purchasePm;
+            $fields['PURCHASING_CURRENCY'] = 'KGS';
+        }
+
         $payload = [
             'id' => intval($product['b24_product_id']),
-            'fields' => [
-                'PRICE' => $localPrice,
-                'CURRENCY_ID' => 'KGS'
-            ]
+            'fields' => $fields
         ];
         
         $resp = sendToBitrix('crm.product.update', $payload);
         
         if (isset($resp['error'])) {
-            // Fallback for portals where price is managed by catalog product API.
-            $fallbackResp = sendToBitrix('catalog.product.update', [
-                'id' => intval($product['b24_product_id']),
-                'fields' => [
-                    'price' => $localPrice,
-                    'currencyId' => 'KGS'
-                ]
-            ]);
-            if (is_array($fallbackResp) && !isset($fallbackResp['error'])) {
+            // Fallback for portals where розница управляется catalog.product.update (без типового поля закупа).
+            $fallbackResp = null;
+            if ($localPrice > 0) {
+                $fallbackResp = sendToBitrix('catalog.product.update', [
+                    'id' => intval($product['b24_product_id']),
+                    'fields' => [
+                        'price' => $localPrice,
+                        'currencyId' => 'KGS'
+                    ]
+                ]);
+            }
+            if ($localPrice > 0 && is_array($fallbackResp) && !isset($fallbackResp['error'])) {
                 $updatedByCatalogMethod++;
                 $updated++;
             } else {
+                $fbErr = ($localPrice <= 0) ? 'catalog fallback only for retail price' : 'catalog.product.update failed';
+                if ($localPrice > 0 && is_array($fallbackResp)) {
+                    $fbErr = isset($fallbackResp['error_description']) ? $fallbackResp['error_description'] : (isset($fallbackResp['error']) ? $fallbackResp['error'] : 'catalog.product.update failed');
+                }
                 $errors[] = [
                     'product_id' => intval($product['id']),
                     'name' => $product['name'],
                     'b24_product_id' => intval($product['b24_product_id']),
                     'error' => isset($resp['error_description']) ? $resp['error_description'] : (isset($resp['error']) ? $resp['error'] : 'crm.product.update failed'),
-                    'fallback_error' => is_array($fallbackResp)
-                        ? (isset($fallbackResp['error_description']) ? $fallbackResp['error_description'] : (isset($fallbackResp['error']) ? $fallbackResp['error'] : 'catalog.product.update failed'))
-                        : 'catalog.product.update failed'
+                    'fallback_error' => $fbErr
                 ];
             }
         } else {

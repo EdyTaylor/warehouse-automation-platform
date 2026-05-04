@@ -177,6 +177,26 @@ function getTierAutofillSuggestions($rawTiers) {
 }
 
 /**
+ * Закуп «с доставкой за рулон» в пересчёте на один метр (для PURCHASING_PRICE в Б24 и складских строк).
+ * Приоритет столбца purchase_delivered_per_meter; иначе delivery_price / roll_length по карточке товара.
+ *
+ * @param array $product строка из products или массив с нужными ключами
+ * @return float
+ */
+function resolveProductPurchaseDeliveredPerMeter(array $product) {
+    $explicit = floatval(isset($product['purchase_delivered_per_meter']) ? $product['purchase_delivered_per_meter'] : 0);
+    if ($explicit > 0) {
+        return $explicit;
+    }
+    $roll = floatval(isset($product['roll_length']) ? $product['roll_length'] : 0);
+    $delivery = floatval(isset($product['delivery_price']) ? $product['delivery_price'] : 0);
+    if ($roll > 0 && $delivery > 0) {
+        return $delivery / $roll;
+    }
+    return 0.0;
+}
+
+/**
  * Optional manual helper for quick verification in dev/debug.
  * Open with ?debug_price_selfcheck=1 on pages that include this file.
  */

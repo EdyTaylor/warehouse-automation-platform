@@ -3,6 +3,7 @@
 
 require_once __DIR__ . '/../functions/app_settings.php';
 require_once __DIR__ . '/../functions/stock_movements.php';
+require_once __DIR__ . '/../functions/pricing.php';
 
 function ensureColumnExists($db, $tableName, $columnName, $columnSql) {
     $stmt = $db->prepare("SHOW COLUMNS FROM `{$tableName}` LIKE ?");
@@ -54,6 +55,7 @@ function ensureStockOperationTables($db) {
     ensureColumnExists($db, 'stock_operation_lines', 'delivery_price_per_roll_usd', '`delivery_price_per_roll_usd` decimal(14,2) NOT NULL DEFAULT 0');
     ensureColumnExists($db, 'stock_operation_lines', 'usd_to_kgs_rate', '`usd_to_kgs_rate` decimal(12,4) NOT NULL DEFAULT 90');
     ensureColumnExists($db, 'products', 'delivery_price', '`delivery_price` decimal(14,2) NOT NULL DEFAULT 0');
+    ensureColumnExists($db, 'products', 'purchase_delivered_per_meter', '`purchase_delivered_per_meter` decimal(18,6) NOT NULL DEFAULT 0');
     ensureColumnExists($db, 'rolls', 'receipt_doc_id', '`receipt_doc_id` int DEFAULT NULL');
     ensureColumnExists($db, 'rolls', 'cost_per_meter', '`cost_per_meter` decimal(14,4) NOT NULL DEFAULT 0');
     ensureColumnExists($db, 'sales', 'cost_fact', '`cost_fact` decimal(14,2) NOT NULL DEFAULT 0');
@@ -1097,7 +1099,7 @@ function stockOperationsPushReceiptProductsNamePriceToB24Catalog($db, array $lin
         }
         $seen[$pid] = true;
 
-        $st = $db->prepare('SELECT id, name, b24_product_id, price_per_meter FROM products WHERE id = ? LIMIT 1');
+        $st = $db->prepare('SELECT id, name, b24_product_id, price_per_meter, purchase_delivered_per_meter, delivery_price, roll_length FROM products WHERE id = ? LIMIT 1');
         $st->execute(array($pid));
         $pr = $st->fetch(PDO::FETCH_ASSOC);
         if (!$pr || !is_array($pr)) {
@@ -1119,12 +1121,18 @@ function stockOperationsPushReceiptProductsNamePriceToB24Catalog($db, array $lin
             $fields['NAME'] = $nm;
         }
         $ppm = round(floatval(isset($pr['price_per_meter']) ? $pr['price_per_meter'] : 0), 4);
+        $cid = strtoupper(trim((string)getAppSetting($db, 'default_currency', 'KGS')));
+        if ($cid === '') {
+            $cid = 'KGS';
+        }
         if ($ppm > 0) {
             $fields['PRICE'] = $ppm;
-            $cid = strtoupper(trim((string)getAppSetting($db, 'default_currency', 'KGS')));
-            if ($cid !== '') {
-                $fields['CURRENCY_ID'] = $cid;
-            }
+            $fields['CURRENCY_ID'] = $cid;
+        }
+        $purchasePm = round(floatval(resolveProductPurchaseDeliveredPerMeter($pr)), 4);
+        if ($purchasePm > 0) {
+            $fields['PURCHASING_PRICE'] = $purchasePm;
+            $fields['PURCHASING_CURRENCY'] = $cid;
         }
 
         if (empty($fields)) {
@@ -2597,7 +2605,7 @@ function syncOperationDocumentToBitrix($db, $docId, $docType, $docNumber, $comme
             continue;
         }
 
-        $pStmt = $db->prepare("SELECT b24_product_id, price_per_meter, delivery_price, name FROM products WHERE id = ? LIMIT 1");
+        $pStmt = $db->prepare("SELECT b24_product_id, price_per_meter, delivery_price, roll_length, purchase_delivered_per_meter, name FROM products WHERE id = ? LIMIT 1");
         $pStmt->execute(array($localProductId));
         $prod = $pStmt->fetch(PDO::FETCH_ASSOC);
         $b24ProductId = intval(isset($prod['b24_product_id']) ? $prod['b24_product_id'] : 0);
@@ -2661,7 +2669,12 @@ function syncOperationDocumentToBitrix($db, $docId, $docType, $docNumber, $comme
         } elseif (floatval(isset($prod['delivery_price']) ? $prod['delivery_price'] : 0) > 0 && $lineRollLength > 0) {
             $pricePerMeter = floatval($prod['delivery_price']) / $lineRollLength;
         } else {
-            $pricePerMeter = floatval(isset($prod['price_per_meter']) ? $prod['price_per_meter'] : 0);
+            $fromPm = resolveProductPurchaseDeliveredPerMeter($prod);
+            if ($fromPm > 0) {
+                $pricePerMeter = $fromPm;
+            } else {
+                $pricePerMeter = floatval(isset($prod['price_per_meter']) ? $prod['price_per_meter'] : 0);
+            }
         }
         if ($pricePerMeter > 0) {
             $elementFields['price'] = $pricePerMeter;
@@ -2863,7 +2876,7 @@ function addLinesAndConductExistingB24Document($db, $b24DocId, $docType, $lineRo
             continue;
         }
 
-        $pStmt = $db->prepare("SELECT b24_product_id, price_per_meter, delivery_price, name FROM products WHERE id = ? LIMIT 1");
+        $pStmt = $db->prepare("SELECT b24_product_id, price_per_meter, delivery_price, roll_length, purchase_delivered_per_meter, name FROM products WHERE id = ? LIMIT 1");
         $pStmt->execute(array($localProductId));
         $prod = $pStmt->fetch(PDO::FETCH_ASSOC);
         $b24ProductId = intval(isset($prod['b24_product_id']) ? $prod['b24_product_id'] : 0);
@@ -2922,7 +2935,12 @@ function addLinesAndConductExistingB24Document($db, $b24DocId, $docType, $lineRo
         } elseif (floatval(isset($prod['delivery_price']) ? $prod['delivery_price'] : 0) > 0 && $lineRollLength > 0) {
             $pricePerMeter = floatval($prod['delivery_price']) / $lineRollLength;
         } else {
-            $pricePerMeter = floatval(isset($prod['price_per_meter']) ? $prod['price_per_meter'] : 0);
+            $fromPm = resolveProductPurchaseDeliveredPerMeter($prod);
+            if ($fromPm > 0) {
+                $pricePerMeter = $fromPm;
+            } else {
+                $pricePerMeter = floatval(isset($prod['price_per_meter']) ? $prod['price_per_meter'] : 0);
+            }
         }
 
         $elementFields = array(
@@ -3660,10 +3678,47 @@ function stockOperationsB24ListingHumanHint(array $docRow) {
 }
 
 /**
+ * Стоимость рулона с приоритетом «с доставкой» для расчёта цены строки каталога/отложенного crm.product.
+ */
+function stockReceiptLandPricePerMeterFromRolls($deliveryPricePerRoll, $pricePerRoll, $rollLength) {
+    $baseRollPrice = floatval($deliveryPricePerRoll) > 0 ? floatval($deliveryPricePerRoll) : floatval($pricePerRoll);
+    $len = floatval($rollLength);
+    if ($baseRollPrice > 0 && $len > 0) {
+        return $baseRollPrice / $len;
+    }
+    return 0.0;
+}
+
+/**
+ * Закуп за метр с доставкой по строке прихода (для purchase_delivered_per_meter): сначала delivery за рулон / длина, иначе цена за рулон / длина.
+ */
+function stockReceiptPurchaseDeliveredPerMeterFromReceiptLine($deliveryPricePerRoll, $pricePerRoll, $rollLength) {
+    $len = floatval($rollLength);
+    if ($len <= 0) {
+        return 0.0;
+    }
+    if (floatval($deliveryPricePerRoll) > 0) {
+        return floatval($deliveryPricePerRoll) / $len;
+    }
+    if (floatval($pricePerRoll) > 0) {
+        return floatval($pricePerRoll) / $len;
+    }
+    return 0.0;
+}
+
+/**
+ * 1 — при приходе перезаписывать у существующего товара purchase_price, delivery_price, roll_length, price_per_meter (старое поведение).
+ * 0 (по умолчанию) — только обновлять purchase_delivered_per_meter по строке прихода; каталожная розница и рулонные суммы из products.php не трогаются.
+ */
+function stockReceiptShouldOverwriteProductsPriceFields($db) {
+    return trim((string)getAppSetting($db, 'stock_receipt_overwrite_products_price_fields', '0')) === '1';
+}
+
+/**
  * Если задан &$deferBitrixProductPrices — HTTP к Битриксу (crm.product.*) выполняется ПОСЛЕ commit транзакции прихода,
  * иначе MySQL рвёт idle-сессию во время HTTP к Bitrix («MySQL server has gone away», wait_timeout на шаринге).
  *
- * При передаче массива: product_id → price_per_meter (последняя строка прихода по товару перезапишет число для Б24).
+ * При передаче массива: product_id → цена за метр для опциональной записи PRICE в CRM (как прежде), если включён stock_receipt_push_crm_catalog_price.
  *
  * @param PDO $db
  * @param float $rollLength
@@ -3673,9 +3728,10 @@ function stockOperationsB24ListingHumanHint(array $docRow) {
  * @return array запись продукта (локальная)
  */
 function ensureProductForReceipt($db, $productId, $productName, $rollLength, $pricePerRoll, $deliveryPricePerRoll, &$deferBitrixProductPrices = null) {
-    $baseRollPrice = $deliveryPricePerRoll > 0 ? $deliveryPricePerRoll : $pricePerRoll;
-    $pricePerMeter = ($baseRollPrice > 0 && $rollLength > 0) ? ($baseRollPrice / $rollLength) : 0;
+    $landPm = stockReceiptLandPricePerMeterFromRolls($deliveryPricePerRoll, $pricePerRoll, $rollLength);
+    $purchaseDeliveredPm = stockReceiptPurchaseDeliveredPerMeterFromReceiptLine($deliveryPricePerRoll, $pricePerRoll, $rollLength);
     $useDefer = ($deferBitrixProductPrices !== null);
+    $overwrite = stockReceiptShouldOverwriteProductsPriceFields($db);
 
     if ($productId > 0) {
         $stmt = $db->prepare("SELECT * FROM products WHERE id = ? LIMIT 1");
@@ -3691,19 +3747,29 @@ function ensureProductForReceipt($db, $productId, $productName, $rollLength, $pr
                     $p['name'] = $fromB24Nm;
                 }
             }
-            if ($pricePerRoll > 0 || $deliveryPricePerRoll > 0 || $rollLength > 0) {
-                $db->prepare("UPDATE products SET purchase_price = ?, delivery_price = ?, roll_length = ?, price_per_meter = ? WHERE id = ?")
-                    ->execute(array($pricePerRoll, $deliveryPricePerRoll, $rollLength, $pricePerMeter, $productId));
+            if ($overwrite) {
+                if ($pricePerRoll > 0 || $deliveryPricePerRoll > 0 || $rollLength > 0) {
+                    $db->prepare("UPDATE products SET purchase_price = ?, delivery_price = ?, roll_length = ?, price_per_meter = ?, purchase_delivered_per_meter = ? WHERE id = ?")
+                        ->execute(array($pricePerRoll, $deliveryPricePerRoll, $rollLength, $landPm, $purchaseDeliveredPm, $productId));
+                }
+            } else {
+                if ($purchaseDeliveredPm > 0) {
+                    $db->prepare("UPDATE products SET purchase_delivered_per_meter = ? WHERE id = ?")
+                        ->execute(array($purchaseDeliveredPm, $productId));
+                }
             }
-            $p['purchase_price'] = $pricePerRoll;
-            $p['delivery_price'] = $deliveryPricePerRoll;
-            $p['roll_length'] = $rollLength;
-            $p['price_per_meter'] = $pricePerMeter;
+            if ($overwrite) {
+                $p['purchase_price'] = $pricePerRoll;
+                $p['delivery_price'] = $deliveryPricePerRoll;
+                $p['roll_length'] = $rollLength;
+                $p['price_per_meter'] = $landPm;
+            }
+            $p['purchase_delivered_per_meter'] = $purchaseDeliveredPm;
             if ($useDefer) {
-                $deferBitrixProductPrices[intval($p['id'])] = $pricePerMeter;
+                $deferBitrixProductPrices[intval($p['id'])] = $landPm;
                 return $p;
             }
-            return ensureProductInBitrix($db, $p, $pricePerMeter);
+            return ensureProductInBitrix($db, $p, $landPm);
         }
     }
 
@@ -3716,32 +3782,46 @@ function ensureProductForReceipt($db, $productId, $productName, $rollLength, $pr
     $find->execute(array($name));
     $existing = $find->fetch(PDO::FETCH_ASSOC);
     if ($existing) {
-        $db->prepare("UPDATE products SET purchase_price = ?, delivery_price = ?, roll_length = ?, price_per_meter = ? WHERE id = ?")
-            ->execute(array($pricePerRoll, $deliveryPricePerRoll, $rollLength, $pricePerMeter, intval($existing['id'])));
-        $existing['purchase_price'] = $pricePerRoll;
-        $existing['delivery_price'] = $deliveryPricePerRoll;
-        $existing['roll_length'] = $rollLength;
-        $existing['price_per_meter'] = $pricePerMeter;
+        $existingId = intval($existing['id']);
+        if ($overwrite) {
+            $db->prepare("UPDATE products SET purchase_price = ?, delivery_price = ?, roll_length = ?, price_per_meter = ?, purchase_delivered_per_meter = ? WHERE id = ?")
+                ->execute(array($pricePerRoll, $deliveryPricePerRoll, $rollLength, $landPm, $purchaseDeliveredPm, $existingId));
+            $existing['purchase_price'] = $pricePerRoll;
+            $existing['delivery_price'] = $deliveryPricePerRoll;
+            $existing['roll_length'] = $rollLength;
+            $existing['price_per_meter'] = $landPm;
+        } else {
+            if ($purchaseDeliveredPm > 0) {
+                $db->prepare("UPDATE products SET purchase_delivered_per_meter = ? WHERE id = ?")
+                    ->execute(array($purchaseDeliveredPm, $existingId));
+            }
+        }
+        $existing['purchase_delivered_per_meter'] = $purchaseDeliveredPm;
         if ($useDefer) {
-            $deferBitrixProductPrices[intval($existing['id'])] = $pricePerMeter;
+            $deferBitrixProductPrices[intval($existing['id'])] = $landPm;
             return $existing;
         }
-        return ensureProductInBitrix($db, $existing, $pricePerMeter);
+        return ensureProductInBitrix($db, $existing, $landPm);
     }
 
     $ins = $db->prepare("
-        INSERT INTO products (name, roll_length, purchase_price, delivery_price, price_per_meter)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO products (name, roll_length, purchase_price, delivery_price, price_per_meter, purchase_delivered_per_meter)
+        VALUES (?, ?, ?, ?, ?, ?)
     ");
-    $ins->execute(array($name, $rollLength, $pricePerRoll, $deliveryPricePerRoll, $pricePerMeter));
+    $ins->execute(array($name, $rollLength, $pricePerRoll, $deliveryPricePerRoll, $landPm, $purchaseDeliveredPm));
     $newId = intval($db->lastInsertId());
 
-    $created = array('id' => $newId, 'name' => $name, 'b24_product_id' => 0);
+    $created = array(
+        'id' => $newId,
+        'name' => $name,
+        'b24_product_id' => 0,
+        'purchase_delivered_per_meter' => $purchaseDeliveredPm
+    );
     if ($useDefer) {
-        $deferBitrixProductPrices[$newId] = $pricePerMeter;
+        $deferBitrixProductPrices[$newId] = $landPm;
         return $created;
     }
-    return ensureProductInBitrix($db, $created, $pricePerMeter);
+    return ensureProductInBitrix($db, $created, $landPm);
 }
 
 /**

@@ -133,6 +133,7 @@ function validatePricingPayload($postData) {
     $labels = array(
         'roll_length' => 'Метраж рулона',
         'price_per_meter' => 'Цена за метр',
+        'purchase_delivered_per_meter' => 'Закуп за м (с доставкой)',
         'purchase_price' => 'Себестоимость',
         'delivery_price' => 'С доставкой за рулон',
         'price_1_4' => 'Цена 1-4',
@@ -216,6 +217,7 @@ function buildProductsUrl($overrides) {
 }
 
 ensureColumnExists($db, 'products', 'delivery_price', '`delivery_price` decimal(14,2) NOT NULL DEFAULT 0');
+ensureColumnExists($db, 'products', 'purchase_delivered_per_meter', '`purchase_delivered_per_meter` decimal(18,6) NOT NULL DEFAULT 0');
 $formErrors = array();
 $formWarnings = array();
 $tierAutofillSuggestions = array();
@@ -966,7 +968,7 @@ function productsPhpShouldPushCatalogNameToB24($name) {
 function syncProductPriceToB24($db, $productId) {
     $pid = intval($productId);
     $stmt = $db->prepare("
-        SELECT id, name, b24_product_id, price_per_meter
+        SELECT id, name, b24_product_id, price_per_meter, purchase_delivered_per_meter, delivery_price, roll_length
         FROM products
         WHERE id = ?
         LIMIT 1
@@ -998,13 +1000,14 @@ function syncProductPriceToB24($db, $productId) {
 
     $b24Id = intval($product['b24_product_id']);
     $retailPrice = round(floatval(isset($product['price_per_meter']) ? $product['price_per_meter'] : 0), 4);
-    if ($retailPrice <= 0) {
+    $purchasePm = round(floatval(resolveProductPurchaseDeliveredPerMeter($product)), 4);
+    if ($retailPrice <= 0 && $purchasePm <= 0) {
         return array(
             'ok' => false,
             'skipped' => true,
-            'message' => 'Пропущено: не задана цена за метр',
+            'message' => 'Пропущено: нет розничной цены за метр и закупа с доставкой за метр',
             'sync_report_bucket' => 'skipped',
-            'sync_report_row' => makeB24PriceSyncListRow($pid, $pName, $b24Id, 'В приложении цена за метр не задана или равна 0')
+            'sync_report_row' => makeB24PriceSyncListRow($pid, $pName, $b24Id, 'Нет price_per_meter и нет закупа за м (purchase_delivered_per_meter / delivery÷roll)')
         );
     }
 
@@ -1013,7 +1016,7 @@ function syncProductPriceToB24($db, $productId) {
         $currencyId = 'KGS';
     }
 
-    // В Б24 передаём розничную цену за метр + при необходимости NAME (crm.product.update; без закупки и без catalog.product.update базовых полей).
+    // В Б24: розничная за метр (PRICE), закуп с доставкой за метр (PURCHASING_PRICE), при необходимости NAME.
     // Товары с вариациями: цены в интерфейсе идут на торговые предложения (offer), см. catalog.product.offer.list по parentId — NAME уходит тем же составом целей.
     $targetsMeta = b24ResolveRetailPriceCatalogTargetIdsMeta($b24Id);
     $targets = isset($targetsMeta['targets']) && is_array($targetsMeta['targets']) ? $targetsMeta['targets'] : array();
@@ -1058,6 +1061,10 @@ function syncProductPriceToB24($db, $productId) {
         $crmFields['PRICE'] = $retailPrice;
         $crmFields['CURRENCY_ID'] = $currencyId;
     }
+    if ($purchasePm > 0) {
+        $crmFields['PURCHASING_PRICE'] = $purchasePm;
+        $crmFields['PURCHASING_CURRENCY'] = $currencyId;
+    }
     $nameTrim = trim((string)$pName);
     if (productsPhpShouldPushCatalogNameToB24($nameTrim)) {
         $crmFields['NAME'] = $nameTrim;
@@ -1065,7 +1072,7 @@ function syncProductPriceToB24($db, $productId) {
 
     $crmResp = null;
     $crmAnyOk = false;
-    if ($retailPrice > 0 && !empty($targets)) {
+    if (!empty($targets) && !empty($crmFields)) {
         foreach ($targets as $targetIdx => $tid) {
             $tid = intval($tid);
             if ($tid <= 0) {
@@ -1120,6 +1127,18 @@ function syncProductPriceToB24($db, $productId) {
 
     if (($crmAnyOk || $priceUpsertAllOk) && $verified) {
         updateProductSyncState($db, $productId, 'sent', null, $attemptAt);
+        $detail = 'Отправлено продажа/м=' . $retailPrice . ' ' . $currencyId;
+        if ($purchasePm > 0) {
+            $detail .= ', закуп/м=' . $purchasePm . ' ' . $currencyId;
+        }
+        $detail .= ' (' . (count($targets) <= 1
+            ? 'каталог id ' . (isset($targets[0]) ? intval($targets[0]) : $b24Id)
+            : ('офферы каталога: ' . implode(', ', array_map('intval', $targets)) . '; родитель ' . $b24Id))
+            . '; parent_iblock=' . $parentIblockId
+            . '; offer_iblock=' . $offerIblockId
+            . '; is_offers=' . ($offerCatalogIsOffers === null ? 'unknown' : ($offerCatalogIsOffers ? 'Y' : 'N'))
+            . '; target_offer_ids=' . implode(',', array_map('intval', $targets))
+            . '; type=' . $parentType . '), подтверждено чтением после записи';
         return array(
             'ok' => true,
             'message' => 'Обновлено в Б24',
@@ -1128,15 +1147,7 @@ function syncProductPriceToB24($db, $productId) {
                 $pid,
                 $pName,
                 $b24Id,
-                'Отправлено ' . $retailPrice . ' ' . $currencyId . ' '
-                . '(' . (count($targets) <= 1
-                    ? 'каталог id ' . (isset($targets[0]) ? intval($targets[0]) : $b24Id)
-                    : ('офферы каталога: ' . implode(', ', array_map('intval', $targets)) . '; родитель ' . $b24Id))
-                . '; parent_iblock=' . $parentIblockId
-                . '; offer_iblock=' . $offerIblockId
-                . '; is_offers=' . ($offerCatalogIsOffers === null ? 'unknown' : ($offerCatalogIsOffers ? 'Y' : 'N'))
-                . '; target_offer_ids=' . implode(',', array_map('intval', $targets))
-                . '; type=' . $parentType . '), подтверждено чтением после записи'
+                $detail
             )
         );
     }
@@ -1401,6 +1412,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             isset($validation['values']['delivery_price']) ? $validation['values']['delivery_price'] : 0,
             isset($validation['values']['price_per_meter']) ? $validation['values']['price_per_meter'] : 0
         );
+        $purchaseDeliveredStored = resolveProductPurchaseDeliveredPerMeter(array(
+            'purchase_delivered_per_meter' => isset($validation['values']['purchase_delivered_per_meter']) ? $validation['values']['purchase_delivered_per_meter'] : 0,
+            'roll_length' => isset($validation['values']['roll_length']) ? $validation['values']['roll_length'] : 0,
+            'delivery_price' => isset($validation['values']['delivery_price']) ? $validation['values']['delivery_price'] : 0
+        ));
         $newPriceValues = array(
             'price_per_meter' => $calculatedMeterPrice,
             'purchase_price' => normalizeNumber($_POST['purchase_price']),
@@ -1413,6 +1429,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 price_per_meter = ?,
                 purchase_price = ?,
                 delivery_price = ?,
+                purchase_delivered_per_meter = ?,
                 price_1_4 = ?,
                 price_5_9 = ?,
                 price_10_19 = ?,
@@ -1426,6 +1443,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $calculatedMeterPrice,
             isset($validation['values']['purchase_price']) ? $validation['values']['purchase_price'] : 0,
             isset($validation['values']['delivery_price']) ? $validation['values']['delivery_price'] : 0,
+            $purchaseDeliveredStored,
             isset($validation['values']['price_1_4']) ? $validation['values']['price_1_4'] : 0,
             isset($validation['values']['price_5_9']) ? $validation['values']['price_5_9'] : 0,
             isset($validation['values']['price_10_19']) ? $validation['values']['price_10_19'] : 0,
@@ -1451,6 +1469,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             isset($validation['values']['delivery_price']) ? $validation['values']['delivery_price'] : 0,
             isset($validation['values']['price_per_meter']) ? $validation['values']['price_per_meter'] : 0
         );
+        $purchaseDeliveredStored = resolveProductPurchaseDeliveredPerMeter(array(
+            'purchase_delivered_per_meter' => isset($validation['values']['purchase_delivered_per_meter']) ? $validation['values']['purchase_delivered_per_meter'] : 0,
+            'roll_length' => isset($validation['values']['roll_length']) ? $validation['values']['roll_length'] : 0,
+            'delivery_price' => isset($validation['values']['delivery_price']) ? $validation['values']['delivery_price'] : 0
+        ));
         $newPriceValues = array(
             'price_per_meter' => $calculatedMeterPrice,
             'purchase_price' => normalizeNumber($_POST['purchase_price']),
@@ -1458,8 +1481,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         );
         $stmt = $db->prepare("
             INSERT INTO products
-            (name, roll_length, price_per_meter, purchase_price, delivery_price, price_1_4, price_5_9, price_10_19, price_20_plus)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (name, roll_length, price_per_meter, purchase_price, delivery_price, purchase_delivered_per_meter, price_1_4, price_5_9, price_10_19, price_20_plus)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ");
 
         $stmt->execute(array(
@@ -1468,6 +1491,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $calculatedMeterPrice,
             isset($validation['values']['purchase_price']) ? $validation['values']['purchase_price'] : 0,
             isset($validation['values']['delivery_price']) ? $validation['values']['delivery_price'] : 0,
+            $purchaseDeliveredStored,
             isset($validation['values']['price_1_4']) ? $validation['values']['price_1_4'] : 0,
             isset($validation['values']['price_5_9']) ? $validation['values']['price_5_9'] : 0,
             isset($validation['values']['price_10_19']) ? $validation['values']['price_10_19'] : 0,
@@ -1967,6 +1991,7 @@ require 'includes/header.php';
             <input class="form-control mb-1" name="price_per_meter" placeholder="Цена за метр (KGS)" value="<?php echo isset($editProduct['price_per_meter']) ? $editProduct['price_per_meter'] : ''; ?>">
             <input class="form-control mb-1" name="purchase_price" placeholder="Себестоимость (KGS)" value="<?php echo isset($editProduct['purchase_price']) ? $editProduct['purchase_price'] : ''; ?>">
             <input class="form-control mb-1" name="delivery_price" placeholder="С доставкой за рулон (KGS)" value="<?php echo isset($editProduct['delivery_price']) ? $editProduct['delivery_price'] : ''; ?>">
+            <input class="form-control mb-1" name="purchase_delivered_per_meter" placeholder="Закуп с доставкой за м KGS (пусто → delivery÷метраж)" value="<?php echo isset($editProduct['purchase_delivered_per_meter']) ? htmlspecialchars((string)$editProduct['purchase_delivered_per_meter'], ENT_QUOTES, 'UTF-8') : ''; ?>">
             <input class="form-control mb-1" name="price_1_4" placeholder="1-4" value="<?php echo isset($editProduct['price_1_4']) ? $editProduct['price_1_4'] : ''; ?>">
             <input class="form-control mb-1" name="price_5_9" placeholder="5-9" value="<?php echo isset($editProduct['price_5_9']) ? $editProduct['price_5_9'] : ''; ?>">
             <input class="form-control mb-1" name="price_10_19" placeholder="10-19" value="<?php echo isset($editProduct['price_10_19']) ? $editProduct['price_10_19'] : ''; ?>">
@@ -2011,6 +2036,7 @@ require 'includes/header.php';
                     <th>Метраж</th>
                     <th>Себест.</th>
                     <th>Доставка</th>
+                    <th>Закуп/м</th>
                     <th class="sticky-col sticky-col-price">Цена за метр (KGS)</th>
                     <th>1-4</th>
                     <th>5-9</th>
@@ -2022,7 +2048,7 @@ require 'includes/header.php';
             </thead>
             <tbody>
                 <?php if (empty($products)): ?>
-                    <tr><td colspan="14" class="text-center text-muted">Ничего не найдено по текущим фильтрам.</td></tr>
+                    <tr><td colspan="15" class="text-center text-muted">Ничего не найдено по текущим фильтрам.</td></tr>
                 <?php endif; ?>
                 <?php foreach ($products as $p): ?>
                     <?php
@@ -2055,6 +2081,10 @@ require 'includes/header.php';
                         <td>
                             <span class="cell-view"><?php echo htmlspecialchars((string)$p['delivery_price']); ?></span>
                             <input class="form-control cell-edit" data-field="delivery_price" type="text" value="<?php echo htmlspecialchars((string)$p['delivery_price']); ?>">
+                        </td>
+                        <td>
+                            <span class="cell-view"><?php echo htmlspecialchars(isset($p['purchase_delivered_per_meter']) ? (string)$p['purchase_delivered_per_meter'] : ''); ?></span>
+                            <input class="form-control cell-edit" data-field="purchase_delivered_per_meter" type="text" value="<?php echo htmlspecialchars(isset($p['purchase_delivered_per_meter']) ? (string)$p['purchase_delivered_per_meter'] : ''); ?>">
                         </td>
                         <td class="sticky-col sticky-col-price">
                             <span class="cell-view"><?php echo htmlspecialchars((string)$p['price_per_meter']); ?></span>
