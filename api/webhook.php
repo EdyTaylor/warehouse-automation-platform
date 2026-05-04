@@ -486,6 +486,197 @@ function getUserName($db, $userId) {
     return "User {$userId}";
 }
 
+function ensureSalesFinanceColumns($db) {
+    if (!function_exists('ensureColumnExists')) {
+        return;
+    }
+    ensureColumnExists($db, 'sales', 'cost_fact', '`cost_fact` decimal(14,2) NOT NULL DEFAULT 0');
+    ensureColumnExists($db, 'sales', 'gross_profit', '`gross_profit` decimal(14,2) NOT NULL DEFAULT 0');
+    ensureColumnExists($db, 'sales', 'gross_margin_percent', '`gross_margin_percent` decimal(8,2) NOT NULL DEFAULT 0');
+}
+
+function realizeWarehouseDealFromReserve($db, $dealId) {
+    ensureOrderAllocationsTable($db);
+    ensureSalesFinanceColumns($db);
+
+    $movementIds = [];
+    $productIdsToSync = [];
+
+    $db->beginTransaction();
+    try {
+        $requestStmt = $db->prepare("
+            SELECT *
+            FROM b24_sale_requests
+            WHERE b24_deal_id = ?
+            LIMIT 1
+            FOR UPDATE
+        ");
+        $requestStmt->execute([$dealId]);
+        $request = $requestStmt->fetch(PDO::FETCH_ASSOC);
+        if (!$request) {
+            $db->commit();
+            return ['status' => 'no_request'];
+        }
+
+        $requestId = intval($request['id']);
+        $linesStmt = $db->prepare("
+            SELECT
+                l.*,
+                COALESCE((SELECT SUM(c.meters) FROM b24_sale_line_cuts c WHERE c.line_id = l.id), 0) as allocated_m
+            FROM b24_sale_lines l
+            WHERE l.request_id = ?
+              AND l.status != 'completed'
+            ORDER BY l.id ASC
+            FOR UPDATE
+        ");
+        $linesStmt->execute([$requestId]);
+        $lines = $linesStmt->fetchAll(PDO::FETCH_ASSOC);
+
+        if (empty($lines)) {
+            $db->prepare("
+                UPDATE b24_sale_requests
+                SET status = 'completed',
+                    picker_status = 'shipped',
+                    shipped_at = IFNULL(shipped_at, NOW()),
+                    updated_at = NOW()
+                WHERE id = ?
+            ")->execute([$requestId]);
+            $db->commit();
+            return ['status' => 'already_completed'];
+        }
+
+        foreach ($lines as $line) {
+            $lineId = intval($line['id']);
+            $need = floatval($line['quantity_m']);
+            $allocated = floatval($line['allocated_m']);
+            if ($allocated + 0.0001 < $need) {
+                throw new Exception('Cannot realize deal: line #' . $lineId . ' has ' . round($allocated, 2) . 'm reserved of ' . round($need, 2) . 'm.');
+            }
+
+            $cutsStmt = $db->prepare("
+                SELECT c.*
+                FROM b24_sale_line_cuts c
+                WHERE c.line_id = ?
+                ORDER BY c.id ASC
+            ");
+            $cutsStmt->execute([$lineId]);
+            $cuts = $cutsStmt->fetchAll(PDO::FETCH_ASSOC);
+            if (empty($cuts)) {
+                throw new Exception('Cannot realize deal: line #' . $lineId . ' has no selected rolls.');
+            }
+
+            $costFact = 0.0;
+            foreach ($cuts as $cut) {
+                $rollId = intval($cut['roll_id']);
+                $take = floatval($cut['meters']);
+                if ($take <= 0) {
+                    continue;
+                }
+
+                $rollStmt = $db->prepare("SELECT * FROM rolls WHERE id = ? FOR UPDATE");
+                $rollStmt->execute([$rollId]);
+                $roll = $rollStmt->fetch(PDO::FETCH_ASSOC);
+                if (!$roll) {
+                    throw new Exception('Cannot realize deal: roll #' . $rollId . ' not found.');
+                }
+
+                $newLen = floatval($roll['current_length']) - $take;
+                if ($newLen < -0.0001) {
+                    throw new Exception('Cannot realize deal: roll #' . $rollId . ' has not enough meters.');
+                }
+
+                $rollCostPerMeter = floatval(isset($roll['cost_per_meter']) ? $roll['cost_per_meter'] : 0);
+                if ($rollCostPerMeter > 0) {
+                    $costFact += $take * $rollCostPerMeter;
+                }
+
+                $newReserved = max(0, floatval($roll['reserved_length']) - $take);
+                $newLen = max(0, $newLen);
+                $newStatus = $newLen <= 0.0001 ? 'sold' : 'cut';
+
+                if ($newReserved <= 0.0001) {
+                    $db->prepare("
+                        UPDATE rolls
+                        SET current_length = ?, status = ?, reserved = 0, deal_id = NULL, reserved_length = 0
+                        WHERE id = ?
+                    ")->execute([$newLen, $newStatus, $rollId]);
+                } else {
+                    $db->prepare("
+                        UPDATE rolls
+                        SET current_length = ?, status = ?, reserved_length = ?
+                        WHERE id = ?
+                    ")->execute([$newLen, $newStatus, $newReserved, $rollId]);
+                }
+            }
+
+            $price = floatval(isset($line['price_per_unit']) ? $line['price_per_unit'] : 0);
+            $qty = floatval($line['quantity_m']);
+            $revenue = $qty * $price;
+            $grossProfit = $revenue - $costFact;
+            $grossMarginPercent = $revenue > 0 ? (($grossProfit / $revenue) * 100) : 0;
+            $productId = intval($line['product_id']);
+
+            $db->prepare("
+                INSERT INTO sales (product_id, type, quantity, price_per_unit, total, deal_id, cost_fact, gross_profit, gross_margin_percent)
+                VALUES (?, 'meter', ?, ?, ?, ?, ?, ?, ?)
+            ")->execute([
+                $productId,
+                $qty,
+                $price,
+                $revenue,
+                $dealId,
+                round($costFact, 2),
+                round($grossProfit, 2),
+                round($grossMarginPercent, 2)
+            ]);
+
+            $movementIds[] = logStockMovement($db, [
+                'product_id' => $productId,
+                'movement_type' => 'sale_meter',
+                'quantity_m' => $qty,
+                'quantity_rolls' => 0,
+                'price_per_unit' => $price,
+                'total' => $revenue,
+                'deal_id' => $dealId,
+                'comment' => 'Deal realized in B24 | margin: ' . round($grossMarginPercent, 2) . '%'
+            ]);
+            $productIdsToSync[$productId] = $productId;
+
+            $db->prepare("UPDATE b24_sale_lines SET status = 'completed' WHERE id = ?")->execute([$lineId]);
+        }
+
+        $db->prepare("
+            UPDATE b24_sale_requests
+            SET status = 'completed',
+                picker_status = 'shipped',
+                shipped_at = IFNULL(shipped_at, NOW()),
+                updated_at = NOW()
+            WHERE id = ?
+        ")->execute([$requestId]);
+        $db->prepare("UPDATE deals SET status = 'closed' WHERE b24_deal_id = ?")->execute([$dealId]);
+
+        $db->commit();
+    } catch (Exception $e) {
+        if ($db->inTransaction()) {
+            $db->rollBack();
+        }
+        throw $e;
+    }
+
+    foreach ($movementIds as $movementId) {
+        syncMovementToBitrix($db, $movementId);
+    }
+    foreach ($productIdsToSync as $productId) {
+        syncProductAvailableToBitrix($db, $productId);
+    }
+
+    return [
+        'status' => 'realized',
+        'movements' => count($movementIds),
+        'products_synced' => count($productIdsToSync)
+    ];
+}
+
 function applyDealPaidOrReserveMark($db, $dealId, $dealData, $realizationGate = null) {
     if ($dealId <= 0 || !is_array($dealData)) {
         return;
@@ -503,6 +694,8 @@ function applyDealPaidOrReserveMark($db, $dealId, $dealData, $realizationGate = 
         $isPaid = bitrixRealizationIsPaid($dealData, $realizationGate);
 
         if ($isPaid) {
+            realizeWarehouseDealFromReserve($db, $dealId);
+        } elseif (false) {
             $db->prepare("UPDATE b24_sale_requests SET status = 'completed', updated_at = NOW() WHERE b24_deal_id = ?")
                 ->execute([$dealId]);
 
