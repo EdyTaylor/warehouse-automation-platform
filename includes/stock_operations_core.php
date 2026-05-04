@@ -2613,6 +2613,7 @@ function syncOperationDocumentToBitrix($db, $docId, $docType, $docNumber, $comme
         }
         $b24ProductId = $resolvedB24ProductId;
 
+        /** В Б24 продажа и складской документ ведутся метрами; «шт» в UI портала здесь = те же метры. Рулоны только в приложении (qty_rolls × длина → quantity_m). */
         $amount = floatval(isset($line['quantity_m']) ? $line['quantity_m'] : 0);
         if ($amount <= 0) {
             $amount = floatval(isset($line['qty_rolls']) ? $line['qty_rolls'] : 0);
@@ -2875,6 +2876,7 @@ function addLinesAndConductExistingB24Document($db, $b24DocId, $docType, $lineRo
         }
         $b24ProductId = $resolvedB24ProductId;
 
+        /** amount в Б24 — метры; закупочная строка за метр. */
         $amount = floatval(isset($line['quantity_m']) ? $line['quantity_m'] : 0);
         if ($amount <= 0) {
             $amount = floatval(isset($line['qty_rolls']) ? $line['qty_rolls'] : 0);
