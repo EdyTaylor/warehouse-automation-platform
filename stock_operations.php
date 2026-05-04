@@ -78,16 +78,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             if ($deferMinLines < 1) {
                 $deferMinLines = 2;
             }
-            /** Приход при «Повторить»/«Дофиксировать» — в фон (api/stock_operation_b24_worker.php), чтобы nginx не отдавал 504 на длинном синке. */
-            $isReceiptDefer = ($retryStrategy !== 'conduct_only')
-                && $deferEnabled
-                && (string)$doc['operation_type'] === 'receipt'
-                && count($lineRows) >= $deferMinLines;
+            /** Приход/списание при «Повторить»/«Дофиксировать» — в фон, чтобы nginx не отдавал 504. «Провести документ» — только conduct, тоже в фон. */
+            $lineCountRetry = count($lineRows);
+            $deferDocKind = in_array((string)$doc['operation_type'], array('receipt', 'writeoff'), true);
+            $deferLinesOk = $deferEnabled && $deferDocKind && $lineCountRetry >= $deferMinLines
+                && ($retryStrategy === 'full' || $retryStrategy === 'portal_by_number_only');
+            $deferConductOk = $deferEnabled && $deferDocKind && $retryStrategy === 'conduct_only';
 
             if ($retryStrategy === 'conduct_only') {
-                $syncResult = stockOperationsExecuteB24ConductOnly($db, $doc);
-                $syncStatus = resolveB24SyncStatus($syncResult);
-            } elseif ($isReceiptDefer && stockOperationsDispatchB24WarehouseWorker($db, $docId, $retryStrategy)) {
+                if ($deferConductOk && stockOperationsDispatchB24WarehouseWorker($db, $docId, 'conduct_only')) {
+                    $syncResult = array(
+                        'ok' => true,
+                        'queued' => true,
+                        'b24_background_queued' => true,
+                        'hint' => 'Проведение в Битрикс24 выполняется отдельным запросом (нет 504).',
+                        'retry_strategy_requested' => $retryStrategy,
+                    );
+                    $syncStatus = resolveB24SyncStatus($syncResult);
+                } else {
+                    $syncResult = stockOperationsExecuteB24ConductOnly($db, $doc);
+                    if ($deferConductOk && trim((string)getAppSetting($db, 'stock_b24_worker_ping_before_spawn', '1')) !== '0') {
+                        $syncResult['deferred_wanted_but_inline_fallback'] = true;
+                        $syncResult['inline_fallback_hint'] = 'Фон не вызвался или ping воркера не прошёл. Задайте app_settings stock_b24_worker_public_base_url (https://…) и stock_operation_b24_worker_secret или проверьте exec/curl на хостинге.';
+                    }
+                    $syncStatus = resolveB24SyncStatus($syncResult);
+                }
+            } elseif ($deferLinesOk && stockOperationsDispatchB24WarehouseWorker($db, $docId, $retryStrategy)) {
                 $syncResult = array(
                     'ok' => true,
                     'queued' => true,
@@ -99,7 +115,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 $syncStatus = resolveB24SyncStatus($syncResult);
             } else {
                 $syncResult = stockOperationsExecuteB24SyncWithLines($db, $doc, $lineRows, $retryStrategy);
-                if ($isReceiptDefer && trim((string)getAppSetting($db, 'stock_b24_worker_ping_before_spawn', '1')) !== '0') {
+                if ($deferLinesOk && trim((string)getAppSetting($db, 'stock_b24_worker_ping_before_spawn', '1')) !== '0') {
                     $syncResult['deferred_wanted_but_inline_fallback'] = true;
                     $syncResult['inline_fallback_hint'] = 'Фон не вызвался или ping воркера не прошёл; синк выполнен в этом запросе. При таймауте задайте app_settings stock_b24_worker_public_base_url (https://…) или временно выключите фон stock_receipt_b24_worker_enabled=0.';
                 }

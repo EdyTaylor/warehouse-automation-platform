@@ -119,15 +119,56 @@ try {
     }
 
     $retryStrategy = strtolower(trim(isset($_GET['retry_strategy']) ? (string)$_GET['retry_strategy'] : ''));
-    if ($retryStrategy !== 'full' && $retryStrategy !== 'portal_by_number_only') {
-        $retryStrategy = trim((string)getAppSetting($db, 'stock_b24_worker_retry_strategy', 'portal_by_number_only'));
-        if ($retryStrategy !== 'full') {
-            $retryStrategy = 'portal_by_number_only';
-        }
-    }
+    if ($retryStrategy === 'conduct_only') {
+        try {
+            $syncResult = stockOperationsExecuteB24ConductOnly($db, $doc);
+            $syncStatus = resolveB24SyncStatus($syncResult);
+            $persistWk = stockOperationsEffectiveB24DocumentIdForPersist($doc, $syncResult);
+            $db->prepare("UPDATE stock_operation_docs SET b24_document_id = ?, b24_sync_status = ?, b24_sync_response = ? WHERE id = ?")
+                ->execute(array(
+                    $persistWk,
+                    $syncStatus,
+                    json_encode($syncResult, JSON_UNESCAPED_UNICODE),
+                    $docId
+                ));
 
-    try {
-        $syncResult = stockOperationsExecuteB24SyncWithLines($db, $doc, $lineRows, $retryStrategy);
+            if (((string)$doc['operation_type']) === 'receipt' && $syncStatus === 'sent') {
+                stockOperationsPushReceiptProductsNamePriceToB24Catalog($db, $lineRows);
+                stockOperationsSyncReceiptCatalogTotalsToBitrix($db, $lineRows);
+            }
+
+            echo json_encode(array(
+                'ok' => ($syncStatus === 'sent'),
+                'sync_status' => $syncStatus,
+                'b24_document_id' => isset($syncResult['b24_document_id']) ? intval($syncResult['b24_document_id']) : null,
+                'retry_mode' => 'conduct_only',
+            ), JSON_UNESCAPED_UNICODE);
+        } catch (Exception $e) {
+            http_response_code(500);
+            $payload = array(
+                'ok' => false,
+                'stage' => 'worker_exception_conduct',
+                'message' => $e->getMessage(),
+                'file' => $e->getFile(),
+                'line' => $e->getLine(),
+            );
+            try {
+                $db->prepare("UPDATE stock_operation_docs SET b24_sync_status = 'error', b24_sync_response = ? WHERE id = ?")
+                    ->execute(array(json_encode($payload, JSON_UNESCAPED_UNICODE), intval($docId)));
+            } catch (Exception $e2) {
+            }
+            echo json_encode($payload, JSON_UNESCAPED_UNICODE);
+        }
+    } else {
+        if ($retryStrategy !== 'full' && $retryStrategy !== 'portal_by_number_only') {
+            $retryStrategy = trim((string)getAppSetting($db, 'stock_b24_worker_retry_strategy', 'portal_by_number_only'));
+            if ($retryStrategy !== 'full') {
+                $retryStrategy = 'portal_by_number_only';
+            }
+        }
+
+        try {
+            $syncResult = stockOperationsExecuteB24SyncWithLines($db, $doc, $lineRows, $retryStrategy);
         $syncStatus = resolveB24SyncStatus($syncResult);
         $persistWk = stockOperationsEffectiveB24DocumentIdForPersist($doc, $syncResult);
         $db->prepare("UPDATE stock_operation_docs SET b24_document_id = ?, b24_sync_status = ?, b24_sync_response = ? WHERE id = ?")
@@ -147,26 +188,27 @@ try {
             stockOperationsSyncReceiptCatalogTotalsToBitrix($db, $lineRows);
         }
 
-        echo json_encode(array(
-            'ok' => ($syncStatus === 'sent'),
-            'sync_status' => $syncStatus,
-            'b24_document_id' => isset($syncResult['b24_document_id']) ? intval($syncResult['b24_document_id']) : null,
-        ), JSON_UNESCAPED_UNICODE);
-    } catch (Exception $e) {
-        http_response_code(500);
-        $payload = array(
-            'ok' => false,
-            'stage' => 'worker_exception',
-            'message' => $e->getMessage(),
-            'file' => $e->getFile(),
-            'line' => $e->getLine(),
-        );
-        try {
-            $db->prepare("UPDATE stock_operation_docs SET b24_sync_status = 'error', b24_sync_response = ? WHERE id = ?")
-                ->execute(array(json_encode($payload, JSON_UNESCAPED_UNICODE), intval($docId)));
-        } catch (Exception $e2) {
+            echo json_encode(array(
+                'ok' => ($syncStatus === 'sent'),
+                'sync_status' => $syncStatus,
+                'b24_document_id' => isset($syncResult['b24_document_id']) ? intval($syncResult['b24_document_id']) : null,
+            ), JSON_UNESCAPED_UNICODE);
+        } catch (Exception $e) {
+            http_response_code(500);
+            $payload = array(
+                'ok' => false,
+                'stage' => 'worker_exception',
+                'message' => $e->getMessage(),
+                'file' => $e->getFile(),
+                'line' => $e->getLine(),
+            );
+            try {
+                $db->prepare("UPDATE stock_operation_docs SET b24_sync_status = 'error', b24_sync_response = ? WHERE id = ?")
+                    ->execute(array(json_encode($payload, JSON_UNESCAPED_UNICODE), intval($docId)));
+            } catch (Exception $e2) {
+            }
+            echo json_encode($payload, JSON_UNESCAPED_UNICODE);
         }
-        echo json_encode($payload, JSON_UNESCAPED_UNICODE);
     }
 } finally {
     stockReceiptMysqlReleaseLock($db, $b24WorkerLock);

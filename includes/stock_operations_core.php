@@ -2887,7 +2887,7 @@ function stockOperationsDispatchB24WarehouseWorker(PDO $db, $docId, $retryStrate
     $strategyParam = '';
     if ($retryStrategy !== null && $retryStrategy !== '') {
         $rs = strtolower(trim((string)$retryStrategy));
-        if ($rs === 'full' || $rs === 'portal_by_number_only') {
+        if ($rs === 'full' || $rs === 'portal_by_number_only' || $rs === 'conduct_only') {
             $strategyParam = $rs;
         }
     }
