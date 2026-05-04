@@ -353,12 +353,12 @@ function stockOperationsMergeLineRowsPerB24CatalogId(PDO $db, array $lineRows) {
         return array();
     }
     /**
-     * По умолчанию (1): разные локальные product_id с одним и тем же b24_product_id сливаются в одну строку складского документа —
-     * в Б24 может получиться намного меньше «позиций», чем строк в приложении, при неизменной общей сумме.
-     * Для сохранения «одна строка приложения = одна позиция в Б24 после merge по product_id» задайте в app_settings
-     * stock_b24_merge_lines_by_b24_product_id = 0
+     * По умолчанию не сливать разные строки приложения только из‑за одного и того же b24_product_id:
+     * иначе при массовых приходах (много SKU, но они мапятся на ограниченный набор elementId CRM) получаются
+     * «10–20 позиций» и завышенное количество/суммы на каждую (накопление метров одной строкой).
+     * Включить старое сжатие (меньше element.add на хостингах с лимитами): stock_b24_merge_lines_by_b24_product_id = 1.
      */
-    if (trim((string)getAppSetting($db, 'stock_b24_merge_lines_by_b24_product_id', '1')) !== '1') {
+    if (trim((string)getAppSetting($db, 'stock_b24_merge_lines_by_b24_product_id', '0')) !== '1') {
         return stockOperationsMergedLinesEnsureB24SkuNoCatalogConsolidate($db, $lineRows);
     }
     $pidToBestLineName = array();
@@ -802,6 +802,7 @@ function fetchB24DocumentElementListRowsAll($b24DocId, array $select) {
     }
 
     $accum = array();
+    $seenElementRowIds = array();
     $start = 0;
     for ($page = 0; $page < $maxPages; $page++) {
         $payload = array(
@@ -827,10 +828,26 @@ function fetchB24DocumentElementListRowsAll($b24DocId, array $select) {
         }
 
         $prevStart = $start;
+        $novelRowsThisPage = 0;
         foreach ($rows as $row) {
-            if (is_array($row)) {
-                $accum[] = $row;
+            if (!is_array($row)) {
+                continue;
             }
+            $erid = intval(isset($row['id']) ? $row['id'] : (isset($row['ID']) ? $row['ID'] : 0));
+            if ($erid > 0) {
+                if (isset($seenElementRowIds[$erid])) {
+                    /** Портал проигнорировал start и снова отдал те же строки — бесконечное накопление. */
+                    continue;
+                }
+                $seenElementRowIds[$erid] = true;
+            }
+            $accum[] = $row;
+            $novelRowsThisPage++;
+        }
+
+        /** Все строки были дубликатами уже известных id → дальнейшая «пагинация» не даёт данных. */
+        if ($novelRowsThisPage <= 0) {
+            break;
         }
 
         $nextStart = bitrixListResponseNextStart($resp, $start, count($rows));
