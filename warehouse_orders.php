@@ -86,8 +86,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 if ($lineId <= 0 || $rollId <= 0 || $meters <= 0) {
                     $error = 'Неверные данные для добавления куска.';
-                } elseif (in_array((string)$request['status'], array('cancelled', 'completed'), true) || in_array((string)$request['picker_status'], array('cancelled', 'shipped'), true)) {
-                    $error = 'Заявка уже закрыта или отменена.';
+                } elseif ((string)$request['status'] === 'completed' || (string)$request['picker_status'] === 'shipped') {
+                    $error = 'Заявка уже отгружена или завершена.';
                 } else {
                     ensureOrderAllocationsTable($db);
                     $db->beginTransaction();
@@ -148,10 +148,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             ->execute(array($lineId));
                         $db->prepare("
                             UPDATE b24_sale_requests
-                            SET picker_status = IF(picker_status = 'new', 'picked', picker_status),
+                            SET picker_status = IF(picker_status IN ('new', 'cancelled'), 'picked', picker_status),
                                 picked_at = IFNULL(picked_at, NOW()),
-                                status = IF(status = 'new', 'in_progress', status),
+                                status = IF(status IN ('new', 'cancelled'), 'in_progress', status),
                                 picker_meta_json = ?,
+                                cancelled_at = NULL,
                                 updated_at = NOW()
                             WHERE id = ?
                         ")->execute(array($metaJson, $requestId));
@@ -169,8 +170,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $cutId = intval(isset($_POST['cut_id']) ? $_POST['cut_id'] : 0);
                 if ($cutId <= 0) {
                     $error = 'Некорректный cut_id.';
-                } elseif (in_array((string)$request['status'], array('cancelled', 'completed'), true) || in_array((string)$request['picker_status'], array('cancelled', 'shipped'), true)) {
-                    $error = 'Заявка уже закрыта или отменена.';
+                } elseif ((string)$request['status'] === 'completed' || (string)$request['picker_status'] === 'shipped') {
+                    $error = 'Заявка уже отгружена или завершена.';
                 } else {
                     ensureOrderAllocationsTable($db);
                     $db->beginTransaction();
@@ -237,7 +238,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         picker_problem_text = ?,
                         picker_meta_json = ?,
                         picked_at = IFNULL(picked_at, NOW()),
-                        status = IF(status = 'new', 'in_progress', status),
+                        status = IF(status IN ('new', 'cancelled'), 'in_progress', status),
+                        cancelled_at = NULL,
                         updated_at = NOW()
                     WHERE id = ?
                 ")->execute(array($problemText, $metaJson, $requestId));
@@ -306,10 +308,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ")->execute(array($requestId));
                     $dealIdRow = intval(isset($request['b24_deal_id']) ? $request['b24_deal_id'] : 0);
                     if ($dealIdRow > 0) {
-                        try {
-                            $db->prepare("UPDATE deals SET status = 'cancelled' WHERE b24_deal_id = ?")->execute(array($dealIdRow));
-                        } catch (Exception $ignoreDealsLegacy) {
-                        }
                         $db->prepare("
                             UPDATE rolls
                             SET reserved = 0, deal_id = NULL, reserved_length = 0
@@ -318,16 +316,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     }
                     $db->prepare("
                         UPDATE b24_sale_requests
-                        SET picker_status = 'cancelled',
-                            status = 'cancelled',
+                        SET picker_status = 'new',
+                            status = 'new',
                             picker_problem_text = ?,
                             picker_meta_json = ?,
-                            cancelled_at = NOW(),
+                            cancelled_at = NULL,
                             updated_at = NOW()
                         WHERE id = ?
                     ")->execute(array($problemText, $metaJson, $requestId));
                     $db->commit();
-                    $message = 'Резерв снят, заявка отменена.';
+                    $message = 'Резерв снят, заявка возвращена в подбор.';
                 } catch (Exception $e) {
                     if ($db->inTransaction()) {
                         $db->rollBack();
@@ -604,8 +602,8 @@ require __DIR__ . '/includes/header.php';
                         $allocatedMeters = floatval($line['allocated_m']);
                         $remainingMeters = max(0, $needMeters - $allocatedMeters);
                         $lineComplete = (string)$line['status'] === 'completed';
-                        $requestClosed = in_array((string)$request['status'], array('cancelled', 'completed'), true)
-                            || in_array((string)$request['picker_status'], array('cancelled', 'shipped'), true);
+                        $requestClosed = (string)$request['status'] === 'completed'
+                            || (string)$request['picker_status'] === 'shipped';
                         $canEditPick = !$lineComplete && !$requestClosed && $lineProductId > 0;
 
                         $rollStmt = $db->prepare("
@@ -665,7 +663,9 @@ require __DIR__ . '/includes/header.php';
                             </div>
                         <?php endif; ?>
 
-                        <?php if ($canEditPick): ?>
+                        <?php if ($canEditPick && $remainingMeters <= 0.001): ?>
+                            <div class="alert alert-success">Метраж по строке собран. Чтобы заменить рулон или кусок, сначала уберите выбранный кусок.</div>
+                        <?php elseif ($canEditPick): ?>
                             <?php if (empty($lineRolls)): ?>
                                 <div class="alert alert-warning">Нет доступных рулонов или обрезков этого товара.</div>
                             <?php else: ?>
@@ -720,7 +720,7 @@ require __DIR__ . '/includes/header.php';
                                 </div>
                             <?php endif; ?>
                         <?php else: ?>
-                            <div class="text-muted">Подбор недоступен: заявка закрыта, отменена или строка уже списана.</div>
+                            <div class="text-muted">Подбор недоступен: заявка уже отгружена, завершена или строка списана.</div>
                         <?php endif; ?>
                     </details>
                 <?php endforeach; ?>
@@ -749,7 +749,7 @@ require __DIR__ . '/includes/header.php';
                     <button class="btn btn-light" type="submit" name="action" value="save_pick">Сохранить подбор</button>
                     <button class="btn btn-warning" type="submit" name="action" value="retry_deal_rows_sync">Повторить синк строк сделки</button>
                     <button class="btn btn-success" type="submit" name="action" value="confirm_ship" onclick="return confirm('Подтвердить и отправить в Б24?');">Подтвердить и отправить в Б24</button>
-                    <button class="btn btn-danger" type="submit" name="action" value="cancel_reserve" onclick="return confirm('Снять резерв и отменить заявку?');">Отменить резерв</button>
+                    <button class="btn btn-danger" type="submit" name="action" value="cancel_reserve" onclick="return confirm('Снять резерв по заявке? Сделка в Б24 не будет закрыта.');">Снять резерв</button>
                 </div>
             </form>
         </div>
