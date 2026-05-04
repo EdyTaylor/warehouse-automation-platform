@@ -27,7 +27,7 @@ function stockEmergencyCreatesOffFilePaths()
     );
 }
 
-function stockEmergencyRollCreationStoppedMessage(PDO $db = null)
+function stockEmergencyRollCreationStoppedMessage($db = null)
 {
     foreach (stockEmergencyCreatesOffFilePaths() as $path) {
         if (is_file($path)) {
