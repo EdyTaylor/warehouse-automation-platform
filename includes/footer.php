@@ -13,7 +13,7 @@
         </div>
     </footer>
 
-    <script src="assets/filter_scroll_restore.js" defer></script>
+    <script src="assets/filter_scroll_restore.js?v=2" defer></script>
     <script>
         // Активная навигация
         document.addEventListener('DOMContentLoaded', function() {

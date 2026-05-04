@@ -21,6 +21,26 @@ function h($value) {
     return htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
 }
 
+function pickerStatusLabel($status) {
+    $labels = array(
+        'new' => 'Новая',
+        'picked' => 'В подборе',
+        'confirmed' => 'Одобрено',
+        'shipped' => 'Реализовано',
+        'cancelled' => 'Отклонено'
+    );
+    return isset($labels[$status]) ? $labels[$status] : (string)$status;
+}
+
+function pickerLineStatusLabel($status) {
+    $labels = array(
+        'new' => 'Новая',
+        'in_progress' => 'В подборе',
+        'completed' => 'Списана'
+    );
+    return isset($labels[$status]) ? $labels[$status] : (string)$status;
+}
+
 function hasPickerColumns($db) {
     try {
         $stmt = $db->query("SHOW COLUMNS FROM b24_sale_requests LIKE 'picker_status'");
@@ -244,6 +264,43 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     WHERE id = ?
                 ")->execute(array($problemText, $metaJson, $requestId));
                 $message = 'Подбор сохранен.';
+            } elseif ($action === 'approve_pick' || $action === 'reject_pick') {
+                $isApprove = ($action === 'approve_pick');
+                $triggerWord = $isApprove ? 'Одобрить' : 'Отклонить';
+                $comment = 'Склад: ' . $triggerWord . '. Заявка #' . $requestId;
+                if ($problemText !== '') {
+                    $comment .= '. Комментарий: ' . $problemText;
+                }
+
+                $b24Response = sendToBitrix('crm.deal.update', array(
+                    'id' => intval($request['b24_deal_id']),
+                    'fields' => array(
+                        'COMMENTS' => $comment
+                    )
+                ));
+
+                if (!is_array($b24Response) || isset($b24Response['error'])) {
+                    $error = 'Ошибка отправки в Б24: ' . (isset($b24Response['error_description']) ? $b24Response['error_description'] : 'unknown');
+                } else {
+                    $db->prepare("
+                        UPDATE b24_sale_requests
+                        SET picker_status = ?,
+                            picker_problem_text = ?,
+                            picker_meta_json = ?,
+                            confirmed_at = IF(? = 'confirmed', NOW(), confirmed_at),
+                            updated_at = NOW()
+                        WHERE id = ?
+                    ")->execute(array(
+                        $isApprove ? 'confirmed' : 'picked',
+                        $problemText,
+                        $metaJson,
+                        $isApprove ? 'confirmed' : 'picked',
+                        $requestId
+                    ));
+                    $message = $isApprove
+                        ? 'Подбор одобрен и комментарий отправлен в Б24.'
+                        : 'Отклонение отправлено в Б24.';
+                }
             } elseif ($action === 'confirm_ship') {
                 $db->beginTransaction();
                 try {
@@ -412,11 +469,7 @@ require __DIR__ . '/includes/header.php';
             <a href="warehouse.php" class="btn btn-light btn-sm">Открыть склад</a>
             <a href="stock_operations.php" class="btn btn-light btn-sm">Складские операции</a>
             <a href="sell.php" class="btn btn-light btn-sm">Продажи из Б24 (отчет)</a>
-            <a href="b24_sales.php" class="btn btn-light btn-sm">Тех.раздел Б24</a>
         </div>
-        <p class="text-muted" style="margin-top:8px;">
-            Основная работа кладовщика выполняется здесь. Тех.раздел Б24 нужен только для ручной отладки синка и редких сервисных операций.
-        </p>
     </div>
 
     <?php if ($message !== ''): ?>
@@ -428,15 +481,15 @@ require __DIR__ . '/includes/header.php';
 
     <div class="card">
         <h3>Фильтры очереди</h3>
-        <form method="GET">
-            <div class="form-row">
+        <form method="GET" class="warehouse-orders-filter-form">
+            <div class="warehouse-orders-filter-row">
                 <div class="form-group">
                     <label>Статус</label>
                     <select name="status">
-                        <option value="" <?= $filterStatusRaw === '' ? 'selected' : '' ?>>Активные (не отмен./заверш.)</option>
-                        <option value="all" <?= $filterStatusRaw === 'all' ? 'selected' : '' ?>>Все включая архив</option>
+                        <option value="" <?= $filterStatusRaw === '' ? 'selected' : '' ?>>Активные</option>
+                        <option value="all" <?= $filterStatusRaw === 'all' ? 'selected' : '' ?>>Все заявки</option>
                         <?php foreach ($allowedStatuses as $status): ?>
-                            <option value="<?= h($status) ?>" <?= $filterStatusRaw === $status ? 'selected' : '' ?>><?= h($status) ?></option>
+                            <option value="<?= h($status) ?>" <?= $filterStatusRaw === $status ? 'selected' : '' ?>><?= h(pickerStatusLabel($status)) ?></option>
                         <?php endforeach; ?>
                     </select>
                 </div>
@@ -450,8 +503,10 @@ require __DIR__ . '/includes/header.php';
                 </div>
                 <div class="form-group">
                     <label>&nbsp;</label>
-                    <button type="submit" class="btn btn-light">Фильтровать</button>
-                    <a href="warehouse_orders.php" class="btn btn-light">Сброс</a>
+                    <div class="warehouse-orders-filter-actions">
+                        <button type="submit" class="btn btn-light">Фильтровать</button>
+                        <a href="warehouse_orders.php" class="btn btn-light">Сброс</a>
+                    </div>
                 </div>
             </div>
         </form>
@@ -542,7 +597,7 @@ require __DIR__ . '/includes/header.php';
                     <div class="text-muted"><?= h($request['deal_name']) ?> | Ответственный: <?= h($request['responsible']) ?></div>
                 </div>
                 <div>
-                    <span class="<?= $statusClass ?>">Статус: <?= h($request['picker_status']) ?></span>
+                    <span class="<?= $statusClass ?>">Статус: <?= h(pickerStatusLabel((string)$request['picker_status'])) ?></span>
                     <?php if (isset($request['deal_rows_sync_status'])): ?>
                         <span class="status-cut" style="margin-left:6px;">
                             Синк строк: <?= h((string)$request['deal_rows_sync_status']) ?>
@@ -586,7 +641,7 @@ require __DIR__ . '/includes/header.php';
                                     <span class="status-sold" style="margin-left:6px;">ниже порога <?= round($minMargin, 2) ?>%</span>
                                 <?php endif; ?>
                             </td>
-                            <td><?= h($line['status']) ?></td>
+                            <td><?= h(pickerLineStatusLabel((string)$line['status'])) ?></td>
                         </tr>
                     <?php endforeach; ?>
                 </tbody>
@@ -742,13 +797,14 @@ require __DIR__ . '/includes/header.php';
             <form method="POST">
                 <input type="hidden" name="request_id" value="<?= $requestId ?>">
                 <div class="form-group">
-                    <label>Комментарий кладовщика / проблемы</label>
-                    <textarea name="problem_text" rows="3"><?= h($request['picker_problem_text']) ?></textarea>
+                    <label>Комментарий кладовщика / причина отклонения</label>
+                    <textarea name="problem_text" rows="3" placeholder="Например: не могу предоставить данный товар, предлагаю аналог..."><?= h($request['picker_problem_text']) ?></textarea>
                 </div>
                 <div style="display:flex; gap:8px; flex-wrap:wrap;">
-                    <button class="btn btn-light" type="submit" name="action" value="save_pick">Сохранить подбор</button>
+                    <button class="btn btn-light" type="submit" name="action" value="save_pick">Сохранить комментарий</button>
+                    <button class="btn btn-success" type="submit" name="action" value="approve_pick" onclick="return confirm('Отправить в Б24 триггер Одобрить?');">Одобрить</button>
+                    <button class="btn btn-warning" type="submit" name="action" value="reject_pick" onclick="return confirm('Отправить в Б24 триггер Отклонить?');">Отклонить</button>
                     <button class="btn btn-warning" type="submit" name="action" value="retry_deal_rows_sync">Повторить синк строк сделки</button>
-                    <button class="btn btn-success" type="submit" name="action" value="confirm_ship" onclick="return confirm('Подтвердить и отправить в Б24?');">Подтвердить и отправить в Б24</button>
                     <button class="btn btn-danger" type="submit" name="action" value="cancel_reserve" onclick="return confirm('Снять резерв по заявке? Сделка в Б24 не будет закрыта.');">Снять резерв</button>
                 </div>
             </form>

@@ -755,6 +755,10 @@ html[data-theme="dark"] .alert-info {
     .form-row {
         grid-template-columns: 1fr;
     }
+
+    .warehouse-orders-filter-row {
+        grid-template-columns: 1fr;
+    }
     
     .nav {
         justify-content: center;
@@ -1188,6 +1192,48 @@ body.products-compact .products-row-actions .btn {
     display: flex;
     align-items: center;
     gap: 10px;
+    flex-wrap: wrap;
+}
+
+.warehouse-orders-filter-form {
+    margin-top: 0.75rem;
+}
+
+.warehouse-orders-filter-row {
+    display: grid;
+    grid-template-columns: minmax(220px, 1.2fr) minmax(180px, 0.9fr) minmax(160px, 0.8fr) auto;
+    gap: 0.85rem;
+    align-items: end;
+}
+
+.warehouse-orders-filter-row .form-group {
+    margin-bottom: 0;
+}
+
+.warehouse-orders-filter-row label {
+    display: block;
+    margin-bottom: 0.35rem;
+    font-weight: 600;
+}
+
+.warehouse-orders-filter-row select,
+.warehouse-orders-filter-row input {
+    width: 100%;
+    min-height: 42px;
+    padding: 0.45rem 0.55rem;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--card-background);
+    color: var(--text-color);
+}
+
+.warehouse-orders-filter-row .btn {
+    min-width: 0;
+}
+
+.warehouse-orders-filter-actions {
+    display: flex;
+    gap: 0.45rem;
     flex-wrap: wrap;
 }
 

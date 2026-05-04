@@ -3,7 +3,7 @@
  * и восстанавливает один раз после загрузке (ключ sessionStorage по имени скрипта).
  *
  * Покрыто:
- * — любые <form method="get"> без class="fc-no-retain-scroll"
+ * — любые <form method="get|post"> без class="fc-no-retain-scroll"
  * — любые ссылки на тот же *.php что и страница, с GET-параметрами (?…), без класса fc-no-retain-scroll
  *
  * Принудительно (ссылки с другими правилами): class="fc-retain-scroll".
@@ -114,10 +114,6 @@
             function (ev) {
                 var f = ev.target;
                 if (!f || f.tagName !== 'FORM') {
-                    return;
-                }
-                var method = (f.getAttribute('method') || 'get').toLowerCase();
-                if (method !== 'get') {
                     return;
                 }
                 if (f.classList && f.classList.contains('fc-no-retain-scroll')) {
