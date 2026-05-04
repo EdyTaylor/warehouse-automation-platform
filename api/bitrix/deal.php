@@ -346,7 +346,9 @@ function queueDealForWarehouse($db, $data) {
             "request_id" => $requestId
         ];
     } catch (Exception $e) {
-        $db->rollBack();
+        if ($db->inTransaction()) {
+            $db->rollBack();
+        }
         return ["error" => $e->getMessage()];
     }
 }

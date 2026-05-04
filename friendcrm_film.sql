@@ -501,7 +501,7 @@ CREATE TABLE `sales` (
 --
 
 INSERT INTO `sales` (`id`, `product_id`, `type`, `quantity`, `price_per_unit`, `total`, `created_at`, `deal_id`, `deal_url`, `reserved`, `responsible`) VALUES
-(18, 2, '', 3, 8000, 24000, '2026-03-30 16:18:03', 101, 'https://friendcrm.beget.tech/test', 0, NULL),
+(18, 2, '', 3, 8000, 24000, '2026-03-30 16:18:03', 101, 'https://friendcrm.beget.tech/LLumar/test', 0, NULL),
 (19, 2, '', 2, 8000, 16000, '2026-03-30 16:45:36', 102, 'http://...', 0, 'Иван'),
 (20, 2, 'meter', 23, 8056, 185288, '2026-03-30 17:09:24', NULL, NULL, 0, NULL),
 (21, 2, 'meter', 34, 8056, 273904, '2026-03-30 18:33:12', NULL, NULL, 0, NULL),

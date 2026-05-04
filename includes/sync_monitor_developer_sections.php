@@ -340,7 +340,7 @@
             <?php if (empty($webhookRows)): ?>
                 <div class="alert alert-warning">
                     Записей пока нет. Проверьте:<br>
-                    • URL вебхука в Битрикс24 точно <code>http(s)://ваш-хост/api/webhook.php</code> и включены события <code>ONCRMDEALADD</code> / <code>ONCRMDEALUPDATE</code>.<br>
+                    • URL вебхука в Битрикс24 точно <code>https://friendcrm.beget.tech/LLumar/api/webhook.php</code> и включены события <code>ONCRMDEALADD</code> / <code>ONCRMDEALUPDATE</code>.<br>
                     • JSON-диагностика БД без Битрикс: откройте <a href="api/webhook_ping.php" target="_blank" rel="noopener"><code>api/webhook_ping.php</code></a> — должен быть <code>webhook_log_rows</code> и при необходимости тестовая строка: <code>api/webhook_ping.php?write=1&amp;k=CHANGE_ME_FRIENDCRM_DIAG</code> (ключ задаётся в <code>api/webhook_ping.php</code>).<br>
                     • Если ping показывает строки, а после сделки их нет — до сайта из облака Б24 не добираются запросы (URL, HTTPS, блокировки).
                 </div>

@@ -32,7 +32,7 @@
 
 Добавьте следующие URL в настройках Б24 для автоматической отправки событий:
 
-**Базовый URL вашего приложения:** `https://your-domain.com/api/webhook.php`
+**Базовый URL вашего приложения:** `https://friendcrm.beget.tech/LLumar/api/webhook.php`
 
 Обработчик `webhook.php` принимает тело события и в виде **JSON**, и как **`application/x-www-form-urlencoded`** (так часто работает типовой исходящий вебхук Bitrix24: `event=...&data[FIELDS][ID]=...`).
 
@@ -40,19 +40,19 @@
 
 1. **Новая сделка:**
    - Событие: `ONCRMDEALADD`
-   - Обработчик: `https://your-domain.com/api/webhook.php`
+   - Обработчик: `https://friendcrm.beget.tech/LLumar/api/webhook.php`
 
 2. **Обновление сделки:**
    - Событие: `ONCRMDEALUPDATE` 
-   - Обработчик: `https://your-domain.com/api/webhook.php`
+   - Обработчик: `https://friendcrm.beget.tech/LLumar/api/webhook.php`
 
 3. **Новый товар:**
    - Событие: `ONCRMPRODUCTADD`
-   - Обработчик: `https://your-domain.com/api/webhook.php`
+   - Обработчик: `https://friendcrm.beget.tech/LLumar/api/webhook.php`
 
 4. **Обновление товара:**
    - Событие: `ONCRMPRODUCTUPDATE`
-   - Обработчик: `https://your-domain.com/api/webhook.php`
+   - Обработчик: `https://friendcrm.beget.tech/LLumar/api/webhook.php`
 
 ### Воронки CRM: когда создавать заявку на складе
 
@@ -94,7 +94,7 @@
 
 Таблица `webhook_log` создаётся и расширяется автоматически при первом запросе к `api/webhook.php` или при открытии страницы интеграции.
 
-**Если после создания сделки список пустой:** откройте `https://ваш-хост/api/webhook_ping.php` — должен вернуться JSON с `webhook_log_rows`. Если добавить тестовую строку: `webhook_ping.php?write=1&k=CHANGE_ME_FRIENDCRM_DIAG` (ключ смените в файле — см. комментарий в `webhook_ping.php`). Есть счётчик, но событий от Битрикс нет — проверьте URL исходящего вебхука на портале Б24 и что выбраны события по **сделкам** не только по товарам.
+**Если после создания сделки список пустой:** откройте `https://friendcrm.beget.tech/LLumar/api/webhook_ping.php` — должен вернуться JSON с `webhook_log_rows`. Если добавить тестовую строку: `webhook_ping.php?write=1&k=CHANGE_ME_FRIENDCRM_DIAG` (ключ смените в файле — см. комментарий в `webhook_ping.php`). Есть счётчик, но событий от Битрикс нет — проверьте URL исходящего вебхука на портале Б24 и что выбраны события по **сделкам** не только по товарам.
 
 ### Для кладовщика:
 
