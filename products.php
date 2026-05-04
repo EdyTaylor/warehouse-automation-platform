@@ -111,8 +111,24 @@ function normalizeDecimalInput($value) {
  * не затираем уже лежащее в БД значение.
  */
 function productsPricingPostDecimalIsBlank(array $postData, $field) {
-    $raw = isset($postData[$field]) ? $postData[$field] : '';
+    if (!isset($postData[$field])) {
+        return true;
+    }
+    $raw = $postData[$field];
+    if (is_array($raw)) {
+        return true;
+    }
     return normalizeDecimalInput($raw) === '';
+}
+
+/**
+ * Пустое числовое поле в POST для UPDATE строки каталога: в SQL используется COALESCE(?, колонка), bind = null — старое значение в таблице не затирается.
+ */
+function productsPricingBindNullIfBlankElseValue(array $postData, array $validationValues, $field, $fallbackIfMissing) {
+    if (productsPricingPostDecimalIsBlank($postData, $field)) {
+        return null;
+    }
+    return isset($validationValues[$field]) ? $validationValues[$field] : $fallbackIfMissing;
 }
 
 function parseDecimalField($value) {
@@ -1424,82 +1440,79 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'delivery_price' => isset($existingRow['delivery_price']) ? $existingRow['delivery_price'] : null,
         ) : null;
 
-        $rollMerged = isset($validation['values']['roll_length']) ? $validation['values']['roll_length'] : 0;
-        if ($existingRow && productsPricingPostDecimalIsBlank($_POST, 'roll_length') && array_key_exists('roll_length', $existingRow) && $existingRow['roll_length'] !== null && $existingRow['roll_length'] !== '') {
-            $rollMerged = floatval($existingRow['roll_length']);
+        $vals = $validation['values'];
+        $rollForCalc = isset($existingRow['roll_length']) ? floatval($existingRow['roll_length']) : 0;
+        if (!productsPricingPostDecimalIsBlank($_POST, 'roll_length')) {
+            $rollForCalc = isset($vals['roll_length']) ? floatval($vals['roll_length']) : 0;
+        }
+        $purchaseForCalc = isset($existingRow['purchase_price']) ? floatval($existingRow['purchase_price']) : 0;
+        if (!productsPricingPostDecimalIsBlank($_POST, 'purchase_price')) {
+            $purchaseForCalc = isset($vals['purchase_price']) ? floatval($vals['purchase_price']) : 0;
+        }
+        $deliveryForCalc = isset($existingRow['delivery_price']) ? floatval($existingRow['delivery_price']) : 0;
+        if (!productsPricingPostDecimalIsBlank($_POST, 'delivery_price')) {
+            $deliveryForCalc = isset($vals['delivery_price']) ? floatval($vals['delivery_price']) : 0;
         }
 
-        $purchaseMerged = isset($validation['values']['purchase_price']) ? $validation['values']['purchase_price'] : 0;
-        if ($existingRow && productsPricingPostDecimalIsBlank($_POST, 'purchase_price') && array_key_exists('purchase_price', $existingRow) && $existingRow['purchase_price'] !== null && $existingRow['purchase_price'] !== '') {
-            $purchaseMerged = floatval($existingRow['purchase_price']);
+        $bindRoll = productsPricingBindNullIfBlankElseValue($_POST, $vals, 'roll_length', 0);
+        $bindPur = productsPricingBindNullIfBlankElseValue($_POST, $vals, 'purchase_price', 0);
+        $bindDel = productsPricingBindNullIfBlankElseValue($_POST, $vals, 'delivery_price', 0);
+
+        $bindMeter = null;
+        if (!productsPricingPostDecimalIsBlank($_POST, 'price_per_meter')) {
+            $bindMeter = calculateMeterPriceFromRoll($rollForCalc, $deliveryForCalc, isset($vals['price_per_meter']) ? $vals['price_per_meter'] : 0);
         }
 
-        $deliveryMerged = isset($validation['values']['delivery_price']) ? $validation['values']['delivery_price'] : 0;
-        if ($existingRow && productsPricingPostDecimalIsBlank($_POST, 'delivery_price') && array_key_exists('delivery_price', $existingRow) && $existingRow['delivery_price'] !== null && $existingRow['delivery_price'] !== '') {
-            $deliveryMerged = floatval($existingRow['delivery_price']);
-        }
-
-        if ($existingRow && productsPricingPostDecimalIsBlank($_POST, 'purchase_delivered_per_meter') && array_key_exists('purchase_delivered_per_meter', $existingRow)) {
-            $purchaseDeliveredStored = $existingRow['purchase_delivered_per_meter'];
-        } else {
-            $purchaseDeliveredStored = resolveProductPurchaseDeliveredPerMeter(array(
-                'purchase_delivered_per_meter' => isset($validation['values']['purchase_delivered_per_meter']) ? $validation['values']['purchase_delivered_per_meter'] : 0,
-                'roll_length' => $rollMerged,
-                'delivery_price' => $deliveryMerged
+        $bindPmd = null;
+        if (!productsPricingPostDecimalIsBlank($_POST, 'purchase_delivered_per_meter')) {
+            $bindPmd = resolveProductPurchaseDeliveredPerMeter(array(
+                'purchase_delivered_per_meter' => isset($vals['purchase_delivered_per_meter']) ? $vals['purchase_delivered_per_meter'] : 0,
+                'roll_length' => $rollForCalc,
+                'delivery_price' => $deliveryForCalc
             ));
         }
 
-        if ($existingRow && productsPricingPostDecimalIsBlank($_POST, 'price_per_meter')) {
-            $calculatedMeterPrice = isset($existingRow['price_per_meter']) ? $existingRow['price_per_meter'] : null;
-        } else {
-            $calculatedMeterPrice = calculateMeterPriceFromRoll(
-                $rollMerged,
-                $deliveryMerged,
-                isset($validation['values']['price_per_meter']) ? $validation['values']['price_per_meter'] : 0
-            );
-        }
-
         $tierKeys = array('price_1_4', 'price_5_9', 'price_10_19', 'price_20_plus');
-        $tierMerged = array();
-        foreach ($tierKeys as $tk) {
-            if ($existingRow && productsPricingPostDecimalIsBlank($_POST, $tk) && array_key_exists($tk, $existingRow)) {
-                $tierMerged[$tk] = $existingRow[$tk];
-            } else {
-                $tierMerged[$tk] = isset($validation['values'][$tk]) ? $validation['values'][$tk] : null;
-            }
-        }
+        $bindT1 = productsPricingBindNullIfBlankElseValue($_POST, $vals, 'price_1_4', 0);
+        $bindT2 = productsPricingBindNullIfBlankElseValue($_POST, $vals, 'price_5_9', 0);
+        $bindT3 = productsPricingBindNullIfBlankElseValue($_POST, $vals, 'price_10_19', 0);
+        $bindT4 = productsPricingBindNullIfBlankElseValue($_POST, $vals, 'price_20_plus', 0);
+
+        $newMeterForLog = $bindMeter === null ? (isset($oldPriceValues['price_per_meter']) ? $oldPriceValues['price_per_meter'] : null) : $bindMeter;
+        $newPurForLog = $bindPur === null ? (isset($oldPriceValues['purchase_price']) ? $oldPriceValues['purchase_price'] : null) : $bindPur;
+        $newDelForLog = $bindDel === null ? (isset($oldPriceValues['delivery_price']) ? $oldPriceValues['delivery_price'] : null) : $bindDel;
 
         $newPriceValues = array(
-            'price_per_meter' => $calculatedMeterPrice,
-            'purchase_price' => $purchaseMerged,
-            'delivery_price' => $deliveryMerged
+            'price_per_meter' => $newMeterForLog,
+            'purchase_price' => $newPurForLog,
+            'delivery_price' => $newDelForLog
         );
         $stmt = $db->prepare("
             UPDATE products SET
                 name = ?,
-                roll_length = ?,
-                price_per_meter = ?,
-                purchase_price = ?,
-                delivery_price = ?,
-                purchase_delivered_per_meter = ?,
-                price_1_4 = ?,
-                price_5_9 = ?,
-                price_10_19 = ?,
-                price_20_plus = ?
+                roll_length = COALESCE(?, roll_length),
+                price_per_meter = COALESCE(?, price_per_meter),
+                purchase_price = COALESCE(?, purchase_price),
+                delivery_price = COALESCE(?, delivery_price),
+                purchase_delivered_per_meter = COALESCE(?, purchase_delivered_per_meter),
+                price_1_4 = COALESCE(?, price_1_4),
+                price_5_9 = COALESCE(?, price_5_9),
+                price_10_19 = COALESCE(?, price_10_19),
+                price_20_plus = COALESCE(?, price_20_plus)
             WHERE id = ?
         ");
 
         $stmt->execute(array(
             $_POST['name'],
-            $rollMerged,
-            $calculatedMeterPrice,
-            $purchaseMerged,
-            $deliveryMerged,
-            $purchaseDeliveredStored,
-            $tierMerged['price_1_4'],
-            $tierMerged['price_5_9'],
-            $tierMerged['price_10_19'],
-            $tierMerged['price_20_plus'],
+            $bindRoll,
+            $bindMeter,
+            $bindPur,
+            $bindDel,
+            $bindPmd,
+            $bindT1,
+            $bindT2,
+            $bindT3,
+            $bindT4,
             $_POST['id']
         ));
         $historyResult = logProductPriceHistory(
