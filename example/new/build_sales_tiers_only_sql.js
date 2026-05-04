@@ -10,10 +10,17 @@
  *
  * Никогда не пишем = NULL.
  *
- * Usage: node build_sales_tiers_only_sql.js
+ * По умолчанию в SET только ступени price_1_4 … price_20_plus (цена за метр в приложении может идти
+ * из прихода/Б24 — не перетирать пачкой из Excel). Колонку price_per_meter добавить в импорт:
+ *   node build_sales_tiers_only_sql.js --with-meter
+ *
+ * Usage: node build_sales_tiers_only_sql.js [--with-meter]
  */
 var fs = require('fs');
 var path = require('path');
+
+var argv = process.argv.slice(2);
+var includePricePerMeter = argv.indexOf('--with-meter') >= 0;
 
 function parseTuple(line) {
   line = line.replace(/\)\s*[;,]\s*$/, ')'); // strip trailing ), or );
@@ -157,7 +164,7 @@ function parseFullImportUpdateLine(line) {
   };
 }
 
-function assignsFromFilledTiers(f14, f59, f1019, f20p, ppmRaw) {
+function assignsFromFilledTiers(f14, f59, f1019, f20p, ppmRaw, withMeter) {
   var assigns = [];
   if (f14 !== null) {
     assigns.push('`price_1_4` = ' + formatPriceNonNull(moneySql2(f14)));
@@ -171,7 +178,7 @@ function assignsFromFilledTiers(f14, f59, f1019, f20p, ppmRaw) {
   if (f20p !== null) {
     assigns.push('`price_20_plus` = ' + formatPriceNonNull(moneySql2(f20p)));
   }
-  if (!isNullishDumpPrice(ppmRaw)) {
+  if (withMeter && !isNullishDumpPrice(ppmRaw)) {
     var pn = parsePriceNum(ppmRaw);
     if (pn !== null) {
       assigns.push('`price_per_meter` = ' + formatPriceNonNull(moneySql2(pn)));
@@ -212,7 +219,8 @@ if (fs.existsSync(fullImportPath)) {
       fq[1],
       fq[2],
       fq[3],
-      row.price_per_meter
+      row.price_per_meter,
+      includePricePerMeter
     );
     recordUpdate(byId, row.id, assignsUsd);
   }
@@ -273,7 +281,8 @@ for (var li = 0; li < lines.length; li++) {
       fqDump[1],
       fqDump[2],
       fqDump[3],
-      priceMeter
+      priceMeter,
+      includePricePerMeter
     );
 
     recordUpdate(byId, dumpId, assignsDump);
@@ -286,12 +295,14 @@ var ids = Object.keys(byId).map(Number).sort(function (a, b) {
   return a - b;
 });
 var hdr =
-  '-- Продажа: закупку/доставку не меняем.\n' +
-  '-- Источник LLumar: products_full_import_prices_usd_x88.sql (node build_products_prices_usd_x88.js);' +
-  '\n-- пустые колонки J/K в прайсе → цена как у последней заданной ступени (хвост дополняется).' +
-  '\n-- Остальные id — из products.sql тем же правилом; = NULL не пишем.'
-  + '\n-- products.php при пустых полях в POST не стирает ступени уже в БД.'
-  + '\n-- Regenerate: node example/new/build_sales_tiers_only_sql.js'
+  '-- Продажа (только рулоны): закупку, доставку, purchase_delivered_per_meter не трогаем.\n' +
+  '-- По умолчанию обновляются только price_1_4 … price_20_plus (цена за метр — отдельно в приложении/приходе).\n' +
+  '-- Чтобы включить price_per_meter из LLumar как раньше: node build_sales_tiers_only_sql.js --with-meter\n' +
+  '-- Источник LLumar: products_full_import_prices_usd_x88.sql (node build_products_prices_usd_x88.js);\n' +
+  '-- пустые J/K → хвост ступени как последняя заданная колонка H–K.\n' +
+  '-- Остальные id — из products.sql; = NULL не пишем.\n'
+  + '-- products.php: пустой POST числовых полей не перезаписывает значение через COALESCE(?, column).\n'
+  + '-- Regenerate: node example/new/build_sales_tiers_only_sql.js [--with-meter]'
   + '\n-- Rows: ' + ids.length + ' UPDATE statements.'
   + '\n-- Generated: ' + new Date().toISOString()
   + '\n\nSET NAMES utf8mb4;'
@@ -305,4 +316,9 @@ for (var j = 0; j < ids.length; j++) {
 
 var footer = '\nCOMMIT;\n';
 fs.writeFileSync(outPath, hdr + body.join('\n') + footer, 'utf8');
-console.log('Wrote ' + ids.length + ' UPDATEs to products_full_import_prices_sales_tiers_only_usd_x88.sql');
+console.log(
+  'Wrote ' +
+    ids.length +
+    ' UPDATEs to products_full_import_prices_sales_tiers_only_usd_x88.sql' +
+    (includePricePerMeter ? ' (with price_per_meter)' : ' (tiers only, no price_per_meter)')
+);
