@@ -78,13 +78,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             if ($deferMinLines < 1) {
                 $deferMinLines = 2;
             }
-            /**
-             * «Повторить» (portal_by_number_only): всегда полный синк в этом HTTP-запросе — создание/дозапись строк
-             * и catalog.document.conduct сразу, без фонового воркера (ожидание очереди мешает «сразу проведён»).
-             * «Дофиксировать» (full) по-прежнему может уйти в фон при большом числе строк.
-             */
+            /** Приход при «Повторить»/«Дофиксировать» — в фон (api/stock_operation_b24_worker.php), чтобы nginx не отдавал 504 на длинном синке. */
             $isReceiptDefer = ($retryStrategy !== 'conduct_only')
-                && $retryStrategy !== 'portal_by_number_only'
                 && $deferEnabled
                 && (string)$doc['operation_type'] === 'receipt'
                 && count($lineRows) >= $deferMinLines;
@@ -636,7 +631,7 @@ require 'includes/header.php';
                                         <input type="hidden" name="form_token" value="<?= htmlspecialchars($retryToken) ?>">
                                         <input type="hidden" name="doc_id" value="<?= intval($d['id']) ?>">
                                         <button type="submit" name="retry_strategy" value="full" class="btn btn-warning btn-sm" title="Дозаписать недостающие строки в уже известном/найденном по номеру документе Б24 и провести его (полный проход строк + conduct).">Дофиксировать</button>
-                                        <button type="submit" name="retry_strategy" value="portal_by_number_only" class="btn btn-outline btn-sm" title="Приход только по активному номеру в Б24 (без привязки к устаревшему id из базы): строки SKU и проведение выполняются в этом запросе, не через фон. При необходимости после этого нажмите «Дофиксировать».">Повторить</button>
+                                        <button type="submit" name="retry_strategy" value="portal_by_number_only" class="btn btn-outline btn-sm" title="Актуальный документ в Б24 по номеру (или создание нового прихода); большие приходы уходят в фон — без 504.">Повторить</button>
                                         <button type="submit" name="retry_strategy" value="conduct_only" class="btn btn-primary btn-sm" title="Только проведение (conduct) уже созданного документа со строками. Строки не добавляет — если они не добавлены, нажмите «Дофиксировать».">Провести документ</button>
                                     </form>
                                 <?php else: ?>

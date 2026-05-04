@@ -1393,7 +1393,7 @@ function stockB24ConductBulkRepairInvalidProductTypes(PDO $db, $b24DocId, $docTy
         $hintNm = ($localProd && isset($localProd['name'])) ? (string)$localProd['name'] : '';
 
         /** Родитель торгового каталога → SKU из того же дерева без новых crm.product */
-        if (trim((string)getAppSetting($db, 'stock_b24_resolve_catalog_type3_parents', '1')) !== '0') {
+        if (trim((string)getAppSetting($db, 'stock_b24_resolve_catalog_type3_parents', '0')) !== '0') {
             $offerId = stockOperationsResolveB24CatalogParentToOfferSku($db, $locId, $invalidBid, $hintNm);
             if ($offerId > 0 && intval($offerId) !== intval($invalidBid)) {
                 if (replaceInvalidElementInB24Document($db, $b24DocId, $invalidBid, intval($offerId), $docType)) {
@@ -1618,7 +1618,7 @@ function stockB24RepairAllLineCatalogProductTypesForDocument(PDO $db, $b24DocId,
     }
 
     $dt = strtolower(trim((string)$docType));
-    if (trim((string)getAppSetting($db, 'stock_b24_preconduct_replace_parent_catalog_ids', '1')) === '1'
+    if (trim((string)getAppSetting($db, 'stock_b24_preconduct_replace_parent_catalog_ids', '0')) === '1'
         && ($dt === 'receipt' || $dt === 'writeoff')
     ) {
         foreach (array_keys($uniqIds) as $eidPre) {
@@ -1981,7 +1981,7 @@ function stockOperationsBitrixCatalogParentWithOffersTypeValue(PDO $db) {
 /**
  * Если b24_catalog_id указывает на родителя type=3 без пригодности в СУ строкой — найти SKU и перепривязать products.b24_product_id.
  *
- * Выключить: app_settings stock_b24_resolve_catalog_type3_parents = 0
+ * По умолчанию выкл.: приход из простых позиций каталога (type 1). Включить подбор оффера вместо родителя: app_settings stock_b24_resolve_catalog_type3_parents = 1
  *
  * @param PDO $db
  * @param int $localProductId 0 если обновление локальной строки каталога не нужно (только узнать id для документа)
@@ -1994,7 +1994,7 @@ function stockOperationsResolveB24CatalogParentToOfferSku($db, $localProductId, 
     if ($idIn <= 0) {
         return 0;
     }
-    if (trim((string)getAppSetting($db, 'stock_b24_resolve_catalog_type3_parents', '1')) === '0') {
+    if (trim((string)getAppSetting($db, 'stock_b24_resolve_catalog_type3_parents', '0')) === '0') {
         return $idIn;
     }
 
@@ -2076,7 +2076,7 @@ function ensureUsableB24ProductId($db, $localProductId, $b24ProductId, $productN
         return 0;
     }
 
-    if (trim((string)getAppSetting($db, 'stock_b24_resolve_catalog_type3_parents', '1')) !== '0') {
+    if (trim((string)getAppSetting($db, 'stock_b24_resolve_catalog_type3_parents', '0')) !== '0') {
         $mapped = stockOperationsResolveB24CatalogParentToOfferSku(
             $db,
             intval($localProductId),
@@ -3390,7 +3390,7 @@ function ensureProductInBitrix($db, $product, $pricePerMeter) {
     }
 
     if ($b24ProductId > 0) {
-        if (trim((string)getAppSetting($db, 'stock_b24_resolve_catalog_type3_parents', '1')) !== '0') {
+        if (trim((string)getAppSetting($db, 'stock_b24_resolve_catalog_type3_parents', '0')) !== '0') {
             $resolvedSku = stockOperationsResolveB24CatalogParentToOfferSku($db, $productId, $b24ProductId, $productNameTrim);
             if ($resolvedSku > 0) {
                 $b24ProductId = intval($resolvedSku);
