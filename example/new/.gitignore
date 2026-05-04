@@ -3,6 +3,7 @@ bulk_receipt_from_llumar.generated.json
 bulk_receipt_from_llumar.kgs.snapshot.json
 bulk_receipt_from_llumar.run_result.json
 products_full_import_prices_usd_x88.sql
+products_import_retail_price_per_meter_kgs_x88.sql
 products_prices_usd_x88_updates.sql
 products_prices_usd_x88_review.csv
 products_usd_x88_comparison_for_feedback.csv

@@ -12,17 +12,27 @@
  *
  * Если JSON уже есть без имён — подставить product_name только из локального dump products.sql в этой же папке:
  *   node example/new/build_products_prices_usd_x88.js --bulk-receipt-enrich-names
+ *
+ * Дополнительно всегда пишется products_import_retail_price_per_meter_kgs_x88.sql —
+ * только UPDATE price_per_meter (колонка G в LLumar: USD за метр × 88 → сомы).
+ * Нужны products.sql и LLumar.xlsx в example/new/ (или уже распакованная папка llumar_xlsx/).
  */
 var fs = require('fs');
 var path = require('path');
+var child_process = require('child_process');
 
 var ROOT = __dirname;
 var RATE_KGS_PER_USD = 88;
+var LLUMAR_XLSX = path.join(ROOT, 'LLumar.xlsx');
 var SHEET_PATH = path.join(ROOT, 'llumar_xlsx', 'xl', 'worksheets', 'sheet1.xml');
 var SST_PATH = path.join(ROOT, 'llumar_xlsx', 'xl', 'sharedStrings.xml');
 var PRODUCTS_SQL = path.join(ROOT, 'products.sql');
 var OUT_SQL = path.join(ROOT, 'products_prices_usd_x88_updates.sql');
 var OUT_FULL_IMPORT_SQL = path.join(ROOT, 'products_full_import_prices_usd_x88.sql');
+var OUT_RETAIL_METER_KGS_SQL = path.join(
+  ROOT,
+  'products_import_retail_price_per_meter_kgs_x88.sql'
+);
 var OUT_REVIEW_CSV = path.join(ROOT, 'products_prices_usd_x88_review.csv');
 var OUT_COMPARE_CSV = path.join(
   ROOT,
@@ -48,6 +58,71 @@ var HIGH_SCORE = 0.88;
 var AMBIGUOUS_GAP = 0.032;
 /** Show in CSV as "weak candidate" when best score in (WEAK_FLOOR, MIN_SCORE_UPDATE) */
 var WEAK_FLOOR = 0.5;
+
+/**
+ * Нужны xl/worksheets/sheet1.xml и sharedStrings.xml. Если папки нет — распаковать LLumar.xlsx в llumar_xlsx/.
+ */
+function ensureLlumarWorkbookExtracted() {
+  if (fs.existsSync(SHEET_PATH) && fs.existsSync(SST_PATH)) {
+    return true;
+  }
+  if (!fs.existsSync(LLUMAR_XLSX)) {
+    console.error(
+      'Не найден ни LLumar.xlsx, ни распакованный llumar_xlsx/. Положите LLumar.xlsx в example/new/'
+    );
+    return false;
+  }
+  var outDir = path.join(ROOT, 'llumar_xlsx');
+  if (fs.existsSync(outDir)) {
+    try {
+      fs.rmSync(outDir, { recursive: true, force: true });
+    } catch (rmErr) {
+      console.error('Не удалось очистить llumar_xlsx:', rmErr.message);
+      return false;
+    }
+  }
+  fs.mkdirSync(outDir, { recursive: true });
+  var zipPath = LLUMAR_XLSX;
+  try {
+    child_process.execSync(
+      'tar -xf "' + zipPath.replace(/"/g, '\\"') + '" -C "' + outDir.replace(/"/g, '\\"') + '"',
+      { stdio: 'pipe', cwd: ROOT }
+    );
+  } catch (tarErr) {
+    try {
+      if (process.platform === 'win32') {
+        var tmpZip = path.join(outDir, '_llumar_unpack.zip');
+        fs.copyFileSync(zipPath, tmpZip);
+        var psCmd =
+          'Expand-Archive -LiteralPath ' +
+          JSON.stringify(tmpZip) +
+          ' -DestinationPath ' +
+          JSON.stringify(outDir) +
+          ' -Force';
+        child_process.execFileSync(
+          'powershell',
+          ['-NoProfile', '-Command', psCmd],
+          { stdio: 'inherit', cwd: ROOT }
+        );
+        try {
+          fs.unlinkSync(tmpZip);
+        } catch (u) {}
+      } else {
+        child_process.execSync('unzip -o -qq "' + zipPath + '" -d "' + outDir + '"', {
+          stdio: 'inherit',
+          cwd: ROOT
+        });
+      }
+    } catch (e2) {
+      console.error(
+        'Не удалось распаковать LLumar.xlsx (tar/unzip/powershell). Распакуйте вручную в example/new/llumar_xlsx/'
+      );
+      console.error(String(e2.message || e2));
+      return false;
+    }
+  }
+  return fs.existsSync(SHEET_PATH) && fs.existsSync(SST_PATH);
+}
 
 function decodeXmlEntities(s) {
   return String(s || '')
@@ -726,11 +801,7 @@ function runBulkReceiptEnrichNamesFromProductsSql() {
 }
 
 function runBulkReceiptFromLlumar() {
-  if (!fs.existsSync(SHEET_PATH) || !fs.existsSync(SST_PATH)) {
-    console.error(
-      'Missing unpacked xlsx. Unzip LLumar.xlsx into:',
-      path.join(ROOT, 'llumar_xlsx')
-    );
+  if (!ensureLlumarWorkbookExtracted()) {
     process.exit(1);
   }
 
@@ -944,12 +1015,59 @@ function runBulkReceiptFromLlumar() {
   );
 }
 
-function main() {
-  if (!fs.existsSync(SHEET_PATH) || !fs.existsSync(SST_PATH)) {
-    console.error(
-      'Missing unpacked xlsx. Unzip LLumar.xlsx into:',
-      path.join(ROOT, 'llumar_xlsx')
+function writeRetailMeterKgsSqlFile(importRows) {
+  var lines = [];
+  var n = 0;
+  var i;
+  for (i = 0; i < importRows.length; i++) {
+    var rec = importRows[i];
+    var um = rec.usdMeter;
+    if (typeof um !== 'number' || isNaN(um) || um <= 0) {
+      continue;
+    }
+    var kgs = kgsMoney(um);
+    if (kgs === null || kgs === undefined || isNaN(kgs)) {
+      continue;
+    }
+    n++;
+    lines.push(
+      '-- id=' +
+        intId(rec.id) +
+        ' ' +
+        rec.tier +
+        ' score=' +
+        rec.score.toFixed(3) +
+        ' | G_usd_per_m=' +
+        um
     );
+    lines.push(
+      'UPDATE `products` SET `price_per_meter` = \'' +
+        kgs.toFixed(2) +
+        '\' WHERE `id` = ' +
+        intId(rec.id) +
+        ';'
+    );
+  }
+  var hdr = [];
+  hdr.push(
+    '-- Розничная цена за метр (сомы): LLumar.xlsx колонка G (USD за метр) × ' +
+      RATE_KGS_PER_USD
+  );
+  hdr.push(
+    '-- Матчинг: имя в БД (products.sql) ↔ колонки B/C прайса; только те же id, что в products_full_import_prices_usd_x88.sql (HIGH + MARGINAL).'
+  );
+  hdr.push('-- Если в строке Excel нет числа в G — UPDATE для этого id здесь не создаётся.');
+  hdr.push('-- UPDATE с ценой за метр: ' + n + ' из ' + importRows.length + ' сопоставленных id.');
+  hdr.push('');
+  hdr.push('SET NAMES utf8mb4;');
+  hdr.push('START TRANSACTION;');
+  hdr.push('');
+  var out = hdr.join('\r\n') + '\r\n' + lines.join('\r\n') + '\r\n\r\nCOMMIT;\r\n';
+  fs.writeFileSync(OUT_RETAIL_METER_KGS_SQL, out, 'utf8');
+}
+
+function main() {
+  if (!ensureLlumarWorkbookExtracted()) {
     process.exit(1);
   }
 
@@ -1267,7 +1385,8 @@ function main() {
         ups: ups,
         eb: top.row.b || '',
         ec: top.row.c || '',
-        tier: 'HIGH'
+        tier: 'HIGH',
+        usdMeter: top.row.usdMeter
       });
 
       cmpRows.push({
@@ -1298,7 +1417,8 @@ function main() {
         ups: ups,
         eb: top.row.b || '',
         ec: top.row.c || '',
-        tier: 'MARGINAL'
+        tier: 'MARGINAL',
+        usdMeter: top.row.usdMeter
       });
 
       csvLines.push(
@@ -1419,6 +1539,8 @@ function main() {
   fullBodies.push('COMMIT;');
   fs.writeFileSync(OUT_FULL_IMPORT_SQL, fullHeader.join('\r\n') + '\r\n' + fullBodies.join('\r\n') + '\r\n', 'utf8');
 
+  writeRetailMeterKgsSqlFile(importRows);
+
   /** Сравнение для обратной связи */
   var cm = [];
   cm.push(
@@ -1466,6 +1588,7 @@ function main() {
 
   console.log('Written:', OUT_SQL);
   console.log('Written:', OUT_FULL_IMPORT_SQL);
+  console.log('Written:', OUT_RETAIL_METER_KGS_SQL);
   console.log('Written:', OUT_REVIEW_CSV);
   console.log('Written:', OUT_COMPARE_CSV);
   console.log('Written:', OUT_EXCEL_NOT_IN_DB_CSV);
