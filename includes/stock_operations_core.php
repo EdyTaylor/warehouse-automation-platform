@@ -482,6 +482,53 @@ function pauseBetweenB24DocumentLineAdds($db) {
     }
 }
 
+/**
+ * Подстроить складской docId в Битрикс24 перед/после element.add:
+ * сохранён в приложении черновик удалили, по тому же docNumber появился новый — продолжаем в него.
+ * Проведённые документы не трогаем (в них добавление строки обычно запрещено).
+ *
+ * @param PDO $db
+ * @param string $docNumber
+ * @param string $docType receipt|writeoff
+ * @param int $b24DocId
+ * @param string $why start_missing — в начале addLines/sync; transient — после ошибки «документ не найден»
+ * @return bool true если docId изменён
+ */
+function stockOperationsRealignB24DocumentIdForLineSync(PDO $db, $docNumber, $docType, &$b24DocId, $why = 'start_missing') {
+    $dn = trim((string)$docNumber);
+    if ($dn === '') {
+        return false;
+    }
+    $cur = intval($b24DocId);
+    $portalId = intval(stockOperationsFindB24DocumentIdByDocNumber($db, $dn, $docType));
+    if ($portalId <= 0 || $portalId === $cur) {
+        return false;
+    }
+    if (isB24DocumentConducted($portalId)) {
+        return false;
+    }
+    if (bitrixCatalogDocumentPresenceById($portalId)['kind'] !== 'exists') {
+        return false;
+    }
+    $curKind = ($cur > 0) ? bitrixCatalogDocumentPresenceById($cur)['kind'] : 'missing';
+    $adopt = false;
+    $whyTrim = strtolower(trim((string)$why));
+    if ($whyTrim === 'start_missing') {
+        if ($cur <= 0 || $curKind === 'missing') {
+            $adopt = true;
+        }
+    } elseif ($whyTrim === 'transient') {
+        if ($cur <= 0 || $curKind === 'missing') {
+            $adopt = true;
+        }
+    }
+    if (!$adopt) {
+        return false;
+    }
+    $b24DocId = $portalId;
+    return true;
+}
+
 function bitrixDocumentElementAddLooksTransient($resp) {
     if (!is_array($resp) || !isset($resp['error'])) {
         return false;
@@ -2311,7 +2358,15 @@ function syncOperationDocumentToBitrix($db, $docId, $docType, $docNumber, $comme
         ensureDocumentSupplierForReceipt($b24DocId, $supplierName);
     }
 
+    $__syncHdr = intval($b24DocId);
+    stockOperationsRealignB24DocumentIdForLineSync($db, trim((string)$docNumber), (string)$docType, $__syncHdr, 'start_missing');
+    $b24DocId = $__syncHdr;
+    if ($docType === 'receipt') {
+        ensureDocumentSupplierForReceipt(intval($b24DocId), $supplierName);
+    }
+
     $lineResponses = array();
+    $dnSyncLines = trim((string)$docNumber);
     foreach ($lineRows as $line) {
         $localProductId = intval(isset($line['product_id']) ? $line['product_id'] : 0);
         if ($localProductId <= 0) {
@@ -2394,7 +2449,31 @@ function syncOperationDocumentToBitrix($db, $docId, $docType, $docNumber, $comme
             $elementFields['PURCHASING_CURRENCY'] = $currency;
         }
 
-        $addResult = bitrixAppendDocumentLineWithPricingFallbackAndRetry($db, $elementFields);
+        $addResult = array('ok' => false);
+        $relSyncOnce = false;
+        for ($elAtt2 = 0; $elAtt2 < 2; $elAtt2++) {
+            $__w2 = intval($b24DocId);
+            $elementFields['docId'] = $__w2;
+            $addResult = bitrixAppendDocumentLineWithPricingFallbackAndRetry($db, $elementFields);
+            if (!empty($addResult['ok'])) {
+                $b24DocId = $__w2;
+                break;
+            }
+            $tr2 = bitrixDocumentElementAddLooksTransient(isset($addResult['lineResp']) ? $addResult['lineResp'] : null)
+                || bitrixDocumentElementAddLooksTransient(isset($addResult['fallbackResp']) ? $addResult['fallbackResp'] : null);
+            if ($tr2 && $dnSyncLines !== '' && !$relSyncOnce) {
+                if (stockOperationsRealignB24DocumentIdForLineSync($db, $dnSyncLines, (string)$docType, $__w2, 'transient')) {
+                    $b24DocId = $__w2;
+                    $relSyncOnce = true;
+                    if ($docType === 'receipt') {
+                        ensureDocumentSupplierForReceipt(intval($b24DocId), $supplierName);
+                    }
+                    continue;
+                }
+            }
+            $b24DocId = $__w2;
+            break;
+        }
         if (empty($addResult['ok'])) {
             $lineResponses[] = array(
                 'product_id' => $localProductId,
@@ -2525,12 +2604,22 @@ function conductExistingB24Document($b24DocId, $docType, $supplierName) {
     return conductAndEnsurePosted(getDB(), $b24DocId, $docType, $supplierName);
 }
 
-function addLinesAndConductExistingB24Document($db, $b24DocId, $docType, $lineRows, $supplierName) {
+function addLinesAndConductExistingB24Document($db, $b24DocId, $docType, $lineRows, $supplierName, $docNumberForB24 = '') {
     $storeFrom = intval(getAppSetting($db, 'default_store_from_id', '1'));
     $storeTo = intval(getAppSetting($db, 'default_store_to_id', '1'));
     $currency = (string)getAppSetting($db, 'default_currency', 'KGS');
 
     $lineRows = stockOperationsMergeLineRowsPerB24CatalogId($db, is_array($lineRows) ? $lineRows : array());
+
+    $__b24Work = intval($b24DocId);
+    stockOperationsRealignB24DocumentIdForLineSync(
+        $db,
+        isset($docNumberForB24) ? trim((string)$docNumberForB24) : '',
+        (string)$docType,
+        $__b24Work,
+        'start_missing'
+    );
+    $b24DocId = $__b24Work;
 
     if ($docType === 'receipt') {
         ensureDocumentSupplierForReceipt(intval($b24DocId), $supplierName);
@@ -2637,7 +2726,35 @@ function addLinesAndConductExistingB24Document($db, $b24DocId, $docType, $lineRo
             $elementFields['PURCHASING_CURRENCY'] = $currency;
         }
 
-        $addResult = bitrixAppendDocumentLineWithPricingFallbackAndRetry($db, $elementFields);
+        $dnForRel = isset($docNumberForB24) ? trim((string)$docNumberForB24) : '';
+        $addResult = array('ok' => false);
+        $relinedOnce = false;
+        for ($elAttempt = 0; $elAttempt < 2; $elAttempt++) {
+            $__b24Work = intval($b24DocId);
+            $elementFields['docId'] = $__b24Work;
+            $addResult = bitrixAppendDocumentLineWithPricingFallbackAndRetry($db, $elementFields);
+            if (!empty($addResult['ok'])) {
+                $b24DocId = $__b24Work;
+                break;
+            }
+            $tr = bitrixDocumentElementAddLooksTransient(isset($addResult['lineResp']) ? $addResult['lineResp'] : null)
+                || bitrixDocumentElementAddLooksTransient(isset($addResult['fallbackResp']) ? $addResult['fallbackResp'] : null);
+            $refOk = false;
+            if ($tr && $dnForRel !== '' && !$relinedOnce) {
+                $refOk = stockOperationsRealignB24DocumentIdForLineSync($db, $dnForRel, (string)$docType, $__b24Work, 'transient');
+                if ($refOk) {
+                    $b24DocId = $__b24Work;
+                    $relinedOnce = true;
+                    if ($docType === 'receipt') {
+                        ensureDocumentSupplierForReceipt(intval($b24DocId), $supplierName);
+                    }
+                    $existingElements = fetchB24DocumentElementsMap($b24DocId);
+                    continue;
+                }
+            }
+            $b24DocId = $__b24Work;
+            break;
+        }
         if (empty($addResult['ok'])) {
             $lineResponses[] = array(
                 'product_id' => $localProductId,
@@ -2696,7 +2813,7 @@ function addLinesAndConductExistingB24Document($db, $b24DocId, $docType, $lineRo
     return $conductResult;
 }
 
-function tryFinalizePartialDocument($db, $operationType, $syncResult, $lineRows, $supplierName) {
+function tryFinalizePartialDocument($db, $operationType, $syncResult, $lineRows, $supplierName, $docNumberForB24 = '') {
     if (!is_array($syncResult)) {
         return $syncResult;
     }
@@ -2711,7 +2828,14 @@ function tryFinalizePartialDocument($db, $operationType, $syncResult, $lineRows,
     if ($stage === 'document.conduct') {
         $finalizeResult = conductAndEnsurePosted($db, $b24DocId, $operationType, $supplierName);
     } else {
-        $finalizeResult = addLinesAndConductExistingB24Document($db, $b24DocId, (string)$operationType, $lineRows, $supplierName);
+        $finalizeResult = addLinesAndConductExistingB24Document(
+            $db,
+            $b24DocId,
+            (string)$operationType,
+            $lineRows,
+            $supplierName,
+            (string)$docNumberForB24
+        );
     }
     if (is_array($finalizeResult)) {
         $finalizeResult['auto_finalize_attempted'] = true;
@@ -2988,7 +3112,8 @@ function stockOperationsExecuteB24SyncWithLines(PDO $db, array &$doc, array $lin
             $b24ResolvedId,
             (string)$doc['operation_type'],
             $lineRows,
-            isset($doc['supplier']) ? (string)$doc['supplier'] : ''
+            isset($doc['supplier']) ? (string)$doc['supplier'] : '',
+            isset($doc['doc_number']) ? (string)$doc['doc_number'] : ''
         );
     } else {
         $syncResult = syncOperationDocumentToBitrix(
@@ -3006,7 +3131,8 @@ function stockOperationsExecuteB24SyncWithLines(PDO $db, array &$doc, array $lin
         (string)$doc['operation_type'],
         $syncResult,
         $lineRows,
-        isset($doc['supplier']) ? (string)$doc['supplier'] : ''
+        isset($doc['supplier']) ? (string)$doc['supplier'] : '',
+        isset($doc['doc_number']) ? (string)$doc['doc_number'] : ''
     );
     if (is_array($syncResult)) {
         $syncResult['retry_strategy_requested'] = $retryStrategy;
@@ -4006,7 +4132,7 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
         }
 
         $syncResult = syncOperationDocumentToBitrix($db, $docId, 'receipt', $docNumber, $commentText, $lineRowsForSync, $supplier);
-        $syncResult = tryFinalizePartialDocument($db, 'receipt', $syncResult, $lineRowsForSync, $supplier);
+        $syncResult = tryFinalizePartialDocument($db, 'receipt', $syncResult, $lineRowsForSync, $supplier, $docNumber);
         $syncStatus = resolveB24SyncStatus($syncResult);
 
         $persistReceipt = stockOperationsEffectiveB24DocumentIdForPersist(array(), $syncResult);

@@ -315,7 +315,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         $db->commit();
         $lineRowsForSync = $db->query("SELECT product_id, product_name, qty_rolls, quantity_m, roll_length, price_per_roll, delivery_price_per_roll, line_total FROM stock_operation_lines WHERE doc_id=" . intval($docId))->fetchAll(PDO::FETCH_ASSOC);
         $syncResult = syncOperationDocumentToBitrix($db, $docId, 'writeoff', $docNumber, $commentText, $lineRowsForSync, '');
-        $syncResult = tryFinalizePartialDocument($db, 'writeoff', $syncResult, $lineRowsForSync, '');
+        $syncResult = tryFinalizePartialDocument($db, 'writeoff', $syncResult, $lineRowsForSync, '', $docNumber);
         $syncStatus = resolveB24SyncStatus($syncResult);
         $persistW = stockOperationsEffectiveB24DocumentIdForPersist(array(), $syncResult);
         $db->prepare("UPDATE stock_operation_docs SET b24_document_id = ?, b24_sync_status = ?, b24_sync_response = ? WHERE id = ?")
