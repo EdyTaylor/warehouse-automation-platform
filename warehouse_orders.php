@@ -74,7 +74,163 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'updated_at' => date('c')
             ));
 
-            if ($action === 'save_pick') {
+            if ($action === 'add_manual_cut') {
+                $lineId = intval(isset($_POST['line_id']) ? $_POST['line_id'] : 0);
+                $rollId = intval(isset($_POST['roll_id']) ? $_POST['roll_id'] : 0);
+                $meters = 0.0;
+                if (isset($_POST['quick_meters']) && floatval($_POST['quick_meters']) > 0) {
+                    $meters = floatval($_POST['quick_meters']);
+                } elseif (isset($_POST['meters'])) {
+                    $meters = floatval($_POST['meters']);
+                }
+
+                if ($lineId <= 0 || $rollId <= 0 || $meters <= 0) {
+                    $error = 'Неверные данные для добавления куска.';
+                } elseif (in_array((string)$request['status'], array('cancelled', 'completed'), true) || in_array((string)$request['picker_status'], array('cancelled', 'shipped'), true)) {
+                    $error = 'Заявка уже закрыта или отменена.';
+                } else {
+                    ensureOrderAllocationsTable($db);
+                    $db->beginTransaction();
+                    try {
+                        $lineStmt = $db->prepare("
+                            SELECT l.*, r.b24_deal_id
+                            FROM b24_sale_lines l
+                            JOIN b24_sale_requests r ON r.id = l.request_id
+                            WHERE l.id = ? AND l.request_id = ?
+                            FOR UPDATE
+                        ");
+                        $lineStmt->execute(array($lineId, $requestId));
+                        $line = $lineStmt->fetch(PDO::FETCH_ASSOC);
+                        if (!$line) {
+                            throw new Exception('Строка заявки не найдена.');
+                        }
+                        if ((string)$line['status'] === 'completed') {
+                            throw new Exception('Строка уже списана.');
+                        }
+
+                        $rollStmt = $db->prepare("SELECT * FROM rolls WHERE id = ? FOR UPDATE");
+                        $rollStmt->execute(array($rollId));
+                        $roll = $rollStmt->fetch(PDO::FETCH_ASSOC);
+                        if (!$roll) {
+                            throw new Exception('Рулон не найден.');
+                        }
+                        if (intval($line['product_id']) !== intval($roll['product_id'])) {
+                            throw new Exception('Выбран рулон другого товара.');
+                        }
+                        if (in_array((string)$roll['status'], array('sold', 'written_off', 'waste'), true) || floatval($roll['current_length']) <= 0) {
+                            throw new Exception('Этот рулон недоступен для подбора.');
+                        }
+
+                        $dealIdForLine = intval($line['b24_deal_id']);
+                        $sameDeal = intval($roll['reserved']) === 1 && intval($roll['deal_id']) === $dealIdForLine;
+                        if (intval($roll['reserved']) === 1 && !$sameDeal) {
+                            throw new Exception('Рулон уже зарезервирован под другую сделку.');
+                        }
+                        $available = $sameDeal
+                            ? (floatval($roll['current_length']) - floatval($roll['reserved_length']))
+                            : floatval($roll['current_length']);
+                        if ($meters > $available + 0.0001) {
+                            throw new Exception('Недостаточно доступных метров в выбранном рулоне.');
+                        }
+
+                        allocateRollToDeal($db, $dealIdForLine, $rollId, $meters);
+                        $price = floatval(isset($line['price_per_unit']) ? $line['price_per_unit'] : 0);
+                        $db->prepare("
+                            INSERT INTO order_allocations
+                            (sale_request_id, deal_id, product_id, roll_id, allocated_m, allocated_rolls, price_per_unit, line_total, source, created_at)
+                            VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'manual', NOW())
+                        ")->execute(array($requestId, $dealIdForLine, intval($line['product_id']), $rollId, $meters, $price, $meters * $price));
+                        $db->prepare("
+                            INSERT INTO b24_sale_line_cuts (line_id, roll_id, meters, created_at)
+                            VALUES (?, ?, ?, NOW())
+                        ")->execute(array($lineId, $rollId, $meters));
+                        $db->prepare("UPDATE b24_sale_lines SET status = 'in_progress' WHERE id = ? AND status = 'new'")
+                            ->execute(array($lineId));
+                        $db->prepare("
+                            UPDATE b24_sale_requests
+                            SET picker_status = IF(picker_status = 'new', 'picked', picker_status),
+                                picked_at = IFNULL(picked_at, NOW()),
+                                status = IF(status = 'new', 'in_progress', status),
+                                picker_meta_json = ?,
+                                updated_at = NOW()
+                            WHERE id = ?
+                        ")->execute(array($metaJson, $requestId));
+
+                        $db->commit();
+                        $message = 'Кусок добавлен в подбор.';
+                    } catch (Exception $e) {
+                        if ($db->inTransaction()) {
+                            $db->rollBack();
+                        }
+                        $error = $e->getMessage();
+                    }
+                }
+            } elseif ($action === 'remove_manual_cut') {
+                $cutId = intval(isset($_POST['cut_id']) ? $_POST['cut_id'] : 0);
+                if ($cutId <= 0) {
+                    $error = 'Некорректный cut_id.';
+                } elseif (in_array((string)$request['status'], array('cancelled', 'completed'), true) || in_array((string)$request['picker_status'], array('cancelled', 'shipped'), true)) {
+                    $error = 'Заявка уже закрыта или отменена.';
+                } else {
+                    ensureOrderAllocationsTable($db);
+                    $db->beginTransaction();
+                    try {
+                        $cutStmt = $db->prepare("
+                            SELECT c.*, l.product_id, l.request_id, l.status as line_status, r.b24_deal_id
+                            FROM b24_sale_line_cuts c
+                            JOIN b24_sale_lines l ON l.id = c.line_id
+                            JOIN b24_sale_requests r ON r.id = l.request_id
+                            WHERE c.id = ? AND l.request_id = ?
+                            FOR UPDATE
+                        ");
+                        $cutStmt->execute(array($cutId, $requestId));
+                        $cut = $cutStmt->fetch(PDO::FETCH_ASSOC);
+                        if (!$cut) {
+                            throw new Exception('Кусок не найден.');
+                        }
+                        if ((string)$cut['line_status'] === 'completed') {
+                            throw new Exception('Строка уже списана.');
+                        }
+
+                        releaseRollReservation($db, intval($cut['b24_deal_id']), intval($cut['roll_id']), floatval($cut['meters']));
+
+                        $allocStmt = $db->prepare("
+                            SELECT id
+                            FROM order_allocations
+                            WHERE sale_request_id = ?
+                              AND product_id = ?
+                              AND roll_id = ?
+                              AND ABS(allocated_m - ?) < 0.0001
+                            ORDER BY IF(source = 'manual', 0, 1), id DESC
+                            LIMIT 1
+                        ");
+                        $allocStmt->execute(array($requestId, intval($cut['product_id']), intval($cut['roll_id']), floatval($cut['meters'])));
+                        $alloc = $allocStmt->fetch(PDO::FETCH_ASSOC);
+                        if ($alloc) {
+                            $db->prepare("DELETE FROM order_allocations WHERE id = ?")->execute(array(intval($alloc['id'])));
+                        }
+                        $db->prepare("DELETE FROM b24_sale_line_cuts WHERE id = ?")->execute(array($cutId));
+
+                        $sumStmt = $db->prepare("SELECT COALESCE(SUM(meters), 0) as allocated_m FROM b24_sale_line_cuts WHERE line_id = ?");
+                        $sumStmt->execute(array(intval($cut['line_id'])));
+                        $sumRow = $sumStmt->fetch(PDO::FETCH_ASSOC);
+                        $allocatedAfter = floatval(isset($sumRow['allocated_m']) ? $sumRow['allocated_m'] : 0);
+                        $newLineStatus = $allocatedAfter > 0.0001 ? 'in_progress' : 'new';
+                        $db->prepare("UPDATE b24_sale_lines SET status = ? WHERE id = ? AND status != 'completed'")
+                            ->execute(array($newLineStatus, intval($cut['line_id'])));
+                        $db->prepare("UPDATE b24_sale_requests SET updated_at = NOW(), picker_meta_json = ? WHERE id = ?")
+                            ->execute(array($metaJson, $requestId));
+
+                        $db->commit();
+                        $message = 'Кусок убран из подбора.';
+                    } catch (Exception $e) {
+                        if ($db->inTransaction()) {
+                            $db->rollBack();
+                        }
+                        $error = $e->getMessage();
+                    }
+                }
+            } elseif ($action === 'save_pick') {
                 $db->prepare("
                     UPDATE b24_sale_requests
                     SET picker_status = 'picked',
@@ -437,6 +593,138 @@ require __DIR__ . '/includes/header.php';
                     <?php endforeach; ?>
                 </tbody>
             </table>
+
+            <h4>Ручной подбор рулонов</h4>
+            <div class="picker-lines">
+                <?php foreach ($lines as $line): ?>
+                    <?php
+                        $lineId = intval($line['id']);
+                        $lineProductId = intval(isset($line['product_id']) ? $line['product_id'] : 0);
+                        $needMeters = floatval($line['quantity_m']);
+                        $allocatedMeters = floatval($line['allocated_m']);
+                        $remainingMeters = max(0, $needMeters - $allocatedMeters);
+                        $lineComplete = (string)$line['status'] === 'completed';
+                        $requestClosed = in_array((string)$request['status'], array('cancelled', 'completed'), true)
+                            || in_array((string)$request['picker_status'], array('cancelled', 'shipped'), true);
+                        $canEditPick = !$lineComplete && !$requestClosed && $lineProductId > 0;
+
+                        $rollStmt = $db->prepare("
+                            SELECT *
+                            FROM rolls
+                            WHERE product_id = ?
+                              AND current_length > 0
+                              AND status NOT IN ('sold','written_off','waste')
+                              AND (
+                                    reserved = 0
+                                    OR (reserved = 1 AND deal_id = ?)
+                              )
+                            ORDER BY current_length ASC, id ASC
+                        ");
+                        $rollStmt->execute(array($lineProductId, $dealId));
+                        $lineRolls = $rollStmt->fetchAll(PDO::FETCH_ASSOC);
+
+                        $cutsStmt = $db->prepare("
+                            SELECT c.*, r.current_length, r.status as roll_status
+                            FROM b24_sale_line_cuts c
+                            LEFT JOIN rolls r ON r.id = c.roll_id
+                            WHERE c.line_id = ?
+                            ORDER BY c.id DESC
+                        ");
+                        $cutsStmt->execute(array($lineId));
+                        $cuts = $cutsStmt->fetchAll(PDO::FETCH_ASSOC);
+                        $quickMeters = array(0.4, 2, 5, 10, 15, 30);
+                    ?>
+                    <details class="picker-line-panel" <?= !$lineComplete ? 'open' : '' ?>>
+                        <summary class="picker-line-summary">
+                            <span class="picker-line-name"><?= h($line['product_name']) ?></span>
+                            <span>нужно <?= round($needMeters, 2) ?> м</span>
+                            <span>собрано <?= round($allocatedMeters, 2) ?> м</span>
+                            <span class="<?= $remainingMeters > 0.001 ? 'status-sold' : 'status-active' ?>">
+                                <?= $remainingMeters > 0.001 ? ('осталось ' . round($remainingMeters, 2) . ' м') : 'закрыто по метражу' ?>
+                            </span>
+                        </summary>
+
+                        <?php if (!empty($cuts)): ?>
+                            <div class="picker-selected-cuts">
+                                <div class="picker-subtitle">Уже выбрано</div>
+                                <div class="picker-cut-list">
+                                    <?php foreach ($cuts as $cut): ?>
+                                        <div class="picker-cut-chip">
+                                            <span>#<?= intval($cut['roll_id']) ?> · <?= round(floatval($cut['meters']), 2) ?> м</span>
+                                            <?php if ($canEditPick): ?>
+                                                <form method="POST" class="picker-inline-form">
+                                                    <input type="hidden" name="request_id" value="<?= $requestId ?>">
+                                                    <input type="hidden" name="action" value="remove_manual_cut">
+                                                    <input type="hidden" name="cut_id" value="<?= intval($cut['id']) ?>">
+                                                    <button type="submit" class="btn btn-danger btn-sm">Убрать</button>
+                                                </form>
+                                            <?php endif; ?>
+                                        </div>
+                                    <?php endforeach; ?>
+                                </div>
+                            </div>
+                        <?php endif; ?>
+
+                        <?php if ($canEditPick): ?>
+                            <?php if (empty($lineRolls)): ?>
+                                <div class="alert alert-warning">Нет доступных рулонов или обрезков этого товара.</div>
+                            <?php else: ?>
+                                <div class="picker-roll-grid">
+                                    <?php foreach ($lineRolls as $roll): ?>
+                                        <?php
+                                            $rollReserved = floatval(isset($roll['reserved_length']) ? $roll['reserved_length'] : 0);
+                                            $rollCurrent = floatval(isset($roll['current_length']) ? $roll['current_length'] : 0);
+                                            $sameDeal = intval($roll['reserved']) === 1 && intval($roll['deal_id']) === $dealId;
+                                            $availableMeters = $sameDeal ? ($rollCurrent - $rollReserved) : $rollCurrent;
+                                            $availableMeters = max(0, $availableMeters);
+                                            if ($availableMeters <= 0.0001) {
+                                                continue;
+                                            }
+                                            $suggestMeters = $remainingMeters > 0
+                                                ? min($remainingMeters, $availableMeters)
+                                                : min($availableMeters, $rollCurrent);
+                                        ?>
+                                        <div class="picker-roll-item">
+                                            <div class="picker-roll-head">
+                                                <strong>Рулон #<?= intval($roll['id']) ?></strong>
+                                                <span class="badge <?= $rollCurrent < floatval($roll['original_length']) ? 'badge-warning' : 'badge-success' ?>">
+                                                    <?= $rollCurrent < floatval($roll['original_length']) ? 'обрезок' : 'целый' ?>
+                                                </span>
+                                            </div>
+                                            <div class="picker-roll-meta">
+                                                <span>на рулоне <?= round($rollCurrent, 2) ?> м</span>
+                                                <span>доступно <?= round($availableMeters, 2) ?> м</span>
+                                                <?php if ($rollReserved > 0): ?>
+                                                    <span>резерв <?= round($rollReserved, 2) ?> м</span>
+                                                <?php endif; ?>
+                                            </div>
+                                            <form method="POST" class="picker-add-form">
+                                                <input type="hidden" name="request_id" value="<?= $requestId ?>">
+                                                <input type="hidden" name="action" value="add_manual_cut">
+                                                <input type="hidden" name="line_id" value="<?= $lineId ?>">
+                                                <input type="hidden" name="roll_id" value="<?= intval($roll['id']) ?>">
+                                                <div class="picker-meter-row">
+                                                    <input type="number" name="meters" min="0.1" max="<?= h(round($availableMeters, 2)) ?>" step="0.1" value="<?= h(round($suggestMeters, 2)) ?>">
+                                                    <button type="submit" class="btn btn-primary btn-sm">Добавить</button>
+                                                </div>
+                                                <div class="picker-quick-row">
+                                                    <?php foreach ($quickMeters as $quick): ?>
+                                                        <?php if ($availableMeters + 0.0001 >= $quick): ?>
+                                                            <button type="submit" name="quick_meters" value="<?= h($quick) ?>" class="btn btn-light btn-sm">+<?= h($quick) ?> м</button>
+                                                        <?php endif; ?>
+                                                    <?php endforeach; ?>
+                                                </div>
+                                            </form>
+                                        </div>
+                                    <?php endforeach; ?>
+                                </div>
+                            <?php endif; ?>
+                        <?php else: ?>
+                            <div class="text-muted">Подбор недоступен: заявка закрыта, отменена или строка уже списана.</div>
+                        <?php endif; ?>
+                    </details>
+                <?php endforeach; ?>
+            </div>
 
             <h4>Блок проблем</h4>
             <?php if (!empty($problems)): ?>

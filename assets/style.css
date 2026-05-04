@@ -1191,6 +1191,125 @@ body.products-compact .products-row-actions .btn {
     flex-wrap: wrap;
 }
 
+.picker-lines {
+    display: grid;
+    gap: 0.85rem;
+    margin: 0.8rem 0 1.2rem;
+}
+
+.picker-line-panel {
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--card-background);
+    padding: 0.85rem;
+}
+
+.picker-line-summary {
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    font-weight: 600;
+}
+
+.picker-line-name {
+    min-width: min(100%, 240px);
+    color: var(--primary-color);
+}
+
+html[data-theme="dark"] .picker-line-name {
+    color: var(--text-color);
+}
+
+.picker-selected-cuts {
+    margin-top: 0.8rem;
+}
+
+.picker-subtitle {
+    font-size: 0.9rem;
+    font-weight: 600;
+    margin-bottom: 0.45rem;
+}
+
+.picker-cut-list,
+.picker-quick-row {
+    display: flex;
+    gap: 0.45rem;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.picker-cut-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.35rem 0.45rem;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--light-color);
+}
+
+.picker-inline-form {
+    display: inline-flex;
+    margin: 0;
+}
+
+.picker-roll-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 0.75rem;
+    margin-top: 0.85rem;
+}
+
+.picker-roll-item {
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 0.75rem;
+    background: var(--card-background);
+}
+
+.picker-roll-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+}
+
+.picker-roll-meta {
+    display: grid;
+    gap: 0.2rem;
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    margin-bottom: 0.7rem;
+}
+
+.picker-add-form {
+    display: grid;
+    gap: 0.55rem;
+}
+
+.picker-meter-row {
+    display: grid;
+    grid-template-columns: minmax(86px, 1fr) auto;
+    gap: 0.45rem;
+}
+
+.picker-meter-row input {
+    min-width: 0;
+    padding: 0.48rem 0.55rem;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--card-background);
+    color: var(--text-color);
+}
+
+.picker-quick-row .btn {
+    min-width: 0;
+    padding: 0.34rem 0.56rem;
+}
+
 /* Центр интеграции: сворачиваемые секции */
 .integration-nav {
     display: flex;
