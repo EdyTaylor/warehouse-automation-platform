@@ -88,6 +88,10 @@ function normalizeNumber($value) {
     return $value === '' ? 0 : $value;
 }
 
+/**
+ * Оценка цены за метр из поля «с доставкой за рулон» ÷ метраж — ориентир закупочной нагрузки на метр.
+ * Не использовать для записи каталожной розницы (`price_per_meter`), если пользователь уже ввёл розницу.
+ */
 function calculateMeterPriceFromRoll($rollLength, $deliveryPrice, $fallbackMeterPrice) {
     $rollLength = floatval(normalizeNumber($rollLength));
     $deliveryPrice = floatval(normalizeNumber($deliveryPrice));
@@ -1460,7 +1464,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         $bindMeter = null;
         if (!productsPricingPostDecimalIsBlank($_POST, 'price_per_meter')) {
-            $bindMeter = calculateMeterPriceFromRoll($rollForCalc, $deliveryForCalc, isset($vals['price_per_meter']) ? $vals['price_per_meter'] : 0);
+            $bindMeter = floatval(isset($vals['price_per_meter']) ? $vals['price_per_meter'] : 0);
         }
 
         $bindPmd = null;
@@ -1529,11 +1533,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         header("Location: products.php?sync_msg=" . urlencode("Товар обновлен" . $syncTail . $historyTail));
         exit;
     } elseif ($action === 'save') {
-        $calculatedMeterPrice = calculateMeterPriceFromRoll(
-            isset($validation['values']['roll_length']) ? $validation['values']['roll_length'] : 0,
-            isset($validation['values']['delivery_price']) ? $validation['values']['delivery_price'] : 0,
-            isset($validation['values']['price_per_meter']) ? $validation['values']['price_per_meter'] : 0
-        );
+        $ppmInput = floatval(isset($validation['values']['price_per_meter']) ? $validation['values']['price_per_meter'] : 0);
+        $calculatedMeterPrice = $ppmInput > 0
+            ? $ppmInput
+            : calculateMeterPriceFromRoll(
+                isset($validation['values']['roll_length']) ? $validation['values']['roll_length'] : 0,
+                isset($validation['values']['delivery_price']) ? $validation['values']['delivery_price'] : 0,
+                0
+            );
         $purchaseDeliveredStored = resolveProductPurchaseDeliveredPerMeter(array(
             'purchase_delivered_per_meter' => isset($validation['values']['purchase_delivered_per_meter']) ? $validation['values']['purchase_delivered_per_meter'] : 0,
             'roll_length' => isset($validation['values']['roll_length']) ? $validation['values']['roll_length'] : 0,
