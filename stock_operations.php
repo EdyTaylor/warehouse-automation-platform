@@ -89,6 +89,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             /** true = выполнить HTTP-ping перед фоном; false = сразу background curl (мгновенный ответ UI) */
             $probeWorkerPing = trim((string)getAppSetting($db, 'stock_b24_retry_enqueue_skip_worker_ping', '1')) !== '1';
 
+            $workerSpawnBaseInfo = stockOperationsResolveWorkerPublicBase($db);
+
             if ($retryStrategy === 'conduct_only') {
                 if ($deferConductOk && stockOperationsDispatchB24WarehouseWorker($db, $docId, 'conduct_only', $probeWorkerPing)) {
                     $syncResult = array(
@@ -97,6 +99,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                         'b24_background_queued' => true,
                         'hint' => 'Фон.',
                         'retry_strategy_requested' => $retryStrategy,
+                        'worker_spawn_http_base' => $workerSpawnBaseInfo,
+                        'worker_spawn_path_note' => 'Фоновый curl бьёт в {base}/api/stock_operation_b24_worker.php — при сайте в подпапке base должен включать её (например …/LLumar). Иначе задайте app_settings stock_b24_worker_public_base_url.',
                     );
                     $syncStatus = resolveB24SyncStatus($syncResult);
                 } else {
@@ -119,6 +123,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                     'hint' => 'Фон.',
                     'retry_strategy_requested' => $retryStrategy,
                     'approx_line_rows' => count($lineRows),
+                    'worker_spawn_http_base' => $workerSpawnBaseInfo,
+                    'worker_spawn_path_note' => 'Фоновый curl бьёт в {base}/api/stock_operation_b24_worker.php — при сайте в подпапке base должен включать её (например …/LLumar). Иначе задайте app_settings stock_b24_worker_public_base_url.',
                 );
                 $syncStatus = resolveB24SyncStatus($syncResult);
             } else {

@@ -2917,10 +2917,7 @@ function stockOperationsProbeB24WorkerReachable(PDO $db) {
     if ($secret === '') {
         return false;
     }
-    $base = trim((string)getAppSetting($db, 'stock_b24_worker_public_base_url', ''));
-    if ($base === '') {
-        $base = stockOperationsGuessPublicSiteUrl();
-    }
+    $base = stockOperationsResolveWorkerPublicBase($db);
     if ($base === '') {
         return false;
     }
@@ -2985,6 +2982,48 @@ function stockOperationsGuessPublicSiteUrl() {
 }
 
 /**
+ * Подпапка на хостинге (/LLumar и т.п.): иначе spawn идёт на https://host/api/... без префикса и воркер молча не вызывается.
+ *
+ * @return string пусто или "/LLumar"
+ */
+function stockOperationsGuessPublicSitePathPrefix() {
+    if (empty($_SERVER['SCRIPT_NAME'])) {
+        return '';
+    }
+    $sn = str_replace('\\', '/', (string)$_SERVER['SCRIPT_NAME']);
+    if (!preg_match('#/(stock_operations\\.php|sync_monitor_developers\\.php|sync_monitor\\.php|dashboard\\.php|create_receipt_json\\.php|warehouse\\.php|warehouse_orders\\.php|index\\.php)$#i', $sn)) {
+        return '';
+    }
+    $dir = dirname($sn);
+    if ($dir === '/' || $dir === '.' || $dir === '\\') {
+        return '';
+    }
+    return rtrim($dir, '/');
+}
+
+/**
+ * База URL для вызова api/stock_operation_b24_worker.php из фонового curl (учёт подпапки).
+ *
+ * @param PDO $db
+ * @return string
+ */
+function stockOperationsResolveWorkerPublicBase(PDO $db) {
+    $explicit = trim((string)getAppSetting($db, 'stock_b24_worker_public_base_url', ''));
+    if ($explicit !== '') {
+        return rtrim($explicit, '/');
+    }
+    $host = stockOperationsGuessPublicSiteUrl();
+    if ($host === '') {
+        return '';
+    }
+    $pfx = stockOperationsGuessPublicSitePathPrefix();
+    if ($pfx !== '') {
+        return rtrim($host . $pfx, '/');
+    }
+    return rtrim($host, '/');
+}
+
+/**
  * Запуск фонового HTTP к api/stock_operation_b24_worker.php (обход таймаута прокси).
  *
  * @param PDO $db
@@ -3012,10 +3051,7 @@ function stockOperationsDispatchB24WarehouseWorker(PDO $db, $docId, $retryStrate
             $strategyParam = $rs;
         }
     }
-    $base = trim((string)getAppSetting($db, 'stock_b24_worker_public_base_url', ''));
-    if ($base === '') {
-        $base = stockOperationsGuessPublicSiteUrl();
-    }
+    $base = stockOperationsResolveWorkerPublicBase($db);
     if ($base === '') {
         return false;
     }
@@ -4104,6 +4140,8 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
                 'b24_background_queued' => true,
                 'hint' => 'Создание и проведение документа в Битрикс24 выполняется отдельным запросом, чтобы nginx не вернул 504.',
                 'approx_line_rows' => $cntDeferLines,
+                'worker_spawn_http_base' => stockOperationsResolveWorkerPublicBase($db),
+                'worker_spawn_path_note' => 'Фон дергает {base}/api/stock_operation_b24_worker.php. Подпапка сайта (/LLumar) должна быть в base — см. stock_b24_worker_public_base_url.',
             );
             $syncStatus = resolveB24SyncStatus($syncResult);
             $db->prepare("UPDATE stock_operation_docs SET b24_sync_status = ?, b24_sync_response = ? WHERE id = ?")
