@@ -245,6 +245,100 @@ function mergeStockOperationLineRowsForBitrixSku(array $lineRows) {
 }
 
 /**
+ * После merge по product_id: выровнять типы карточек CRM (ensureUsableB24ProductId), но не сливать строки по b24_product_id.
+ *
+ * @param PDO $db
+ * @param array $lineRows результат mergeStockOperationLineRowsForBitrixSku()
+ * @return array
+ */
+function stockOperationsMergedLinesEnsureB24SkuNoCatalogConsolidate(PDO $db, array $lineRows) {
+    $pidToBestLineName = array();
+    foreach ($lineRows as $line) {
+        if (!is_array($line)) {
+            continue;
+        }
+        $pid = intval(isset($line['product_id']) ? $line['product_id'] : 0);
+        if ($pid <= 0) {
+            continue;
+        }
+        $pn = isset($line['product_name']) ? trim((string)$line['product_name']) : '';
+        if ($pn === '') {
+            continue;
+        }
+        $lenPn = function_exists('mb_strlen') ? mb_strlen($pn) : strlen($pn);
+        $lenPrev = -1;
+        if (isset($pidToBestLineName[$pid])) {
+            $prev = $pidToBestLineName[$pid];
+            $lenPrev = function_exists('mb_strlen') ? mb_strlen($prev) : strlen($prev);
+        }
+        if (!isset($pidToBestLineName[$pid]) || $lenPn > $lenPrev) {
+            $pidToBestLineName[$pid] = $pn;
+        }
+    }
+
+    $uniquePids = array();
+    foreach ($lineRows as $line) {
+        if (!is_array($line)) {
+            continue;
+        }
+        $pid = intval(isset($line['product_id']) ? $line['product_id'] : 0);
+        if ($pid > 0) {
+            $uniquePids[$pid] = true;
+        }
+    }
+    foreach (array_keys($uniquePids) as $pid) {
+        $pid = intval($pid);
+        $pStmt = $db->prepare("SELECT b24_product_id, price_per_meter, delivery_price, name FROM products WHERE id = ? LIMIT 1");
+        $pStmt->execute(array($pid));
+        $prod = $pStmt->fetch(PDO::FETCH_ASSOC);
+        if (!is_array($prod)) {
+            continue;
+        }
+        $bid = intval(isset($prod['b24_product_id']) ? $prod['b24_product_id'] : 0);
+        if ($bid <= 0) {
+            continue;
+        }
+        $hintNm = isset($pidToBestLineName[$pid]) ? $pidToBestLineName[$pid] : (isset($prod['name']) ? (string)$prod['name'] : '');
+        ensureUsableB24ProductId(
+            $db,
+            $pid,
+            $bid,
+            $hintNm,
+            floatval(isset($prod['price_per_meter']) ? $prod['price_per_meter'] : 0)
+        );
+    }
+
+    $out = array();
+    foreach ($lineRows as $line) {
+        if (!is_array($line)) {
+            continue;
+        }
+        $pid = intval(isset($line['product_id']) ? $line['product_id'] : 0);
+        if ($pid <= 0) {
+            continue;
+        }
+        $pStmt = $db->prepare("SELECT b24_product_id FROM products WHERE id = ? LIMIT 1");
+        $pStmt->execute(array($pid));
+        $prod = $pStmt->fetch(PDO::FETCH_ASSOC);
+        if (!is_array($prod) || intval(isset($prod['b24_product_id']) ? $prod['b24_product_id'] : 0) <= 0) {
+            continue;
+        }
+
+        $amount = floatval(isset($line['quantity_m']) ? $line['quantity_m'] : 0);
+        if ($amount <= 0) {
+            $amount = floatval(isset($line['qty_rolls']) ? $line['qty_rolls'] : 0);
+        }
+        if ($amount <= 0) {
+            continue;
+        }
+
+        $out[] = $line;
+    }
+
+    return $out;
+}
+
+/**
  * Сжать строки документа к одному elementId CRM на склад: после merge по product_id разные локальные
  * товары могут получить один b24_product_id (клон/[stock]); два element.add с одним id дают две строки в Б24.
  * Сперва для каждого product_id дергаем ensureUsableB24ProductId, затем группируем по актуальному b24_product_id.
@@ -257,6 +351,15 @@ function stockOperationsMergeLineRowsPerB24CatalogId(PDO $db, array $lineRows) {
     $lineRows = mergeStockOperationLineRowsForBitrixSku(is_array($lineRows) ? $lineRows : array());
     if (empty($lineRows)) {
         return array();
+    }
+    /**
+     * По умолчанию (1): разные локальные product_id с одним и тем же b24_product_id сливаются в одну строку складского документа —
+     * в Б24 может получиться намного меньше «позиций», чем строк в приложении, при неизменной общей сумме.
+     * Для сохранения «одна строка приложения = одна позиция в Б24 после merge по product_id» задайте в app_settings
+     * stock_b24_merge_lines_by_b24_product_id = 0
+     */
+    if (trim((string)getAppSetting($db, 'stock_b24_merge_lines_by_b24_product_id', '1')) !== '1') {
+        return stockOperationsMergedLinesEnsureB24SkuNoCatalogConsolidate($db, $lineRows);
     }
     $pidToBestLineName = array();
     foreach ($lineRows as $line) {
@@ -491,7 +594,8 @@ function pauseBetweenB24DocumentLineAdds($db) {
  * @param string $docNumber
  * @param string $docType receipt|writeoff
  * @param int $b24DocId
- * @param string $why start_missing — в начале addLines/sync; transient — после ошибки «документ не найден»
+ * @param string $why start_missing — в начале addLines/sync; transient — после ошибки «документ не найден»;
+ *     element_add_not_found — element.add вернул not found, а id в приложении ещё «живой» по document.get: переключаемся на актуальный черновик по doc_number
  * @return bool true если docId изменён
  */
 function stockOperationsRealignB24DocumentIdForLineSync(PDO $db, $docNumber, $docType, &$b24DocId, $why = 'start_missing') {
@@ -521,6 +625,12 @@ function stockOperationsRealignB24DocumentIdForLineSync(PDO $db, $docNumber, $do
         if ($cur <= 0 || $curKind === 'missing') {
             $adopt = true;
         }
+    } elseif ($whyTrim === 'element_add_not_found') {
+        /**
+         * Расхождение API: document.get ещё отдаёт id, а element.add — ERROR_DOCUMENT_STATUS / Document not found.
+         * Берём последний непроведённый документ в портале с тем же номером (типично новый черновик после удаления старого).
+         */
+        $adopt = true;
     }
     if (!$adopt) {
         return false;
@@ -882,14 +992,18 @@ function stockOperationsResolveB24DocumentIdForRetry($db, array $doc, $strategy 
 
     $fromCol = intval(isset($doc['b24_document_id']) ? $doc['b24_document_id'] : 0);
     if ($fromCol > 0) {
-        return $fromCol;
+        if (bitrixCatalogDocumentPresenceById($fromCol)['kind'] === 'exists') {
+            return $fromCol;
+        }
     }
     $fromJson = 0;
     if (isset($doc['b24_sync_response'])) {
         $fromJson = stockOperationsExtractB24DocumentIdFromSavedSyncJson((string)$doc['b24_sync_response']);
     }
     if ($fromJson > 0) {
-        return $fromJson;
+        if (bitrixCatalogDocumentPresenceById($fromJson)['kind'] === 'exists') {
+            return $fromJson;
+        }
     }
     $op = isset($doc['operation_type']) ? (string)$doc['operation_type'] : '';
     $num = isset($doc['doc_number']) ? (string)$doc['doc_number'] : '';
@@ -2555,7 +2669,9 @@ function syncOperationDocumentToBitrix($db, $docId, $docType, $docNumber, $comme
             $tr2 = bitrixDocumentElementAddLooksTransient(isset($addResult['lineResp']) ? $addResult['lineResp'] : null)
                 || bitrixDocumentElementAddLooksTransient(isset($addResult['fallbackResp']) ? $addResult['fallbackResp'] : null);
             if ($tr2 && $dnSyncLines !== '' && !$relSyncOnce) {
-                if (stockOperationsRealignB24DocumentIdForLineSync($db, $dnSyncLines, (string)$docType, $__w2, 'transient')) {
+                $refSyncOk = stockOperationsRealignB24DocumentIdForLineSync($db, $dnSyncLines, (string)$docType, $__w2, 'transient')
+                    || stockOperationsRealignB24DocumentIdForLineSync($db, $dnSyncLines, (string)$docType, $__w2, 'element_add_not_found');
+                if ($refSyncOk) {
                     $b24DocId = $__w2;
                     $relSyncOnce = true;
                     if ($docType === 'receipt') {
@@ -2827,6 +2943,9 @@ function addLinesAndConductExistingB24Document($db, $b24DocId, $docType, $lineRo
             $refOk = false;
             if ($tr && $dnForRel !== '' && !$relinedOnce) {
                 $refOk = stockOperationsRealignB24DocumentIdForLineSync($db, $dnForRel, (string)$docType, $__b24Work, 'transient');
+                if (!$refOk) {
+                    $refOk = stockOperationsRealignB24DocumentIdForLineSync($db, $dnForRel, (string)$docType, $__b24Work, 'element_add_not_found');
+                }
                 if ($refOk) {
                     $b24DocId = $__b24Work;
                     $relinedOnce = true;
@@ -2898,18 +3017,66 @@ function addLinesAndConductExistingB24Document($db, $b24DocId, $docType, $lineRo
     return $conductResult;
 }
 
-function tryFinalizePartialDocument($db, $operationType, $syncResult, $lineRows, $supplierName, $docNumberForB24 = '') {
+function tryFinalizePartialDocument($db, $operationType, $syncResult, $lineRows, $supplierName, $docNumberForB24 = '', $createFallbackDoc = null) {
     if (!is_array($syncResult)) {
         return $syncResult;
     }
     if (isset($syncResult['ok']) && $syncResult['ok']) {
         return $syncResult;
     }
-    $b24DocId = intval(isset($syncResult['b24_document_id']) ? $syncResult['b24_document_id'] : 0);
-    if ($b24DocId <= 0 || empty($lineRows)) {
+    if (empty($lineRows)) {
         return $syncResult;
     }
+    $b24DocId = intval(isset($syncResult['b24_document_id']) ? $syncResult['b24_document_id'] : 0);
+    $dnFinalize = trim((string)$docNumberForB24);
+    if ($b24DocId > 0 && $dnFinalize !== '') {
+        $pkFinalize = bitrixCatalogDocumentPresenceById($b24DocId);
+        if ($pkFinalize['kind'] === 'missing') {
+            $altF = intval(stockOperationsFindB24DocumentIdByDocNumber($db, $dnFinalize, (string)$operationType));
+            if ($altF > 0 && bitrixCatalogDocumentPresenceById($altF)['kind'] === 'exists') {
+                $b24DocId = $altF;
+            } else {
+                $b24DocId = 0;
+            }
+        }
+    }
+
     $stage = isset($syncResult['stage']) ? (string)$syncResult['stage'] : '';
+    $fbLocalId = 0;
+    if (is_array($createFallbackDoc) && isset($createFallbackDoc['id'])) {
+        $fbLocalId = intval($createFallbackDoc['id']);
+    }
+    $fbComment = '';
+    if (is_array($createFallbackDoc) && isset($createFallbackDoc['comment_text'])) {
+        $fbComment = (string)$createFallbackDoc['comment_text'];
+    }
+    $fbSupplier = $supplierName;
+    if (is_array($createFallbackDoc) && array_key_exists('supplier', $createFallbackDoc)) {
+        $fbSupplier = isset($createFallbackDoc['supplier']) ? (string)$createFallbackDoc['supplier'] : '';
+    }
+
+    if ($b24DocId <= 0) {
+        if ($stage === 'document.conduct') {
+            return $syncResult;
+        }
+        if ($fbLocalId > 0 && $dnFinalize !== '') {
+            $finalizeResult = syncOperationDocumentToBitrix(
+                $db,
+                $fbLocalId,
+                (string)$operationType,
+                $dnFinalize,
+                $fbComment,
+                $lineRows,
+                $fbSupplier
+            );
+            if (is_array($finalizeResult)) {
+                $finalizeResult['auto_finalize_attempted'] = true;
+                $finalizeResult['auto_finalize_mode'] = 'create_via_document_add_after_missing_b24_id';
+            }
+            return $finalizeResult;
+        }
+        return $syncResult;
+    }
     if ($stage === 'document.conduct') {
         $finalizeResult = conductAndEnsurePosted($db, $b24DocId, $operationType, $supplierName);
     } else {
@@ -3272,7 +3439,12 @@ function stockOperationsExecuteB24SyncWithLines(PDO $db, array &$doc, array $lin
         $syncResult,
         $lineRows,
         isset($doc['supplier']) ? (string)$doc['supplier'] : '',
-        isset($doc['doc_number']) ? (string)$doc['doc_number'] : ''
+        isset($doc['doc_number']) ? (string)$doc['doc_number'] : '',
+        array(
+            'id' => intval(isset($doc['id']) ? $doc['id'] : 0),
+            'comment_text' => isset($doc['comment_text']) ? (string)$doc['comment_text'] : '',
+            'supplier' => isset($doc['supplier']) ? (string)$doc['supplier'] : '',
+        )
     );
     if (is_array($syncResult)) {
         $syncResult['retry_strategy_requested'] = $retryStrategy;
@@ -4274,7 +4446,19 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
         }
 
         $syncResult = syncOperationDocumentToBitrix($db, $docId, 'receipt', $docNumber, $commentText, $lineRowsForSync, $supplier);
-        $syncResult = tryFinalizePartialDocument($db, 'receipt', $syncResult, $lineRowsForSync, $supplier, $docNumber);
+        $syncResult = tryFinalizePartialDocument(
+            $db,
+            'receipt',
+            $syncResult,
+            $lineRowsForSync,
+            $supplier,
+            $docNumber,
+            array(
+                'id' => intval($docId),
+                'comment_text' => isset($commentText) ? (string)$commentText : '',
+                'supplier' => isset($supplier) ? (string)$supplier : '',
+            )
+        );
         $syncStatus = resolveB24SyncStatus($syncResult);
 
         $persistReceipt = stockOperationsEffectiveB24DocumentIdForPersist(array(), $syncResult);
