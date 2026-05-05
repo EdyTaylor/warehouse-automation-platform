@@ -142,6 +142,33 @@ function pricingRollCountForTier($product, $quantityLine) {
     return $qi;
 }
 
+/**
+ * Розничная цена за метр по тирам для строки сделки (quantity = метраж в строке).
+ * Учитывает resolveTierPrice + fallbacks. Нужна в очереди склада: иначе при цене > 0 из Б24
+ * тир не применяется и при смене количества (напр. 1 м) остаётся каталожная цена.
+ *
+ * @param array $product
+ * @param float $quantityLine
+ * @return float|null
+ */
+function pricingTierRetailPricePerMeter($product, $quantityLine) {
+    $qty = floatval($quantityLine);
+    if ($qty <= 0) {
+        return null;
+    }
+    $rolls = pricingRollCountForTier($product, $qty);
+    $tier = resolveTierPrice($product, $rolls);
+    $tierMoney = floatval(isset($tier['price']) ? $tier['price'] : 0);
+    if ($tierMoney <= 0) {
+        return null;
+    }
+    $rollLen = floatval(isset($product['roll_length']) ? $product['roll_length'] : 0);
+    if ($rollLen <= 0.0001) {
+        return null;
+    }
+    return round($tierMoney / $rollLen, 2);
+}
+
 function explainTierPriceResolution($product, $qtyRolls) {
     $resolved = resolveTierPrice($product, $qtyRolls);
     $targetTier = getTargetTierByQty($qtyRolls);

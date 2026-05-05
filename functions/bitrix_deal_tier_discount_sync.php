@@ -102,32 +102,6 @@ function bitrixTierSyncLoadProductByB24Id($db, $b24ProductId)
 }
 
 /**
- * Целевая цена за единицу в строке (метр): цена тира за рулон / длина рулона.
- *
- * @param array $product
- * @param float $qty метраж/кол-во в строке
- * @return float|null
- */
-function bitrixTierSyncTargetUnitPrice($product, $qty)
-{
-    $qty = floatval($qty);
-    if ($qty <= 0) {
-        return null;
-    }
-    $rolls = pricingRollCountForTier($product, $qty);
-    $tier = resolveTierPrice($product, $rolls);
-    $tierMoney = floatval(isset($tier['price']) ? $tier['price'] : 0);
-    if ($tierMoney <= 0) {
-        return null;
-    }
-    $rollLen = floatval(isset($product['roll_length']) ? $product['roll_length'] : 0);
-    if ($rollLen <= 0.0001) {
-        return null;
-    }
-    return round($tierMoney / $rollLen, 2);
-}
-
-/**
  * Универсальный API строк (crm.item.productrow.update): price + обнуление скидки.
  *
  * @param object $db
@@ -189,7 +163,7 @@ function bitrixDealTierDiscountSyncViaItemRows($db, $dealId)
             continue;
         }
 
-        $targetUnit = bitrixTierSyncTargetUnitPrice($product, $quantity);
+        $targetUnit = pricingTierRetailPricePerMeter($product, $quantity);
         if ($targetUnit === null) {
             continue;
         }
@@ -338,7 +312,7 @@ function bitrixDealTierDiscountSyncViaClassicProductRows($db, $dealId)
             continue;
         }
 
-        $targetUnit = bitrixTierSyncTargetUnitPrice($product, $quantity);
+        $targetUnit = pricingTierRetailPricePerMeter($product, $quantity);
         if ($targetUnit === null) {
             $outRows[] = $item;
             continue;

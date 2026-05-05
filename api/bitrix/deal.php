@@ -456,8 +456,12 @@ function queueDealForWarehouse($db, $data) {
                 $productId = intval($product['id']);
             }
 
-            // If B24 line price is empty, resolve tier by roll count (metrazh / roll_length).
-            if ($price <= 0) {
+            // Розница по тирам из карточки товара — приоритетнее цены строки Б24 (иначе при смене метража
+            // остаётся каталожная цена за метр).
+            $tierRetail = pricingTierRetailPricePerMeter($product, $qty);
+            if ($tierRetail !== null && $tierRetail > 0) {
+                $price = $tierRetail;
+            } elseif ($price <= 0) {
                 $rollsForTier = pricingRollCountForTier($product, $qty);
                 $resolvedPrice = resolveTierPrice($product, $rollsForTier);
                 $tierMoney = floatval($resolvedPrice['price']);
