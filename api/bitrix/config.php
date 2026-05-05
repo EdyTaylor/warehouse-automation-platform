@@ -63,16 +63,16 @@ return [
     // filter_enabled=false — старая эвристика (SEMANTICS=s, стадии WON / FINAL_INVOICE и т.д.).
     // filter_enabled=true — только перечисленные стадии (по CATEGORY_ID и STAGE_ID из crm.deal.get).
     'warehouse_realization' => array(
-    'filter_enabled' => false,
-    'rules' => array(
-        array(
-            'category_ids' => array(1),
-            'stages_exact' => array(
-                 'C1:UC_VL8GUD',        // Оплачено
+        'filter_enabled' => false,  // ← ОТКЛЮЧЕНО НА ВРЕМЯ ТЕСТА
+        'rules' => array(
+            array(
+                'category_ids' => array(1),
+                'stages_exact' => array(
+                    'C1:UC_VL8GUD',        // Оплачено
+                ),
             ),
         ),
     ),
-),
 ];
             // Пример после настройки в «Центр интеграции»:
             // array('category_ids' => array(0), 'stages_exact' => array('WON', 'FINAL_INVOICE')),

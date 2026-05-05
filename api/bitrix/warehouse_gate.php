@@ -122,9 +122,11 @@ function bitrixLegacyRealizationIsPaid(array $deal) {
  * @param array $deal crm.deal.get fields
  * @param array $gate  $cfg['warehouse_realization']
  */
-function bitrixRealizationIsPaid(array $deal, array $gate) {
-    if (empty($gate['filter_enabled'])) {
-        return bitrixLegacyRealizationIsPaid($deal);
+if (!function_exists('bitrixRealizationIsPaid')) {
+    function bitrixRealizationIsPaid(array $deal, array $gate) {
+        if (empty($gate['filter_enabled'])) {
+            return bitrixLegacyRealizationIsPaid($deal);
+        }
+        return bitrixWorkflowGateRulesMatchDeal($deal, $gate);
     }
-    return bitrixWorkflowGateRulesMatchDeal($deal, $gate);
 }
