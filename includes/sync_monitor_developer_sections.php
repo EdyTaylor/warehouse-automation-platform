@@ -437,5 +437,94 @@
                 <?php endforeach; ?>
             </table>
             </div>
+
+            <h4 style="margin:14px 0 8px;">Исходящие вызовы из приложения → Б24</h4>
+            <form method="GET" style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px;">
+                <input type="hidden" name="limit" value="<?= (int)$webhookLimit ?>">
+                <div class="form-group" style="margin:0;">
+                    <label>Метод</label>
+                    <select name="out_method" class="input" style="min-width:260px;">
+                        <option value="">Все методы</option>
+                        <?php foreach ($outgoingMethods as $om): ?>
+                            <option value="<?= htmlspecialchars((string)$om) ?>" <?= ((string)$outMethodFilter === (string)$om) ? 'selected' : '' ?>>
+                                <?= htmlspecialchars((string)$om) ?>
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="form-group" style="margin:0;">
+                    <label>Статус</label>
+                    <select name="out_status" class="input">
+                        <option value="" <?= $outStatusFilter === '' ? 'selected' : '' ?>>Все</option>
+                        <option value="ok" <?= $outStatusFilter === 'ok' ? 'selected' : '' ?>>ok</option>
+                        <option value="error" <?= $outStatusFilter === 'error' ? 'selected' : '' ?>>error</option>
+                        <option value="blocked" <?= $outStatusFilter === 'blocked' ? 'selected' : '' ?>>blocked</option>
+                    </select>
+                </div>
+                <div class="form-group" style="margin:0;">
+                    <button class="btn btn-light" type="submit">Фильтровать</button>
+                    <a class="btn btn-light" href="sync_monitor_developers.php?limit=<?= (int)$webhookLimit ?>#sec-webhooks">Сброс</a>
+                </div>
+            </form>
+            <form method="POST" style="margin-bottom:10px;">
+                <input type="hidden" name="action" value="clear_outgoing_log">
+                <button class="btn btn-danger btn-sm" type="submit" onclick="return confirm('Очистить весь лог исходящих вызовов в Б24?');">Очистить лог исходящих</button>
+            </form>
+            <?php if (empty($outgoingRows)): ?>
+                <p class="text-muted">Исходящих вызовов пока нет.</p>
+            <?php else: ?>
+                <div class="webhook-log-table-wrap" style="max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;box-sizing:border-box;">
+                <table class="table webhook-log-table" style="margin-bottom:0;">
+                    <tr>
+                        <th>ID</th>
+                        <th>Метод</th>
+                        <th>Статус</th>
+                        <th>Ошибка</th>
+                        <th>Запрос</th>
+                        <th>Ответ</th>
+                        <th>Время</th>
+                    </tr>
+                    <?php foreach ($outgoingRows as $row): ?>
+                        <?php
+                            $reqSnippet = isset($row['request_preview']) ? trim((string)$row['request_preview']) : '';
+                            $resSnippet = isset($row['response_preview']) ? trim((string)$row['response_preview']) : '';
+                        ?>
+                        <tr>
+                            <td><?= (int)$row['id'] ?></td>
+                            <td>
+                                <code><?= htmlspecialchars(isset($row['method']) ? (string)$row['method'] : '') ?></code>
+                                <details style="margin-top:6px;">
+                                    <summary style="cursor:pointer;font-size:12px;color:var(--text-muted,#6c757d);">endpoint</summary>
+                                    <div style="margin-top:4px;max-width:560px;overflow-wrap:anywhere;word-break:break-word;">
+                                        <code><?= htmlspecialchars(isset($row['endpoint']) ? (string)$row['endpoint'] : '') ?></code>
+                                    </div>
+                                </details>
+                            </td>
+                            <td><code><?= htmlspecialchars(isset($row['status']) ? (string)$row['status'] : '') ?></code></td>
+                            <td><?= htmlspecialchars(isset($row['error_code']) ? (string)$row['error_code'] : '') ?></td>
+                            <td>
+                                <?= isset($row['request_chars']) ? intval($row['request_chars']) : 0 ?> симв.
+                                <?php if ($reqSnippet !== ''): ?>
+                                    <details style="margin-top:6px;">
+                                        <summary style="cursor:pointer;font-size:12px;color:var(--text-muted,#6c757d);">показать</summary>
+                                        <pre style="margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font-size:11px;padding:8px;background:var(--card-background,#f8f9fa);border-radius:4px;border:1px solid rgba(127,127,127,0.2);"><?= htmlspecialchars($reqSnippet) ?></pre>
+                                    </details>
+                                <?php endif; ?>
+                            </td>
+                            <td>
+                                <?= isset($row['response_chars']) ? intval($row['response_chars']) : 0 ?> симв.
+                                <?php if ($resSnippet !== ''): ?>
+                                    <details style="margin-top:6px;">
+                                        <summary style="cursor:pointer;font-size:12px;color:var(--text-muted,#6c757d);">показать</summary>
+                                        <pre style="margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font-size:11px;padding:8px;background:var(--card-background,#f8f9fa);border-radius:4px;border:1px solid rgba(127,127,127,0.2);"><?= htmlspecialchars($resSnippet) ?></pre>
+                                    </details>
+                                <?php endif; ?>
+                            </td>
+                            <td><?= htmlspecialchars(isset($row['created_at']) ? (string)$row['created_at'] : '') ?></td>
+                        </tr>
+                    <?php endforeach; ?>
+                </table>
+                </div>
+            <?php endif; ?>
         </div>
     </details>

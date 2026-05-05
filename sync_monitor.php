@@ -9,6 +9,7 @@ header('Content-Type: text/html; charset=utf-8');
 require 'db.php';
 require_once __DIR__ . '/functions/app_settings.php';
 require_once __DIR__ . '/functions/webhook_log_schema.php';
+require_once __DIR__ . '/functions/bitrix_outgoing_log.php';
 require_once __DIR__ . '/functions/integration_workflow_gates.php';
 require_once __DIR__ . '/functions/integration_bitrix_funnels.php';
 require_once __DIR__ . '/functions/integration_sync_control.php';
@@ -16,14 +17,19 @@ require_once __DIR__ . '/functions/stock_emergency_kill.php';
 require_once __DIR__ . '/functions/prg_flash.php';
 $db = getDB();
 webhookLogEnsureSchema($db);
+bitrixOutgoingLogEnsureSchema($db);
 
 $bitrixCfg = require __DIR__ . '/api/bitrix/config.php';
 
 $friendcrm_sync_mode = isset($friendcrm_sync_mode) ? $friendcrm_sync_mode : 'settings';
 
 $webhookLimit = isset($_GET['limit']) ? max(10, min(500, intval($_GET['limit']))) : 80;
+$outMethodFilter = isset($_GET['out_method']) ? trim((string)$_GET['out_method']) : '';
+$outStatusFilter = isset($_GET['out_status']) ? trim((string)$_GET['out_status']) : '';
 
 $webhookRows = array();
+$outgoingRows = array();
+$outgoingMethods = array();
 $movementErrors = array();
 $movementPending = array();
 $syncConflicts = array();
@@ -297,6 +303,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             }
         }
     }
+
+    if ($action === 'clear_outgoing_log') {
+        try {
+            $db->exec("DELETE FROM bitrix_outgoing_log");
+            $successMsg = 'Лог исходящих вызовов очищен.';
+        } catch (Exception $e) {
+            $errorMsg = 'Не удалось очистить лог исходящих: ' . $e->getMessage();
+        }
+    }
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
@@ -309,6 +324,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         if ($lm > 0) {
             $prgQm['limit'] = (string)$lm;
         }
+    }
+    if ($outMethodFilter !== '') {
+        $prgQm['out_method'] = $outMethodFilter;
+    }
+    if ($outStatusFilter !== '') {
+        $prgQm['out_status'] = $outStatusFilter;
     }
     prgFlashCommitAndRedirect303WithQuery(
         'sync_monitor.php',
@@ -369,6 +390,52 @@ try {
     $webhookRows = $wk->fetchAll(PDO::FETCH_ASSOC);
 } catch (Exception $e) {
     $webhookRows = array();
+}
+
+try {
+    $mw = array();
+    $mp = array();
+    if ($outMethodFilter !== '') {
+        $mw[] = "method = ?";
+        $mp[] = $outMethodFilter;
+    }
+    if ($outStatusFilter !== '') {
+        $mw[] = "status = ?";
+        $mp[] = $outStatusFilter;
+    }
+    $outSql = '
+        SELECT id, method, endpoint, status, error_code,
+               CHAR_LENGTH(request_payload) AS request_chars,
+               LEFT(request_payload, 1200) AS request_preview,
+               CHAR_LENGTH(response_payload) AS response_chars,
+               LEFT(response_payload, 1200) AS response_preview,
+               created_at
+        FROM bitrix_outgoing_log
+    ';
+    if (!empty($mw)) {
+        $outSql .= ' WHERE ' . implode(' AND ', $mw);
+    }
+    $outSql .= ' ORDER BY id DESC LIMIT ' . intval($webhookLimit);
+    $outStmt = $db->prepare($outSql);
+    $outStmt->execute($mp);
+    $outgoingRows = $outStmt->fetchAll(PDO::FETCH_ASSOC);
+} catch (Exception $e) {
+    $outgoingRows = array();
+}
+
+try {
+    $outgoingMethods = $db->query("
+        SELECT DISTINCT method
+        FROM bitrix_outgoing_log
+        WHERE method IS NOT NULL AND method != ''
+        ORDER BY method ASC
+        LIMIT 200
+    ")->fetchAll(PDO::FETCH_COLUMN);
+    if (!is_array($outgoingMethods)) {
+        $outgoingMethods = array();
+    }
+} catch (Exception $e) {
+    $outgoingMethods = array();
 }
 
 try {
