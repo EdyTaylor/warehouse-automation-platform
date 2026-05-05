@@ -3,7 +3,58 @@ ini_set('display_errors', 1);
 error_reporting(E_ALL);
 
 require 'db.php';
+require_once __DIR__ . '/api/bitrix/send.php';
 $db = getDB();
+
+function bitrixDealUrlById($dealId) {
+    $id = intval($dealId);
+    if ($id <= 0) {
+        return '';
+    }
+    return 'https://llumar.bitrix24.kz/crm/deal/details/' . $id . '/';
+}
+
+function responsibleLabel($rawResponsible) {
+    $raw = trim((string)$rawResponsible);
+    if ($raw === '') {
+        return '';
+    }
+    if (!preg_match('/^User\s+(\d+)$/i', $raw, $m)) {
+        return $raw;
+    }
+
+    $uid = intval($m[1]);
+    if ($uid <= 0) {
+        return $raw;
+    }
+
+    static $cache = array();
+    if (isset($cache[$uid])) {
+        return $cache[$uid];
+    }
+
+    $label = 'User ' . $uid;
+    $resp = sendToBitrix('user.get', array(
+        'FILTER' => array('ID' => $uid)
+    ));
+    if (is_array($resp) && isset($resp['result']) && is_array($resp['result']) && !empty($resp['result'][0])) {
+        $u = $resp['result'][0];
+        $parts = array();
+        if (!empty($u['NAME'])) {
+            $parts[] = trim((string)$u['NAME']);
+        }
+        if (!empty($u['LAST_NAME'])) {
+            $parts[] = trim((string)$u['LAST_NAME']);
+        }
+        $fullName = trim(implode(' ', $parts));
+        if ($fullName !== '') {
+            $label .= ' (' . $fullName . ')';
+        }
+    }
+
+    $cache[$uid] = $label;
+    return $label;
+}
 
 function ensureReportFinanceColumns($db) {
     $cols = array(
@@ -190,14 +241,17 @@ $details = $detailsStmt->fetchAll(PDO::FETCH_ASSOC);
                             <td><?php echo number_format(floatval(isset($d['gross_margin_percent']) ? $d['gross_margin_percent'] : 0), 2, '.', ' '); ?>%</td>
                             <td>
                                 <?php if (!empty($d['deal_id'])) { ?>
-                                    <a href="<?php echo htmlspecialchars(isset($d['deal_url']) ? $d['deal_url'] : '#'); ?>" target="_blank">
+                                    <?php
+                                        $dealLink = !empty($d['deal_url']) ? (string)$d['deal_url'] : bitrixDealUrlById($d['deal_id']);
+                                    ?>
+                                    <a href="<?php echo htmlspecialchars($dealLink); ?>" target="_blank" rel="noopener">
                                         Сделка #<?php echo intval($d['deal_id']); ?>
                                     </a>
                                 <?php } else { ?>
                                     —
                                 <?php } ?>
                             </td>
-                            <td><?php echo htmlspecialchars(isset($d['responsible']) ? $d['responsible'] : ''); ?></td>
+                            <td><?php echo htmlspecialchars(responsibleLabel(isset($d['responsible']) ? $d['responsible'] : '')); ?></td>
                         </tr>
                     <?php } ?>
                 </table>

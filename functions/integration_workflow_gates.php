@@ -1,4 +1,4 @@
-    <?php
+<?php
 
 require_once __DIR__ . '/app_settings.php';
 
@@ -127,7 +127,7 @@ function integrationBuildGateFromPost($filterEnabled, $stagesPostMatrix)
  *     - если stages_exact задан и STAGE_ID строго совпадает с одним из них — true.
  */
 if (!function_exists('bitrixRealizationIsPaid')) {
-    function bitrixRealizationIsPaid(array $dealData, array $gate = null) {
+    function bitrixRealizationIsPaid(array $dealData, $gate = null) {
         if (!is_array($dealData)) {
             return false;
         }

@@ -19,6 +19,7 @@ require_once __DIR__ . '/functions/prg_flash.php';
 $successMsg = '';
 $errorMsg = '';
 ensureStockOperationTables($db);
+$showTechnicalB24Buttons = false;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'retry_b24_sync') {
     if (!validateFormToken('retry_b24_sync', isset($_POST['form_token']) ? $_POST['form_token'] : '')) {
@@ -276,6 +277,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         $lineRollLength = isset($_POST['line_roll_length']) && is_array($_POST['line_roll_length']) ? $_POST['line_roll_length'] : array();
         $linePriceUsd = isset($_POST['line_price_per_roll_usd']) && is_array($_POST['line_price_per_roll_usd']) ? $_POST['line_price_per_roll_usd'] : array();
         $lineDeliveryPriceUsd = isset($_POST['line_delivery_price_per_roll_usd']) && is_array($_POST['line_delivery_price_per_roll_usd']) ? $_POST['line_delivery_price_per_roll_usd'] : array();
+        $lineIsCutRoll = isset($_POST['line_is_cut']) && is_array($_POST['line_is_cut']) ? $_POST['line_is_cut'] : array();
 
         $payloadLines = array();
         for ($i = 0; $i < count($lineQtyRolls); $i++) {
@@ -286,6 +288,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 'roll_length' => floatval(isset($lineRollLength[$i]) ? $lineRollLength[$i] : 0),
                 'purchase_per_roll' => floatval(isset($linePriceUsd[$i]) ? $linePriceUsd[$i] : 0),
                 'delivery_per_roll' => floatval(isset($lineDeliveryPriceUsd[$i]) ? $lineDeliveryPriceUsd[$i] : 0),
+                'is_cut_roll' => !empty($lineIsCutRoll[$i]),
             );
         }
 
@@ -615,6 +618,7 @@ require 'includes/header.php';
                 <input type="text" name="comment_text" placeholder="Примечание к приходу">
             </div>
             <p class="text-muted">Ввод цен в выбранной валюте. Отчет и синк в Б24 всегда в KGS. Курс USD из страницы «Настройки»: <strong><?= htmlspecialchars(number_format($usdToKgsRate, 2, '.', ' ')) ?></strong>.</p>
+            <p class="text-muted">Для прихода обрезков: укажите фактическую длину и включите флаг «Обрезок» в строке.</p>
             <?php if (!$integrationSyncPaused): ?>
                 <p class="text-muted">Если снята галочка «Только локально», склад приложения пополняется <strong>только после</strong> успешной отправки прихода в Битрикс24 и вашей кнопки «Отправить товар на склад» в списке документов (повтор «Повторить» сам по себе не удваивает рулоны).</p>
             <?php endif; ?>
@@ -636,6 +640,7 @@ require 'includes/header.php';
                             <th>Название (если новый)</th>
                             <th>Рулонов</th>
                             <th>Длина рулона (м)</th>
+                            <th>Обрезок</th>
                             <th class="js-price-head">Закупка за рулон (USD)</th>
                             <th class="js-delivery-head">С доставкой за рулон (USD)</th>
                             <th></th>
@@ -656,6 +661,7 @@ require 'includes/header.php';
                             <td><input type="text" name="line_product_name[]" placeholder="Если новый товар"></td>
                             <td><input type="number" name="line_qty_rolls[]" min="1" value="1"></td>
                             <td><input type="number" name="line_roll_length[]" min="0.1" step="0.1" value="30"></td>
+                            <td style="text-align:center;"><input type="checkbox" name="line_is_cut[]" value="1" title="Отметьте для обрезка"></td>
                             <td><input type="number" name="line_price_per_roll_usd[]" min="0" step="0.01" value="0"></td>
                             <td><input type="number" name="line_delivery_price_per_roll_usd[]" min="0" step="0.01" value="0"></td>
                             <td><button type="button" class="btn btn-danger btn-sm remove-line">×</button></td>
@@ -816,25 +822,29 @@ require 'includes/header.php';
                                         <button type="submit" name="retry_strategy" value="conduct_only" class="btn btn-primary btn-sm" title="Только проведение (conduct) уже созданного документа со строками. Строки не добавляет — если они не добавлены, нажмите «Дофиксировать».">Провести документ</button>
                                     </form>
                                 <?php elseif ($__tblCanRetry && $__tblB24St === 'sent'): ?>
-                                    <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center; max-width:22rem;">
-                                        <form method="POST" style="display:inline;" class="stock-doc-retry-forms" onsubmit="return confirm(&quot;Дозалить в Битрикс24 недостающие строки из приложения в тот же документ? Если портал не разрешает добавлять строки к уже провёденному документу, синк может завершиться ошибкой — тогда воспользуйтесь второй кнопкой «Отменить проведение в Б24 и дозалить».&quot;);">
-                                            <input type="hidden" name="action" value="retry_b24_sync">
-                                            <input type="hidden" name="form_token" value="<?= htmlspecialchars($retryToken) ?>">
-                                            <input type="hidden" name="doc_id" value="<?= intval($d['id']) ?>">
-                                            <input type="hidden" name="retry_strategy" value="full">
-                                            <input type="hidden" name="force_sent_b24_resync" value="1">
-                                            <button type="submit" class="btn btn-warning btn-sm">Дозалить в Б24</button>
-                                        </form>
-                                        <form method="POST" style="display:inline;" class="stock-doc-retry-forms" onsubmit="return confirm(&quot;ОТМЕНА ПРОВЕДЕНИЯ в Битрикс24: складские остатки в портале могут измениться по правилам отмены. Затем будут добавлены строки из приложения и документ снова проведён. Это нужно только если простая дозаливка блокируется. Продолжить?&quot;);">
-                                            <input type="hidden" name="action" value="retry_b24_sync">
-                                            <input type="hidden" name="form_token" value="<?= htmlspecialchars($retryToken) ?>">
-                                            <input type="hidden" name="doc_id" value="<?= intval($d['id']) ?>">
-                                            <input type="hidden" name="retry_strategy" value="full">
-                                            <input type="hidden" name="force_sent_b24_resync" value="1">
-                                            <input type="hidden" name="b24_cancel_conduct_first" value="1">
-                                            <button type="submit" class="btn btn-danger btn-sm">Отменить проведение и дозалить</button>
-                                        </form>
-                                    </div>
+                                    <?php if ($showTechnicalB24Buttons): ?>
+                                        <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center; max-width:22rem;">
+                                            <form method="POST" style="display:inline;" class="stock-doc-retry-forms" onsubmit="return confirm(&quot;Дозалить в Битрикс24 недостающие строки из приложения в тот же документ? Если портал не разрешает добавлять строки к уже провёденному документу, синк может завершиться ошибкой — тогда воспользуйтесь второй кнопкой «Отменить проведение в Б24 и дозалить».&quot;);">
+                                                <input type="hidden" name="action" value="retry_b24_sync">
+                                                <input type="hidden" name="form_token" value="<?= htmlspecialchars($retryToken) ?>">
+                                                <input type="hidden" name="doc_id" value="<?= intval($d['id']) ?>">
+                                                <input type="hidden" name="retry_strategy" value="full">
+                                                <input type="hidden" name="force_sent_b24_resync" value="1">
+                                                <button type="submit" class="btn btn-warning btn-sm">Дозалить в Б24</button>
+                                            </form>
+                                            <form method="POST" style="display:inline;" class="stock-doc-retry-forms" onsubmit="return confirm(&quot;ОТМЕНА ПРОВЕДЕНИЯ в Битрикс24: складские остатки в портале могут измениться по правилам отмены. Затем будут добавлены строки из приложения и документ снова проведён. Это нужно только если простая дозаливка блокируется. Продолжить?&quot;);">
+                                                <input type="hidden" name="action" value="retry_b24_sync">
+                                                <input type="hidden" name="form_token" value="<?= htmlspecialchars($retryToken) ?>">
+                                                <input type="hidden" name="doc_id" value="<?= intval($d['id']) ?>">
+                                                <input type="hidden" name="retry_strategy" value="full">
+                                                <input type="hidden" name="force_sent_b24_resync" value="1">
+                                                <input type="hidden" name="b24_cancel_conduct_first" value="1">
+                                                <button type="submit" class="btn btn-danger btn-sm">Отменить проведение и дозалить</button>
+                                            </form>
+                                        </div>
+                                    <?php else: ?>
+                                        <small class="text-muted">Расширенные действия перенесены во вкладку разработчиков.</small>
+                                    <?php endif; ?>
                                 <?php else: ?>
                                     -
                                 <?php endif; ?>
@@ -966,6 +976,8 @@ require 'includes/header.php';
                 inputs[i].value = '1';
             } else if (inputs[i].name === 'line_roll_length[]') {
                 inputs[i].value = '30';
+            } else if (inputs[i].name === 'line_is_cut[]') {
+                inputs[i].checked = false;
             } else if (inputs[i].name === 'line_price_per_roll_usd[]') {
                 inputs[i].value = '0';
             } else if (inputs[i].name === 'line_delivery_price_per_roll_usd[]') {

@@ -21,12 +21,62 @@ function h($value) {
     return htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
 }
 
+function bitrixDealUrlById($dealId) {
+    $id = intval($dealId);
+    if ($id <= 0) {
+        return '';
+    }
+    return 'https://llumar.bitrix24.kz/crm/deal/details/' . $id . '/';
+}
+
+function responsibleLabel($rawResponsible) {
+    $raw = trim((string)$rawResponsible);
+    if ($raw === '') {
+        return '';
+    }
+    if (!preg_match('/^User\s+(\d+)$/i', $raw, $m)) {
+        return $raw;
+    }
+
+    $uid = intval($m[1]);
+    if ($uid <= 0) {
+        return $raw;
+    }
+
+    static $cache = array();
+    if (isset($cache[$uid])) {
+        return $cache[$uid];
+    }
+
+    $label = 'User ' . $uid;
+    $resp = sendToBitrix('user.get', array(
+        'FILTER' => array('ID' => $uid)
+    ));
+    if (is_array($resp) && isset($resp['result']) && is_array($resp['result']) && !empty($resp['result'][0])) {
+        $u = $resp['result'][0];
+        $parts = array();
+        if (!empty($u['NAME'])) {
+            $parts[] = trim((string)$u['NAME']);
+        }
+        if (!empty($u['LAST_NAME'])) {
+            $parts[] = trim((string)$u['LAST_NAME']);
+        }
+        $fullName = trim(implode(' ', $parts));
+        if ($fullName !== '') {
+            $label .= ' (' . $fullName . ')';
+        }
+    }
+
+    $cache[$uid] = $label;
+    return $label;
+}
+
 function pickerStatusLabel($status) {
     $labels = array(
         'new' => 'Новая',
         'picked' => 'В подборе',
         'confirmed' => 'Одобрено',
-        'shipped' => 'Реализовано',
+        'shipped' => 'Отгружено',
         'cancelled' => 'Отклонено'
     );
     return isset($labels[$status]) ? $labels[$status] : (string)$status;
@@ -266,7 +316,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $message = 'Подбор сохранен.';
             } elseif ($action === 'approve_pick' || $action === 'reject_pick') {
                 $isApprove = ($action === 'approve_pick');
-                $triggerWord = $isApprove ? 'Одобрить' : 'Отклонить';
+                $triggerWord = $isApprove ? 'Отгрузить' : 'Отклонить';
                 $comment = 'Склад: ' . $triggerWord . '. Заявка #' . $requestId;
                 if ($problemText !== '') {
                     $comment .= '. Комментарий: ' . $problemText;
@@ -298,7 +348,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $requestId
                     ));
                     $message = $isApprove
-                        ? 'Подбор одобрен и комментарий отправлен в Б24.'
+                        ? 'Отгрузка подтверждена и комментарий отправлен в Б24.'
                         : 'Отклонение отправлено в Б24.';
                 }
             } elseif ($action === 'confirm_ship') {
@@ -593,8 +643,11 @@ require __DIR__ . '/includes/header.php';
         <div class="card" style="margin-bottom:16px;">
             <div style="display:flex; justify-content:space-between; gap:10px; align-items:center; flex-wrap:wrap;">
                 <div>
-                    <h3 style="margin:0;">Сделка #<?= $dealId ?> / заявка #<?= $requestId ?></h3>
-                    <div class="text-muted"><?= h($request['deal_name']) ?> | Ответственный: <?= h($request['responsible']) ?></div>
+                    <h3 style="margin:0;">
+                        <a href="<?= h(bitrixDealUrlById($dealId)) ?>" target="_blank" rel="noopener">Сделка #<?= $dealId ?></a>
+                        / заявка #<?= $requestId ?>
+                    </h3>
+                    <div class="text-muted"><?= h($request['deal_name']) ?> | Ответственный: <?= h(responsibleLabel($request['responsible'])) ?></div>
                 </div>
                 <div>
                     <span class="<?= $statusClass ?>">Статус: <?= h(pickerStatusLabel((string)$request['picker_status'])) ?></span>
@@ -781,8 +834,8 @@ require __DIR__ . '/includes/header.php';
                 <?php endforeach; ?>
             </div>
 
-            <h4>Блок проблем</h4>
             <?php if (!empty($problems)): ?>
+                <h4>Блок проблем</h4>
                 <div class="alert alert-danger">
                     <ul style="margin:0; padding-left:20px;">
                         <?php foreach ($problems as $problem): ?>
@@ -790,8 +843,6 @@ require __DIR__ . '/includes/header.php';
                         <?php endforeach; ?>
                     </ul>
                 </div>
-            <?php else: ?>
-                <div class="alert alert-success">Автоматических проблем не найдено.</div>
             <?php endif; ?>
 
             <form method="POST">
@@ -802,9 +853,8 @@ require __DIR__ . '/includes/header.php';
                 </div>
                 <div style="display:flex; gap:8px; flex-wrap:wrap;">
                     <button class="btn btn-light" type="submit" name="action" value="save_pick">Сохранить комментарий</button>
-                    <button class="btn btn-success" type="submit" name="action" value="approve_pick" onclick="return confirm('Отправить в Б24 триггер Одобрить?');">Одобрить</button>
+                    <button class="btn btn-success" type="submit" name="action" value="approve_pick" onclick="return confirm('Отправить в Б24 триггер Отгрузить?');">Отгрузить</button>
                     <button class="btn btn-warning" type="submit" name="action" value="reject_pick" onclick="return confirm('Отправить в Б24 триггер Отклонить?');">Отклонить</button>
-                    <button class="btn btn-warning" type="submit" name="action" value="retry_deal_rows_sync">Повторить синк строк сделки</button>
                     <button class="btn btn-danger" type="submit" name="action" value="cancel_reserve" onclick="return confirm('Снять резерв по заявке? Сделка в Б24 не будет закрыта.');">Снять резерв</button>
                 </div>
             </form>
@@ -813,3 +863,17 @@ require __DIR__ . '/includes/header.php';
 </main>
 
 <?php require __DIR__ . '/includes/footer.php'; ?>
+<script>
+(function () {
+    var form = document.querySelector('.warehouse-orders-filter-form');
+    if (!form) {
+        return;
+    }
+    var statusSelect = form.querySelector('select[name="status"]');
+    if (statusSelect) {
+        statusSelect.addEventListener('change', function () {
+            form.submit();
+        });
+    }
+})();
+</script>

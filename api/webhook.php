@@ -302,8 +302,38 @@ function handleDealUpdate($db, $data) {
     $cat = isset($dealData['CATEGORY_ID']) ? $dealData['CATEGORY_ID'] : 'NULL';
     $stg = isset($dealData['STAGE_ID']) ? $dealData['STAGE_ID'] : 'NULL';
     $sem = isset($dealData['SEMANTICS']) ? $dealData['SEMANTICS'] : 'NULL';
+    $stageUpper = strtoupper(trim((string)$stg));
+    $semanticLower = strtolower(trim((string)$sem));
 
     file_put_contents($logFile, date('c') . " [DEAL_#$dealId] CATEGORY_ID=$cat | STAGE_ID=$stg | SEMANTICS=$sem" . PHP_EOL, FILE_APPEND);
+
+    $isCancelledByBitrix = ($semanticLower === 'f')
+        || (strpos($stageUpper, 'LOSE') !== false)
+        || (strpos($stageUpper, 'CANCEL') !== false);
+
+    if ($isCancelledByBitrix) {
+        file_put_contents($logFile, date('c') . " [DEAL_#$dealId] ↩ ОТМЕНА В Б24: запускаю cancelDealReservations()" . PHP_EOL, FILE_APPEND);
+        try {
+            cancelDealReservations($db, $dealId);
+            webhookLogFinish($db, 'deal_cancelled_in_bitrix', $dealId, $logProductIdDeal);
+            echo json_encode(array(
+                'status' => 'deal_cancelled_in_bitrix',
+                'deal_id' => $dealId,
+                'stage_id' => $stg,
+                'semantics' => $sem
+            ));
+            return;
+        } catch (Exception $e) {
+            file_put_contents($logFile, date('c') . " [DEAL_#$dealId] ✗ ОШИБКА cancelDealReservations(): " . $e->getMessage() . PHP_EOL, FILE_APPEND);
+            webhookLogFinish($db, 'deal_cancel_failed', $dealId, $logProductIdDeal, $e->getMessage());
+            echo json_encode(array(
+                'status' => 'error',
+                'deal_id' => $dealId,
+                'error' => 'cancel_failed'
+            ));
+            return;
+        }
+    }
 
     // Проверяем резерв
     $checkReq = $db->prepare("SELECT id, status FROM b24_sale_requests WHERE b24_deal_id = ? LIMIT 1");
@@ -550,7 +580,38 @@ function extractDynamicItemIds($data) {
 }
 
 function getUserName($db, $userId) {
-    return "User {$userId}";
+    $uid = intval($userId);
+    if ($uid <= 0) {
+        return '';
+    }
+
+    static $cache = array();
+    if (isset($cache[$uid])) {
+        return $cache[$uid];
+    }
+
+    $label = 'User ' . $uid;
+    $resp = sendToBitrix('user.get', array(
+        'FILTER' => array('ID' => $uid)
+    ));
+
+    if (is_array($resp) && isset($resp['result']) && is_array($resp['result']) && !empty($resp['result'][0])) {
+        $u = $resp['result'][0];
+        $parts = array();
+        if (!empty($u['NAME'])) {
+            $parts[] = trim((string)$u['NAME']);
+        }
+        if (!empty($u['LAST_NAME'])) {
+            $parts[] = trim((string)$u['LAST_NAME']);
+        }
+        $fullName = trim(implode(' ', $parts));
+        if ($fullName !== '') {
+            $label .= ' (' . $fullName . ')';
+        }
+    }
+
+    $cache[$uid] = $label;
+    return $label;
 }
 
 function ensureSalesFinanceColumns($db) {

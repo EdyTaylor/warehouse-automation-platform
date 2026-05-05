@@ -4164,7 +4164,8 @@ function stockReceiptInsertRollsAndMovementsForDocLine(
     $minFull,
     $deliveryPricePerRoll,
     $pricePerRoll,
-    $localReceiptMovements
+    $localReceiptMovements,
+    $rollStatus
 ) {
     $created = 0;
     $qtyRolls = intval($qtyRolls);
@@ -4172,6 +4173,10 @@ function stockReceiptInsertRollsAndMovementsForDocLine(
     $minFull = floatval($minFull);
     $localProductId = intval($localProductId);
     $docId = intval($docId);
+    $rollStatus = strtolower(trim((string)$rollStatus));
+    if ($rollStatus !== 'cut') {
+        $rollStatus = 'active';
+    }
 
     if ($qtyRolls <= 0 || $rollLength <= 0 || $localProductId <= 0 || $docId <= 0) {
         return 0;
@@ -4179,15 +4184,13 @@ function stockReceiptInsertRollsAndMovementsForDocLine(
 
     $effectiveRollPrice = (floatval($deliveryPricePerRoll) > 0 ? floatval($deliveryPricePerRoll) : floatval($pricePerRoll));
     $costPerMeter = $rollLength > 0 ? ($effectiveRollPrice / $rollLength) : 0;
-    $insRoll = $db->prepare(
-        '
+    $insRoll = $db->prepare("
         INSERT INTO rolls (product_id, original_length, current_length, min_full_length, status, receipt_doc_id, cost_per_meter)
-        VALUES (?, ?, ?, ?, \'active\', ?, ?)
-    '
-    );
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    ");
 
     for ($r = 0; $r < $qtyRolls; $r++) {
-        $insRoll->execute(array($localProductId, $rollLength, $rollLength, $minFull, $docId, $costPerMeter));
+        $insRoll->execute(array($localProductId, $rollLength, $rollLength, $minFull, $rollStatus, $docId, $costPerMeter));
         $rollId = intval($db->lastInsertId());
 
         $movPayload = array(
@@ -4385,6 +4388,16 @@ function stockReceiptApplyDeferredRollsToWarehouse(PDO $db, $docId) {
             $rlen = floatval(isset($ln['roll_length']) ? $ln['roll_length'] : 0);
             $pRoll = floatval(isset($ln['price_per_roll']) ? $ln['price_per_roll'] : 0);
             $dRoll = floatval(isset($ln['delivery_price_per_roll']) ? $ln['delivery_price_per_roll'] : 0);
+            $targetRollStatus = 'active';
+            if ($pid > 0 && $rlen > 0) {
+                $baseLenStmt = $db->prepare("SELECT roll_length FROM products WHERE id = ? LIMIT 1");
+                $baseLenStmt->execute(array($pid));
+                $baseLenRow = $baseLenStmt->fetch(PDO::FETCH_ASSOC);
+                $baseLen = floatval(isset($baseLenRow['roll_length']) ? $baseLenRow['roll_length'] : 0);
+                if ($baseLen > 0 && $rlen + 0.0001 < $baseLen) {
+                    $targetRollStatus = 'cut';
+                }
+            }
             $added = stockReceiptInsertRollsAndMovementsForDocLine(
                 $db,
                 $docId,
@@ -4394,7 +4407,8 @@ function stockReceiptApplyDeferredRollsToWarehouse(PDO $db, $docId) {
                 $minFull,
                 $dRoll,
                 $pRoll,
-                false
+                false,
+                $targetRollStatus
             );
             $totalAdded += intval($added);
         }
@@ -4597,6 +4611,8 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
 
             $qtyRolls = intval(isset($row['qty_rolls']) ? $row['qty_rolls'] : (isset($row['qtyRolls']) ? $row['qtyRolls'] : 0));
             $rollLength = floatval(isset($row['roll_length']) ? $row['roll_length'] : (isset($row['rollLength']) ? $row['rollLength'] : 0));
+            $isCutRoll = !empty($row['is_cut_roll']) || !empty($row['isCutRoll']) || !empty($row['is_cut']);
+            $targetRollStatus = $isCutRoll ? 'cut' : 'active';
             $inputPricePerRoll = floatval(isset($row['purchase_per_roll'])
                 ? $row['purchase_per_roll']
                 : (isset($row['price_per_roll'])
@@ -4723,7 +4739,8 @@ function stockOperationsProcessCreateReceiptPayload($db, array $params) {
                         $minFull,
                         $deliveryPricePerRoll,
                         $pricePerRoll,
-                        true
+                        true,
+                        $targetRollStatus
                     );
                 }
             }

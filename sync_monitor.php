@@ -1,4 +1,7 @@
 <?php
+if (session_status() !== PHP_SESSION_ACTIVE && !headers_sent()) {
+    session_start();
+}
 ini_set('display_errors', 1);
 error_reporting(E_ALL);
 header('Content-Type: text/html; charset=utf-8');
@@ -12,9 +15,6 @@ require_once __DIR__ . '/functions/integration_sync_control.php';
 require_once __DIR__ . '/functions/stock_emergency_kill.php';
 require_once __DIR__ . '/functions/prg_flash.php';
 $db = getDB();
-if (session_status() !== PHP_SESSION_ACTIVE) {
-    session_start();
-}
 webhookLogEnsureSchema($db);
 
 $bitrixCfg = require __DIR__ . '/api/bitrix/config.php';

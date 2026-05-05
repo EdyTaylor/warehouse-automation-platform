@@ -7,6 +7,14 @@ require 'db.php';
 $db = getDB();
 $page_title = 'Продажи';
 require 'includes/header.php';
+
+function bitrixDealUrlById($dealId) {
+    $id = intval($dealId);
+    if ($id <= 0) {
+        return '';
+    }
+    return 'https://llumar.bitrix24.kz/crm/deal/details/' . $id . '/';
+}
 $from = isset($_GET['from']) ? trim($_GET['from']) : '';
 $to = isset($_GET['to']) ? trim($_GET['to']) : '';
 $deal = isset($_GET['deal_id']) ? intval($_GET['deal_id']) : 0;
@@ -116,7 +124,12 @@ $totals = $totalsStmt->fetch(PDO::FETCH_ASSOC);
                         <td><?php echo !empty($row['created_at']) ? htmlspecialchars($row['created_at']) : '-'; ?></td>
                         <td>
                             <?php if (!empty($row['deal_id'])): ?>
-                                #<?php echo intval($row['deal_id']); ?>
+                                <?php
+                                    $dealLink = !empty($row['deal_url']) ? (string)$row['deal_url'] : bitrixDealUrlById($row['deal_id']);
+                                ?>
+                                <a href="<?php echo htmlspecialchars($dealLink); ?>" target="_blank" rel="noopener">
+                                    #<?php echo intval($row['deal_id']); ?>
+                                </a>
                             <?php else: ?>
                                 -
                             <?php endif; ?>
