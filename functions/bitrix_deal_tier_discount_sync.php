@@ -1,22 +1,56 @@
 <?php
 
 /**
- * Когда очередь склада отфильтрована (warehouse gate), всё равно выравниваем сумму строки в Б24
- * через «Сумма скидки» на товарной строке: каталожная цена × кол-во минус целевой итог по тирам (products).
+ * При skipped_warehouse_gate: выравнивание итога через скидку на строке по тирам (products).
  *
- * Требует crm.deal.productrows.get / set и поля DISCOUNT_TYPE_ID=2 (деньги), DISCOUNT_SUM.
+ * На порталах с новым CRM строки сделки живут в crm.item.productrow (+ list/update), а не в
+ * crm.deal.productrows — поэтому сначала item API (discountTypeId=1 + discountSum), затем фолбэк classic.
  */
 
 require_once __DIR__ . '/pricing.php';
 require_once __DIR__ . '/../api/bitrix/send.php';
 
 /**
- * Извлечь массив строк из ответа crm.deal.productrows.get / item API (как в api/webhook.php).
+ * Ответ crm.item.productrow.list — тот же разбор, что в api/webhook.php.
  *
  * @param array $resp
  * @return array|null
  */
-function bitrixTierSyncUnwrapProductRows($resp)
+function bitrixTierSyncUnwrapItemProductRowList($resp)
+{
+    if (!is_array($resp) || isset($resp['error']) || !array_key_exists('result', $resp)) {
+        return null;
+    }
+    $r = $resp['result'];
+    if (!is_array($r)) {
+        return array();
+    }
+    if (isset($r['productRows']) && is_array($r['productRows'])) {
+        return $r['productRows'];
+    }
+    if (isset($r['rows']) && is_array($r['rows'])) {
+        return $r['rows'];
+    }
+    if (isset($r[0]) && is_array($r[0])) {
+        return $r;
+    }
+    if (empty($r)) {
+        return array();
+    }
+    $vals = array_values($r);
+    if (!empty($vals) && isset($vals[0]) && is_array($vals[0])) {
+        return $vals;
+    }
+    return array();
+}
+
+/**
+ * Извлечь массив строк из ответа crm.deal.productrows.get.
+ *
+ * @param array $resp
+ * @return array|null
+ */
+function bitrixTierSyncUnwrapClassicProductRows($resp)
 {
     if (!is_array($resp) || isset($resp['error']) || !array_key_exists('result', $resp)) {
         return null;
@@ -68,11 +102,11 @@ function bitrixTierSyncLoadProductByB24Id($db, $b24ProductId)
 }
 
 /**
- * Целевая сумма строки по тирам: метраж × (цена тира за рулон / длина рулона).
+ * Целевая сумма строки: метраж × (цена тира за рулон / длина рулона).
  *
  * @param array $product
  * @param float $qty
- * @return float|null null если нечего применять
+ * @return float|null
  */
 function bitrixTierSyncTargetLineTotal($product, $qty)
 {
@@ -95,17 +129,143 @@ function bitrixTierSyncTargetLineTotal($product, $qty)
 }
 
 /**
- * @param object $db PDO
+ * Универсальный API строк: discountTypeId 1 = абсолютная сумма, 2 = процент (apidocs.bitrix24.com).
+ *
+ * @param object $db
+ * @param int $dealId
+ * @return array ok, stage, api, rows_updated, discount_applied, error, row_errors
+ */
+function bitrixDealTierDiscountSyncViaItemRows($db, $dealId)
+{
+    $dealId = intval($dealId);
+    $listResp = sendToBitrix('crm.item.productrow.list', array(
+        'filter' => array(
+            '=ownerType' => 'D',
+            '=ownerId' => $dealId,
+        ),
+    ));
+
+    if (!is_array($listResp) || isset($listResp['error'])) {
+        $err = '';
+        if (is_array($listResp) && isset($listResp['error_description'])) {
+            $err = (string)$listResp['error_description'];
+        } elseif (is_array($listResp) && isset($listResp['error'])) {
+            $err = (string)$listResp['error'];
+        } else {
+            $err = 'item_productrow_list_failed';
+        }
+        return array('ok' => false, 'stage' => 'crm.item.productrow.list', 'api' => 'item', 'error' => $err);
+    }
+
+    $rows = bitrixTierSyncUnwrapItemProductRowList($listResp);
+    if ($rows === null || empty($rows)) {
+        return array('ok' => true, 'stage' => 'item_empty', 'api' => 'item', 'skipped' => true);
+    }
+
+    $rowErrors = array();
+    $updated = 0;
+    $anyDiscount = false;
+
+    foreach ($rows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+
+        $rowId = isset($row['id']) ? intval($row['id']) : 0;
+        if ($rowId <= 0) {
+            continue;
+        }
+
+        $b24Pid = isset($row['productId']) ? intval($row['productId']) : 0;
+        $unitPrice = floatval(isset($row['price']) ? $row['price'] : 0);
+        $quantity = floatval(isset($row['quantity']) ? $row['quantity'] : 0);
+
+        if ($b24Pid <= 0 || $quantity <= 0) {
+            continue;
+        }
+
+        $product = bitrixTierSyncLoadProductByB24Id($db, $b24Pid);
+        if (!$product) {
+            continue;
+        }
+
+        $gross = round($quantity * $unitPrice, 2);
+        $target = bitrixTierSyncTargetLineTotal($product, $quantity);
+        if ($target === null) {
+            continue;
+        }
+
+        $discount = round($gross - $target, 2);
+        if ($discount < 0) {
+            $discount = 0.0;
+        }
+        if ($discount > 0.005) {
+            $anyDiscount = true;
+        }
+
+        $fields = array(
+            'discountTypeId' => 1,
+            'discountSum' => round($discount, 2),
+            'discountRate' => 0,
+        );
+        if ($discount <= 0.005) {
+            $fields['discountSum'] = 0;
+        }
+        if ($discount > 0.005) {
+            $fields['customized'] = 'Y';
+        }
+
+        $updResp = sendToBitrix('crm.item.productrow.update', array(
+            'id' => $rowId,
+            'fields' => $fields,
+        ));
+
+        if (!is_array($updResp) || isset($updResp['error'])) {
+            $e = '';
+            if (is_array($updResp) && isset($updResp['error_description'])) {
+                $e = (string)$updResp['error_description'];
+            } elseif (is_array($updResp) && isset($updResp['error'])) {
+                $e = (string)$updResp['error'];
+            } else {
+                $e = 'update_failed';
+            }
+            $rowErrors[] = array('row_id' => $rowId, 'error' => $e);
+        } else {
+            $updated++;
+        }
+    }
+
+    if ($updated === 0 && empty($rowErrors) && !$anyDiscount) {
+        return array(
+            'ok' => true,
+            'stage' => 'item_no_matching_products',
+            'api' => 'item',
+            'skipped' => true,
+            'rows_seen' => count($rows)
+        );
+    }
+
+    return array(
+        'ok' => count($rowErrors) === 0,
+        'stage' => count($rowErrors) > 0 ? 'crm.item.productrow.update_partial' : 'done',
+        'api' => 'item',
+        'rows_updated' => $updated,
+        'discount_applied' => $anyDiscount,
+        'row_errors' => $rowErrors,
+        'error' => count($rowErrors) > 0 && isset($rowErrors[0]['error']) ? $rowErrors[0]['error'] : ''
+    );
+}
+
+/**
+ * Классический crm.deal.productrows: DISCOUNT_TYPE_ID в старом API часто 2 = денежная скидка, 1 = %%.
+ *
+ * @param object $db
  * @param int $dealId
  * @return array
  */
-function bitrixDealTierDiscountSyncWhenQueueSkipped($db, $dealId)
+function bitrixDealTierDiscountSyncViaClassicProductRows($db, $dealId)
 {
     $dealId = intval($dealId);
-    if ($dealId <= 0) {
-        return array('ok' => false, 'stage' => 'invalid_deal', 'error' => 'bad_deal_id');
-    }
-
     $getResp = sendToBitrix('crm.deal.productrows.get', array('id' => $dealId));
     if (!is_array($getResp) || isset($getResp['error'])) {
         $err = '';
@@ -116,12 +276,12 @@ function bitrixDealTierDiscountSyncWhenQueueSkipped($db, $dealId)
         } else {
             $err = 'productrows_get_failed';
         }
-        return array('ok' => false, 'stage' => 'crm.deal.productrows.get', 'error' => $err);
+        return array('ok' => false, 'stage' => 'crm.deal.productrows.get', 'api' => 'classic', 'error' => $err);
     }
 
-    $rows = bitrixTierSyncUnwrapProductRows($getResp);
+    $rows = bitrixTierSyncUnwrapClassicProductRows($getResp);
     if (!is_array($rows) || empty($rows)) {
-        return array('ok' => true, 'stage' => 'empty_rows', 'skipped' => true);
+        return array('ok' => true, 'stage' => 'classic_empty', 'api' => 'classic', 'skipped' => true);
     }
 
     $outRows = array();
@@ -180,35 +340,28 @@ function bitrixDealTierDiscountSyncWhenQueueSkipped($db, $dealId)
         }
 
         $newRow = $item;
-        $newRow['DISCOUNT_TYPE_ID'] = 2;
-        $newRow['DISCOUNT_SUM'] = round($discount, 2);
-        if (isset($newRow['discountTypeId'])) {
-            $newRow['discountTypeId'] = 2;
-        }
-        if (isset($newRow['discountSum'])) {
-            $newRow['discountSum'] = $newRow['DISCOUNT_SUM'];
-        }
-
-        if ($discount <= 0.005) {
+        if ($discount > 0.005) {
+            $newRow['DISCOUNT_TYPE_ID'] = 2;
+            $newRow['DISCOUNT_SUM'] = round($discount, 2);
+        } else {
             $newRow['DISCOUNT_TYPE_ID'] = 0;
             $newRow['DISCOUNT_SUM'] = 0;
-            if (isset($newRow['discountTypeId'])) {
-                $newRow['discountTypeId'] = 0;
-            }
-            if (isset($newRow['discountSum'])) {
-                $newRow['discountSum'] = 0;
-            }
+        }
+        if (isset($newRow['discountTypeId'])) {
+            $newRow['discountTypeId'] = isset($newRow['DISCOUNT_TYPE_ID']) ? intval($newRow['DISCOUNT_TYPE_ID']) : 0;
+        }
+        if (isset($newRow['discountSum'])) {
+            $newRow['discountSum'] = isset($newRow['DISCOUNT_SUM']) ? floatval($newRow['DISCOUNT_SUM']) : 0;
         }
 
         $outRows[] = $newRow;
     }
 
     if (empty($outRows)) {
-        return array('ok' => true, 'stage' => 'no_output_rows', 'skipped' => true);
+        return array('ok' => true, 'stage' => 'classic_no_output', 'api' => 'classic', 'skipped' => true);
     }
 
-    $setPayload = array('id' => $dealId, 'rows' => $outRows);
-    $setResp = sendToBitrix('crm.deal.productrows.set', $setPayload);
+    $setResp = sendToBitrix('crm.deal.productrows.set', array('id' => $dealId, 'rows' => $outRows));
     if (!is_array($setResp) || isset($setResp['error'])) {
         $err = '';
         if (is_array($setResp) && isset($setResp['error_description'])) {
@@ -218,20 +371,64 @@ function bitrixDealTierDiscountSyncWhenQueueSkipped($db, $dealId)
         } else {
             $err = 'productrows_set_failed';
         }
-        return array('ok' => false, 'stage' => 'crm.deal.productrows.set', 'error' => $err);
+        return array('ok' => false, 'stage' => 'crm.deal.productrows.set', 'api' => 'classic', 'error' => $err);
     }
 
     return array(
         'ok' => true,
         'stage' => 'done',
+        'api' => 'classic',
         'rows' => count($outRows),
         'discount_applied' => $anyDiscount
     );
 }
 
 /**
- * Проверка флага в config (по умолчанию true).
- *
+ * @param object $db PDO
+ * @param int $dealId
+ * @return array
+ */
+function bitrixDealTierDiscountSyncWhenQueueSkipped($db, $dealId)
+{
+    $dealId = intval($dealId);
+    if ($dealId <= 0) {
+        return array('ok' => false, 'stage' => 'invalid_deal', 'error' => 'bad_deal_id');
+    }
+
+    $itemRes = bitrixDealTierDiscountSyncViaItemRows($db, $dealId);
+
+    $rowsUpdated = intval(isset($itemRes['rows_updated']) ? $itemRes['rows_updated'] : 0);
+    $rowErrors = isset($itemRes['row_errors']) && is_array($itemRes['row_errors']) ? $itemRes['row_errors'] : array();
+
+    if (!empty($rowErrors) && $rowsUpdated === 0) {
+        $itemRes['used_api'] = 'crm.item.productrow';
+        return $itemRes;
+    }
+
+    if ($rowsUpdated > 0) {
+        $itemRes['used_api'] = 'crm.item.productrow';
+        return $itemRes;
+    }
+
+    if (empty($itemRes['ok']) && isset($itemRes['stage']) && $itemRes['stage'] === 'crm.item.productrow.list') {
+        $classicRes = bitrixDealTierDiscountSyncViaClassicProductRows($db, $dealId);
+        $classicRes['item_precheck'] = $itemRes;
+        $classicRes['used_api'] = 'crm.deal.productrows';
+        return $classicRes;
+    }
+
+    if (!empty($itemRes['skipped'])) {
+        $classicRes = bitrixDealTierDiscountSyncViaClassicProductRows($db, $dealId);
+        $classicRes['item_precheck'] = $itemRes;
+        $classicRes['used_api'] = 'crm.deal.productrows';
+        return $classicRes;
+    }
+
+    $itemRes['used_api'] = 'crm.item.productrow';
+    return $itemRes;
+}
+
+/**
  * @param array $cfg
  * @return bool
  */
