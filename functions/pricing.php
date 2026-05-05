@@ -114,6 +114,34 @@ function getTargetTierByQty($qtyRolls) {
     return 'price_20_plus';
 }
 
+/**
+ * Сколько рулонов соответствует строке сделки для тиров: метраж / длина рулона (ceil), минимум 1.
+ * Если длина рулона не задана — используем ceil(кол-во) как целое число единиц.
+ *
+ * @param array $product
+ * @param float $quantityLine
+ * @return int
+ */
+function pricingRollCountForTier($product, $quantityLine) {
+    $qty = floatval($quantityLine);
+    if ($qty <= 0) {
+        return 1;
+    }
+    $rollLength = floatval(isset($product['roll_length']) ? $product['roll_length'] : 0);
+    if ($rollLength > 0.0001) {
+        $rolls = (int)ceil($qty / $rollLength);
+        if ($rolls < 1) {
+            $rolls = 1;
+        }
+        return $rolls;
+    }
+    $qi = (int)ceil($qty);
+    if ($qi < 1) {
+        $qi = 1;
+    }
+    return $qi;
+}
+
 function explainTierPriceResolution($product, $qtyRolls) {
     $resolved = resolveTierPrice($product, $qtyRolls);
     $targetTier = getTargetTierByQty($qtyRolls);

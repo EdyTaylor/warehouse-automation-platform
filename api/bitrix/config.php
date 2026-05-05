@@ -42,6 +42,10 @@ return [
     //
     // Стадии «Готовы на услуги» = PREPAYMENT_INVOICE при CATEGORY_ID 0 (проверено crm.status.list).
     //
+    // Если очередь склада пропущена по warehouse_queue, всё равно выровнять итог в Б24 через «Скидку» на строках
+    // (разница между каталожной суммой строки и целевым метражом по тирам в products).
+    'tier_discount_sync_when_warehouse_skipped' => true,
+
     // filter_enabled=false — заявка на склад при любом ONCRMDEALUPDATE с товарами.
     // filter_enabled=true — только если сделка в одной из rules (первая подошедшая).
     'warehouse_queue' => array(

@@ -22,6 +22,7 @@ function webhookLoadHandlers() {
     require_once __DIR__ . '/bitrix/send.php';
     require_once __DIR__ . '/../functions/stock_movements.php';
     require_once __DIR__ . '/../functions/deal_rows_sync_service.php';
+    require_once __DIR__ . '/../functions/bitrix_deal_tier_discount_sync.php';
 }
 
 /**
@@ -312,13 +313,24 @@ function handleNewDeal($db, $data) {
         $dealCtx = bitrixMergeDealWebhookAndCrm($deal, getDealDetails($dealId));
     }
     if (!bitrixWarehouseQueueAllowed($dealCtx, $gate)) {
+        $tierDiscountNew = null;
+        if (function_exists('bitrixTierDiscountSyncEnabled') && bitrixTierDiscountSyncEnabled($cfg)) {
+            $productsGate = getDealProducts($db, $dealId);
+            if (!empty($productsGate)) {
+                $tierDiscountNew = bitrixDealTierDiscountSyncWhenQueueSkipped($db, $dealId);
+            }
+        }
         webhookLogFinish($db, 'skipped_warehouse_gate', $dealId, null);
-        echo json_encode([
+        $outGate = array(
             'status' => 'skipped_warehouse_gate',
             'deal_id' => $dealId,
             'category_id' => isset($dealCtx['CATEGORY_ID']) ? $dealCtx['CATEGORY_ID'] : null,
             'stage_id' => isset($dealCtx['STAGE_ID']) ? $dealCtx['STAGE_ID'] : null,
-        ]);
+        );
+        if ($tierDiscountNew !== null) {
+            $outGate['tier_discount_sync'] = $tierDiscountNew;
+        }
+        echo json_encode($outGate);
         exit;
     }
     
@@ -523,13 +535,21 @@ function handleDealUpdate($db, $data) {
         }
         echo json_encode($outUpd);
     } elseif (!empty($products)) {
+        $tierDiscountSkip = null;
+        if (function_exists('bitrixTierDiscountSyncEnabled') && bitrixTierDiscountSyncEnabled($cfg)) {
+            $tierDiscountSkip = bitrixDealTierDiscountSyncWhenQueueSkipped($db, $dealId);
+        }
         webhookLogFinish($db, 'skipped_warehouse_gate', $dealId, $logProductIdDeal);
-        echo json_encode([
+        $outSkipGate = array(
             'status' => 'skipped_warehouse_gate',
             'deal_id' => $dealId,
             'category_id' => isset($dealCtx['CATEGORY_ID']) ? $dealCtx['CATEGORY_ID'] : null,
             'stage_id' => isset($dealCtx['STAGE_ID']) ? $dealCtx['STAGE_ID'] : null,
-        ]);
+        );
+        if ($tierDiscountSkip !== null) {
+            $outSkipGate['tier_discount_sync'] = $tierDiscountSkip;
+        }
+        echo json_encode($outSkipGate);
     } else {
         webhookFinishNoProducts($db, $dealId);
         echo json_encode(['status' => 'no_products', 'deal_id' => $dealId]);

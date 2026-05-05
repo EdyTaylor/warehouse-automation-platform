@@ -456,10 +456,17 @@ function queueDealForWarehouse($db, $data) {
                 $productId = intval($product['id']);
             }
 
-            // If B24 line price is empty, resolve local tier price by roll quantity.
+            // If B24 line price is empty, resolve tier by roll count (metrazh / roll_length).
             if ($price <= 0) {
-                $resolvedPrice = resolveTierPrice($product, intval(ceil($qty)));
-                $price = floatval($resolvedPrice['price']);
+                $rollsForTier = pricingRollCountForTier($product, $qty);
+                $resolvedPrice = resolveTierPrice($product, $rollsForTier);
+                $tierMoney = floatval($resolvedPrice['price']);
+                $rollLen = floatval(isset($product['roll_length']) ? $product['roll_length'] : 0);
+                if ($rollLen > 0.0001 && $tierMoney > 0) {
+                    $price = $tierMoney / $rollLen;
+                } else {
+                    $price = $tierMoney;
+                }
             }
 
             $ins->execute([$requestId, $b24_id, $productId, $name, $qty, $price]);
