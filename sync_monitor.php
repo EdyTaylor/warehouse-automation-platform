@@ -49,6 +49,30 @@ $realStageMap = integrationStagesSelectedMapFromRules(
     isset($realGateMerged['rules']) && is_array($realGateMerged['rules']) ? $realGateMerged['rules'] : array()
 );
 
+$retryB24DeveloperToken = '';
+$b24ResyncDeveloperDocs = array();
+if ($friendcrm_sync_mode === 'developers') {
+    require_once __DIR__ . '/includes/stock_operations_core.php';
+    ensureStockOperationTables($db);
+    $retryB24DeveloperToken = ensureFormToken('retry_b24_sync');
+    try {
+        $b24ResyncDeveloperDocs = $db->query("
+            SELECT id, operation_type, doc_number, supplier, total_amount, status, created_at, b24_document_id, b24_sync_status
+            FROM stock_operation_docs
+            WHERE operation_type IN ('receipt', 'writeoff')
+              AND b24_sync_status = 'sent'
+              AND COALESCE(b24_document_id, 0) > 0
+            ORDER BY id DESC
+            LIMIT 50
+        ")->fetchAll(PDO::FETCH_ASSOC);
+        if (!is_array($b24ResyncDeveloperDocs)) {
+            $b24ResyncDeveloperDocs = array();
+        }
+    } catch (Exception $e) {
+        $b24ResyncDeveloperDocs = array();
+    }
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     $action = (string)$_POST['action'];
 

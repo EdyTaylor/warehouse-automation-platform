@@ -19,7 +19,6 @@ require_once __DIR__ . '/functions/prg_flash.php';
 $successMsg = '';
 $errorMsg = '';
 ensureStockOperationTables($db);
-$showTechnicalB24Buttons = false;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'retry_b24_sync') {
     if (!validateFormToken('retry_b24_sync', isset($_POST['form_token']) ? $_POST['form_token'] : '')) {
@@ -66,7 +65,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             }
 
             if (intval(isset($doc['b24_document_id']) ? $doc['b24_document_id'] : 0) > 0 && (string)$doc['b24_sync_status'] === 'sent' && !$forceSentResync) {
-                throw new Exception('Документ уже синхронизирован в Б24: #' . intval($doc['b24_document_id']) . '. Для дозаливки строк нажмите «Дозалить строки в Б24» в таблице.');
+                throw new Exception('Документ уже синхронизирован в Б24: #' . intval($doc['b24_document_id']) . '. Дозаливку строк делайте во вкладке «Разработчикам» (блок «Дозаливка в Б24 уже отправленных документов»).');
             }
 
             $linesStmt = $db->prepare("
@@ -822,29 +821,7 @@ require 'includes/header.php';
                                         <button type="submit" name="retry_strategy" value="conduct_only" class="btn btn-primary btn-sm" title="Только проведение (conduct) уже созданного документа со строками. Строки не добавляет — если они не добавлены, нажмите «Дофиксировать».">Провести документ</button>
                                     </form>
                                 <?php elseif ($__tblCanRetry && $__tblB24St === 'sent'): ?>
-                                    <?php if ($showTechnicalB24Buttons): ?>
-                                        <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center; max-width:22rem;">
-                                            <form method="POST" style="display:inline;" class="stock-doc-retry-forms" onsubmit="return confirm(&quot;Дозалить в Битрикс24 недостающие строки из приложения в тот же документ? Если портал не разрешает добавлять строки к уже провёденному документу, синк может завершиться ошибкой — тогда воспользуйтесь второй кнопкой «Отменить проведение в Б24 и дозалить».&quot;);">
-                                                <input type="hidden" name="action" value="retry_b24_sync">
-                                                <input type="hidden" name="form_token" value="<?= htmlspecialchars($retryToken) ?>">
-                                                <input type="hidden" name="doc_id" value="<?= intval($d['id']) ?>">
-                                                <input type="hidden" name="retry_strategy" value="full">
-                                                <input type="hidden" name="force_sent_b24_resync" value="1">
-                                                <button type="submit" class="btn btn-warning btn-sm">Дозалить в Б24</button>
-                                            </form>
-                                            <form method="POST" style="display:inline;" class="stock-doc-retry-forms" onsubmit="return confirm(&quot;ОТМЕНА ПРОВЕДЕНИЯ в Битрикс24: складские остатки в портале могут измениться по правилам отмены. Затем будут добавлены строки из приложения и документ снова проведён. Это нужно только если простая дозаливка блокируется. Продолжить?&quot;);">
-                                                <input type="hidden" name="action" value="retry_b24_sync">
-                                                <input type="hidden" name="form_token" value="<?= htmlspecialchars($retryToken) ?>">
-                                                <input type="hidden" name="doc_id" value="<?= intval($d['id']) ?>">
-                                                <input type="hidden" name="retry_strategy" value="full">
-                                                <input type="hidden" name="force_sent_b24_resync" value="1">
-                                                <input type="hidden" name="b24_cancel_conduct_first" value="1">
-                                                <button type="submit" class="btn btn-danger btn-sm">Отменить проведение и дозалить</button>
-                                            </form>
-                                        </div>
-                                    <?php else: ?>
-                                        <small class="text-muted">Расширенные действия перенесены во вкладку разработчиков.</small>
-                                    <?php endif; ?>
+                                    <small class="text-muted">Дозаливка в Б24 для уже отправленных документов — во вкладке <a href="sync_monitor_developers.php#sec-b24-stock-doc-resync">Разработчикам → «Дозаливка в Б24…»</a>.</small>
                                 <?php else: ?>
                                     -
                                 <?php endif; ?>

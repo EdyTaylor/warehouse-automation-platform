@@ -164,6 +164,73 @@
         </div>
     </details>
 
+    <details class="card integration-section" id="sec-b24-stock-doc-resync" open>
+        <summary class="integration-section-summary">Дозаливка в Б24 уже отправленных документов (приход / списание)</summary>
+        <div class="integration-section-body">
+            <p class="text-muted">
+                Кнопки <strong>«Дозалить в Б24»</strong> и <strong>«Отменить проведение и дозалить»</strong> доступны здесь —
+                они не должны быть в общей таблице «Последние документы» на <a href="stock_operations.php">Складских операциях</a>.
+                Формы отправляют тот же запрос, что и на странице операций: после нажатия вы вернётесь на список документов с сообщением о результате.
+            </p>
+            <?php if (!isset($retryB24DeveloperToken) || $retryB24DeveloperToken === ''): ?>
+                <div class="alert alert-warning">Не удалось выдать токен формы — обновите страницу.</div>
+            <?php elseif (empty($b24ResyncDeveloperDocs)): ?>
+                <p class="text-muted">Нет документов прихода/списания со статусом синка «sent» и известным ID документа в Б24.</p>
+            <?php else: ?>
+                <div class="webhook-log-table-wrap" style="max-width:100%;overflow-x:auto;">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Тип</th>
+                                <th>№ документа</th>
+                                <th>Б24</th>
+                                <th>Действия</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php foreach ($b24ResyncDeveloperDocs as $bdev): ?>
+                                <tr>
+                                    <td><?= (int)$bdev['id'] ?></td>
+                                    <td><?= htmlspecialchars(isset($bdev['operation_type']) ? (string)$bdev['operation_type'] : '') ?></td>
+                                    <td><?= htmlspecialchars(isset($bdev['doc_number']) ? (string)$bdev['doc_number'] : '') ?></td>
+                                    <td>
+                                        <?php if (!empty($bdev['b24_document_id'])): ?>
+                                            #<?= (int)$bdev['b24_document_id'] ?> (<?= htmlspecialchars(isset($bdev['b24_sync_status']) ? (string)$bdev['b24_sync_status'] : '') ?>)
+                                        <?php else: ?>
+                                            —
+                                        <?php endif; ?>
+                                    </td>
+                                    <td>
+                                        <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;">
+                                            <form method="POST" action="stock_operations.php" style="display:inline;" class="stock-doc-retry-forms" onsubmit="return confirm(&quot;Дозалить в Битрикс24 недостающие строки из приложения в тот же документ? Если портал не разрешает добавлять строки к уже провёденному документу, синк может завершиться ошибкой — тогда воспользуйтесь второй кнопкой «Отменить проведение в Б24 и дозалить».&quot;);">
+                                                <input type="hidden" name="action" value="retry_b24_sync">
+                                                <input type="hidden" name="form_token" value="<?= htmlspecialchars($retryB24DeveloperToken) ?>">
+                                                <input type="hidden" name="doc_id" value="<?= (int)$bdev['id'] ?>">
+                                                <input type="hidden" name="retry_strategy" value="full">
+                                                <input type="hidden" name="force_sent_b24_resync" value="1">
+                                                <button type="submit" class="btn btn-warning btn-sm">Дозалить в Б24</button>
+                                            </form>
+                                            <form method="POST" action="stock_operations.php" style="display:inline;" class="stock-doc-retry-forms" onsubmit="return confirm(&quot;ОТМЕНА ПРОВЕДЕНИЯ в Битрикс24: складские остатки в портале могут измениться. Затем будут добавлены строки из приложения и документ снова проведён. Продолжить?&quot;);">
+                                                <input type="hidden" name="action" value="retry_b24_sync">
+                                                <input type="hidden" name="form_token" value="<?= htmlspecialchars($retryB24DeveloperToken) ?>">
+                                                <input type="hidden" name="doc_id" value="<?= (int)$bdev['id'] ?>">
+                                                <input type="hidden" name="retry_strategy" value="full">
+                                                <input type="hidden" name="force_sent_b24_resync" value="1">
+                                                <input type="hidden" name="b24_cancel_conduct_first" value="1">
+                                                <button type="submit" class="btn btn-danger btn-sm">Отменить проведение и дозалить</button>
+                                            </form>
+                                        </div>
+                                    </td>
+                                </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+            <?php endif; ?>
+        </div>
+    </details>
+
     <details class="card integration-section" id="sec-funnels" open>
         <summary class="integration-section-summary">Воронки и стадии из Битрикс24</summary>
         <div class="integration-section-body">
