@@ -6,6 +6,7 @@ header('Content-Type: application/json; charset=utf-8');
 require_once __DIR__ . '/../../db.php';
 require_once __DIR__ . '/../../functions/pricing.php';
 require_once __DIR__ . '/../../functions/sale_order_allocations.php';
+require_once __DIR__ . '/../../functions/b24_sale_pricing.php';
 
 function ensureColumnExists($db, $tableName, $columnName, $columnSql) {
     $stmt = $db->prepare("
@@ -348,6 +349,8 @@ function queueDealForWarehouse($db, $data) {
     // 2) manual queue: upsert request + replace lines
     $db->beginTransaction();
     try {
+        ensureB24SaleLinesFinanceColumns($db);
+
         $db->prepare("
             INSERT INTO b24_sale_requests (b24_deal_id, deal_name, responsible, status, created_at, updated_at)
             VALUES (?, ?, ?, 'new', NOW(), NOW())
@@ -377,8 +380,8 @@ function queueDealForWarehouse($db, $data) {
 
         $ins = $db->prepare("
             INSERT INTO b24_sale_lines
-            (request_id, b24_product_id, product_id, product_name, quantity_m, price_per_unit, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'new', NOW())
+            (request_id, b24_product_id, product_id, product_name, quantity_m, price_per_unit, list_price_per_unit, line_total_list, line_total_fact, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', NOW())
         ");
 
         foreach ($products as $p) {
@@ -386,6 +389,7 @@ function queueDealForWarehouse($db, $data) {
             $name = isset($p['name']) ? $p['name'] : 'Без названия';
             $qty = floatval(isset($p['quantity']) ? $p['quantity'] : 0);
             $price = floatval(isset($p['price']) ? $p['price'] : 0);
+            $b24Fact = floatval(isset($p['line_total_fact']) ? $p['line_total_fact'] : 0);
 
             if ($qty <= 0) {
                 continue;
@@ -473,7 +477,26 @@ function queueDealForWarehouse($db, $data) {
                 }
             }
 
-            $ins->execute([$requestId, $b24_id, $productId, $name, $qty, $price]);
+            $listUnit = $price;
+            $listTotalPlanned = round($listUnit * $qty, 2);
+            if ($b24Fact > 0.0001) {
+                $factTotal = round($b24Fact, 2);
+            } else {
+                $factTotal = $listTotalPlanned;
+            }
+            $factUnit = $qty > 0.0001 ? round($factTotal / $qty, 4) : 0;
+
+            $ins->execute(array(
+                $requestId,
+                $b24_id,
+                $productId,
+                $name,
+                $qty,
+                $factUnit,
+                $listUnit,
+                $listTotalPlanned,
+                $factTotal
+            ));
         }
 
         autoAllocateRequestLines($db, $requestId, $deal_id);

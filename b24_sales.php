@@ -4,6 +4,7 @@ error_reporting(E_ALL);
 header('Content-Type: text/html; charset=utf-8');
 
 require __DIR__ . '/db.php';
+require_once __DIR__ . '/functions/b24_sale_pricing.php';
 require_once __DIR__ . '/functions/stock_movements.php';
 require_once __DIR__ . '/functions/app_settings.php';
 require_once __DIR__ . '/functions/integration_sync_control.php';
@@ -42,6 +43,8 @@ function ensureDealRowsSyncSchema($db) {
     ensureColumnExists($db, 'sales', 'cost_fact', "`cost_fact` decimal(14,2) NOT NULL DEFAULT 0");
     ensureColumnExists($db, 'sales', 'gross_profit', "`gross_profit` decimal(14,2) NOT NULL DEFAULT 0");
     ensureColumnExists($db, 'sales', 'gross_margin_percent', "`gross_margin_percent` decimal(8,2) NOT NULL DEFAULT 0");
+    ensureSalesRevenuePlannedColumn($db);
+    ensureB24SaleLinesFinanceColumns($db);
 
     $db->exec("
         CREATE TABLE IF NOT EXISTS b24_integration_errors (
@@ -271,7 +274,7 @@ function normalizeDealProductRows($rows) {
 
 function buildDealRowsPayloadForRequest($db, $requestId) {
     $stmt = $db->prepare("
-        SELECT b24_product_id, product_name, quantity_m, price_per_unit
+        SELECT b24_product_id, product_name, quantity_m, price_per_unit, list_price_per_unit
         FROM b24_sale_lines
         WHERE request_id = ?
         ORDER BY id ASC
@@ -282,7 +285,7 @@ function buildDealRowsPayloadForRequest($db, $requestId) {
     foreach ($rows as $row) {
         $productId = intval(isset($row['b24_product_id']) ? $row['b24_product_id'] : 0);
         $qty = floatval(isset($row['quantity_m']) ? $row['quantity_m'] : 0);
-        $price = floatval(isset($row['price_per_unit']) ? $row['price_per_unit'] : 0);
+        $price = b24SaleLineListPriceForBitrixSync($row);
         if ($productId <= 0 || $qty <= 0) {
             continue;
         }
@@ -811,24 +814,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             }
                         }
 
-                        $price = floatval($line['price_per_unit']);
                         $qty = floatval($line['quantity_m']);
-                        $revenue = $qty * $price;
+                        $resolvedRv = b24SaleLineResolveRevenueForSale($line);
+                        $price = floatval($resolvedRv['price_per_unit']);
+                        $revenue = floatval($resolvedRv['total']);
+                        $revenuePlanned = floatval($resolvedRv['revenue_planned']);
                         $grossProfit = $revenue - $costFact;
                         $grossMarginPercent = $revenue > 0 ? (($grossProfit / $revenue) * 100) : 0;
                         $db->prepare("
-                            INSERT INTO sales (product_id, type, quantity, price_per_unit, total, deal_id, cost_fact, gross_profit, gross_margin_percent)
-                            VALUES (?, 'meter', ?, ?, ?, ?, ?, ?, ?)
-                        ")->execute([
+                            INSERT INTO sales (product_id, type, quantity, price_per_unit, total, revenue_planned, deal_id, cost_fact, gross_profit, gross_margin_percent)
+                            VALUES (?, 'meter', ?, ?, ?, ?, ?, ?, ?, ?)
+                        ")->execute(array(
                             intval($line['product_id']),
                             $qty,
                             $price,
                             $revenue,
+                            $revenuePlanned,
                             intval($line['b24_deal_id']),
                             round($costFact, 2),
                             round($grossProfit, 2),
                             round($grossMarginPercent, 2)
-                        ]);
+                        ));
 
                         logAndSyncMovement($db, [
                             'product_id' => intval($line['product_id']),

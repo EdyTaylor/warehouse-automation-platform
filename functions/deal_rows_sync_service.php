@@ -1,6 +1,7 @@
 <?php
 
 require_once __DIR__ . '/../api/bitrix/send.php';
+require_once __DIR__ . '/b24_sale_pricing.php';
 
 function pickerEnsureDealRowsSyncSchema($db) {
     $ensureColumn = function($tableName, $columnName, $columnSql) use ($db) {
@@ -67,8 +68,9 @@ function pickerNormalizeDealRows($rows) {
 }
 
 function pickerBuildDealRowsPayloadForRequest($db, $requestId) {
+    ensureB24SaleLinesFinanceColumns($db);
     $stmt = $db->prepare("
-        SELECT b24_product_id, product_name, quantity_m, price_per_unit
+        SELECT b24_product_id, product_name, quantity_m, price_per_unit, list_price_per_unit
         FROM b24_sale_lines
         WHERE request_id = ?
         ORDER BY id ASC
@@ -79,7 +81,7 @@ function pickerBuildDealRowsPayloadForRequest($db, $requestId) {
     foreach ($rows as $row) {
         $productId = intval(isset($row['b24_product_id']) ? $row['b24_product_id'] : 0);
         $qty = floatval(isset($row['quantity_m']) ? $row['quantity_m'] : 0);
-        $price = floatval(isset($row['price_per_unit']) ? $row['price_per_unit'] : 0);
+        $price = b24SaleLineListPriceForBitrixSync($row);
         if ($productId <= 0 || $qty <= 0) {
             continue;
         }

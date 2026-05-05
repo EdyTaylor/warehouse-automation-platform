@@ -6,6 +6,7 @@ header('Content-Type: application/json; charset=utf-8');
 require_once __DIR__ . '/../db.php';
 $db = getDB();
 require_once __DIR__ . '/../functions/webhook_log_schema.php';
+require_once __DIR__ . '/../functions/b24_sale_pricing.php';
 
 /** @var int|null Строка в webhook_log текущего запроса (для итога обработки). */
 $GLOBALS['webhook_log_id'] = null;
@@ -797,6 +798,7 @@ function ensureSalesFinanceColumns($db) {
     ensureColumnExists($db, 'sales', 'cost_fact', '`cost_fact` decimal(14,2) NOT NULL DEFAULT 0');
     ensureColumnExists($db, 'sales', 'gross_profit', '`gross_profit` decimal(14,2) NOT NULL DEFAULT 0');
     ensureColumnExists($db, 'sales', 'gross_margin_percent', '`gross_margin_percent` decimal(8,2) NOT NULL DEFAULT 0');
+    ensureSalesRevenuePlannedColumn($db);
 }
 
 function realizeWarehouseDealFromReserve($db, $dealId) {
@@ -913,26 +915,29 @@ function realizeWarehouseDealFromReserve($db, $dealId) {
                 }
             }
 
-            $price = floatval(isset($line['price_per_unit']) ? $line['price_per_unit'] : 0);
             $qty = floatval($line['quantity_m']);
-            $revenue = $qty * $price;
+            $resolved = b24SaleLineResolveRevenueForSale($line);
+            $price = floatval($resolved['price_per_unit']);
+            $revenue = floatval($resolved['total']);
+            $revenuePlanned = floatval($resolved['revenue_planned']);
             $grossProfit = $revenue - $costFact;
             $grossMarginPercent = $revenue > 0 ? (($grossProfit / $revenue) * 100) : 0;
             $productId = intval($line['product_id']);
 
             $db->prepare("
-                INSERT INTO sales (product_id, type, quantity, price_per_unit, total, deal_id, cost_fact, gross_profit, gross_margin_percent)
-                VALUES (?, 'meter', ?, ?, ?, ?, ?, ?, ?)
-            ")->execute([
+                INSERT INTO sales (product_id, type, quantity, price_per_unit, total, revenue_planned, deal_id, cost_fact, gross_profit, gross_margin_percent)
+                VALUES (?, 'meter', ?, ?, ?, ?, ?, ?, ?, ?)
+            ")->execute(array(
                 $productId,
                 $qty,
                 $price,
                 $revenue,
+                $revenuePlanned,
                 $dealId,
                 round($costFact, 2),
                 round($grossProfit, 2),
                 round($grossMarginPercent, 2)
-            ]);
+            ));
 
             $movementIds[] = logStockMovement($db, [
                 'product_id' => $productId,
@@ -1176,11 +1181,15 @@ function bitrixBuildWarehouseProductsFromCrmRows(array $rows) {
             continue;
         }
 
+        $crmMoney = b24SalePricingParseRowTotals($item, $price, $quantity);
+
         $products[] = array(
             'id' => $productId,
             'name' => $name,
             'quantity' => $quantity,
-            'price' => $price
+            'price' => $price,
+            'line_total_list' => $crmMoney['list_subtotal'],
+            'line_total_fact' => $crmMoney['fact_total']
         );
     }
 
