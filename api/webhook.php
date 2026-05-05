@@ -619,7 +619,15 @@ function extractDynamicItemIds($data) {
 }
 
 function getUserName($db, $userId) {
-    $uid = intval($userId);
+    $uid = 0;
+    if (is_numeric($userId)) {
+        $uid = intval($userId);
+    } else {
+        $rawUser = trim((string)$userId);
+        if (preg_match('/(\d+)/', $rawUser, $m)) {
+            $uid = intval($m[1]);
+        }
+    }
     if ($uid <= 0) {
         return '';
     }

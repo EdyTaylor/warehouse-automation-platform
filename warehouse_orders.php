@@ -34,11 +34,18 @@ function responsibleLabel($rawResponsible) {
     if ($raw === '') {
         return '';
     }
-    if (!preg_match('/^User\s+(\d+)$/i', $raw, $m)) {
+    if (!preg_match('/^(?:User\s+(\d+)|user_(\d+)|(\d+))$/i', $raw, $m)) {
         return $raw;
     }
 
-    $uid = intval($m[1]);
+    $uid = 0;
+    if (!empty($m[1])) {
+        $uid = intval($m[1]);
+    } elseif (!empty($m[2])) {
+        $uid = intval($m[2]);
+    } elseif (!empty($m[3])) {
+        $uid = intval($m[3]);
+    }
     if ($uid <= 0) {
         return $raw;
     }
