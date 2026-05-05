@@ -2,8 +2,9 @@
         <div class="container">
             <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
                 <div>
-                    <p class="mb-0">© 2026 Склад пленок. Все права защищены.</p>
-                    <p class="mb-0 text-muted" style="color: rgba(255,255,255,0.7) !important;">Версия 2.0 | Интеграция с Битрикс24</p>
+                    <p class="mb-0">© 2026 FriendCRM. Все права защищены.</p>
+                    <p class="mb-0 text-muted" style="color: rgba(255,255,255,0.7) !important;">Версия 2,5 | Интеграция с Битрикс24</p>
+                    <p class="mb-0 text-muted" style="color: rgba(255,255,255,0.7) !important;">Сайт: <a href="https://friendcrm.org.kg/" target="_blank" rel="noopener noreferrer" style="color:#ffffff;">friendcrm.org.kg</a></p>
                 </div>
                 <div class="d-flex gap-2 flex-wrap">
                     <a href="api/bitrix/sync_stock.php?push=1" class="btn btn-outline btn-sm" target="_blank">📤 Синхронизировать остатки</a>

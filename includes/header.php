@@ -7,7 +7,7 @@ $current_page = basename($_SERVER['PHP_SELF']);
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title><?= isset($page_title) ? htmlspecialchars($page_title) : 'Склад пленок' ?></title>
+    <title><?= isset($page_title) ? htmlspecialchars($page_title) : 'Склад LLumar' ?></title>
     <script>
         (function () {
             window.setUiTheme = function (theme) {
@@ -30,7 +30,7 @@ $current_page = basename($_SERVER['PHP_SELF']);
     <header class="header">
         <div class="header-content">
             <div class="header-brand">
-                <h1 class="header-title"><a href="dashboard.php" class="header-home-link">🏭 Склад пленок</a></h1>
+                <h1 class="header-title"><a href="dashboard.php" class="header-home-link">🏭 Склад LLumar</a></h1>
                 <span class="header-tagline">Система управления складскими операциями</span>
             </div>
             <nav class="nav" aria-label="Основная навигация">
