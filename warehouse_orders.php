@@ -439,6 +439,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     }
                     $error = $e->getMessage();
                 }
+            } elseif ($action === 'delete_request') {
+                ensureOrderAllocationsTable($db);
+                $db->beginTransaction();
+                try {
+                    $dealIdRow = intval(isset($request['b24_deal_id']) ? $request['b24_deal_id'] : 0);
+                    if ($dealIdRow > 0) {
+                        releaseRequestAllocations($db, $requestId, null);
+                        $db->prepare("
+                            UPDATE rolls
+                            SET reserved = 0, deal_id = NULL, reserved_length = 0
+                            WHERE deal_id = ?
+                        ")->execute(array($dealIdRow));
+                    }
+
+                    $db->prepare("
+                        DELETE c FROM b24_sale_line_cuts c
+                        INNER JOIN b24_sale_lines l ON l.id = c.line_id
+                        WHERE l.request_id = ?
+                    ")->execute(array($requestId));
+                    $db->prepare("DELETE FROM order_allocations WHERE sale_request_id = ?")
+                        ->execute(array($requestId));
+                    $db->prepare("DELETE FROM b24_sale_lines WHERE request_id = ?")
+                        ->execute(array($requestId));
+                    $db->prepare("DELETE FROM b24_sale_requests WHERE id = ?")
+                        ->execute(array($requestId));
+
+                    $db->commit();
+                    $message = 'Заявка удалена.';
+                } catch (Exception $e) {
+                    if ($db->inTransaction()) {
+                        $db->rollBack();
+                    }
+                    $error = $e->getMessage();
+                }
             } elseif ($action === 'retry_deal_rows_sync') {
                 $syncResult = pickerSyncDealRowsForRequest($db, $requestId, true);
                 if (!empty($syncResult['ok'])) {
@@ -857,6 +891,15 @@ require __DIR__ . '/includes/header.php';
                     <button class="btn btn-success" type="submit" name="action" value="approve_pick" onclick="return confirm('Отправить в Б24 триггер Отгрузить?');">Отгрузить</button>
                     <button class="btn btn-warning" type="submit" name="action" value="reject_pick" onclick="return confirm('Отправить в Б24 триггер Отклонить?');">Отклонить</button>
                     <button class="btn btn-danger" type="submit" name="action" value="cancel_reserve" onclick="return confirm('Снять резерв по заявке? Сделка в Б24 не будет закрыта.');">Снять резерв</button>
+                </div>
+                <div style="display:flex; justify-content:flex-end; margin-top:20px;">
+                    <button
+                        class="btn btn-danger btn-sm"
+                        type="submit"
+                        name="action"
+                        value="delete_request"
+                        onclick="return confirm('Удалить заявку полностью? Будут удалены строки и подбор по этой заявке. Действие необратимо.');"
+                    >Удалить заявку</button>
                 </div>
             </form>
         </div>
