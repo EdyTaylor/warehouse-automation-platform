@@ -291,6 +291,7 @@ function handleDealUpdate($db, $data) {
     $cfg = require __DIR__ . '/bitrix/config.php';
     $gate = integrationMergedReserveGate($db, $cfg);
     $dealCtx = bitrixMergeDealWebhookAndCrm($deal, $dealData);
+    $realGate = integrationMergedRealizationGate($db, $cfg);
 
     // === ДИАГНОСТИКА ===
     $logDir = __DIR__ . '/../logs';
@@ -311,6 +312,21 @@ function handleDealUpdate($db, $data) {
         || (strpos($stageUpper, 'LOSE') !== false)
         || (strpos($stageUpper, 'CANCEL') !== false);
 
+    $isPaidByCurrentStage = bitrixRealizationIsPaid($dealData, $realGate);
+    $realizedReqStmt = $db->prepare("
+        SELECT id, status, picker_status
+        FROM b24_sale_requests
+        WHERE b24_deal_id = ?
+        LIMIT 1
+    ");
+    $realizedReqStmt->execute(array($dealId));
+    $realizedReq = $realizedReqStmt->fetch(PDO::FETCH_ASSOC);
+    $wasRealizedInApp = is_array($realizedReq)
+        && (
+            (string)(isset($realizedReq['status']) ? $realizedReq['status'] : '') === 'completed'
+            || (string)(isset($realizedReq['picker_status']) ? $realizedReq['picker_status'] : '') === 'shipped'
+        );
+
     if ($isCancelledByBitrix) {
         file_put_contents($logFile, date('c') . " [DEAL_#$dealId] ↩ ОТМЕНА В Б24: запускаю cancelDealReservations()" . PHP_EOL, FILE_APPEND);
         try {
@@ -330,6 +346,31 @@ function handleDealUpdate($db, $data) {
                 'status' => 'error',
                 'deal_id' => $dealId,
                 'error' => 'cancel_failed'
+            ));
+            return;
+        }
+    }
+
+    // Отмена реализации без закрытия сделки (перевод из «оплачено/отгружено» обратно в не-оплаченную стадию).
+    if ($wasRealizedInApp && !$isPaidByCurrentStage) {
+        file_put_contents($logFile, date('c') . " [DEAL_#$dealId] ↩ ОТМЕНА РЕАЛИЗАЦИИ ПО СТАДИИ: was_realized=YES, isPaidNow=FALSE; запускаю cancelDealReservations()" . PHP_EOL, FILE_APPEND);
+        try {
+            cancelDealReservations($db, $dealId);
+            webhookLogFinish($db, 'deal_realization_reverted', $dealId, $logProductIdDeal);
+            echo json_encode(array(
+                'status' => 'deal_realization_reverted',
+                'deal_id' => $dealId,
+                'stage_id' => $stg,
+                'semantics' => $sem
+            ));
+            return;
+        } catch (Exception $e) {
+            file_put_contents($logFile, date('c') . " [DEAL_#$dealId] ✗ ОШИБКА cancelDealReservations() при откате реализации: " . $e->getMessage() . PHP_EOL, FILE_APPEND);
+            webhookLogFinish($db, 'deal_realization_revert_failed', $dealId, $logProductIdDeal, $e->getMessage());
+            echo json_encode(array(
+                'status' => 'error',
+                'deal_id' => $dealId,
+                'error' => 'realization_revert_failed'
             ));
             return;
         }
@@ -386,8 +427,6 @@ function handleDealUpdate($db, $data) {
     }
 
     // 🔥 ОБРАБОТКА РЕАЛИЗАЦИИ (warehouse_realization)
-    $realGate = integrationMergedRealizationGate($db, $cfg);
-
     $dealDataFresh = $dealData;
 
     for ($i = 0; $i < 3; $i++) {
