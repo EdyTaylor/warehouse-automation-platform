@@ -275,14 +275,14 @@ function handleNewDeal($db, $data) {
 function handleDealUpdate($db, $data) {
     $deal = extractDealPayload($data);
     $dealId = intval(isset($deal['ID']) ? $deal['ID'] : 0);
-    
+
     if ($dealId <= 0) {
         webhookLogFinish($db, 'deal_update_invalid_id');
         echo json_encode(['error' => 'Invalid deal ID']);
         exit;
     }
-    
-    // Получаем актуальные товары и пересобираем заявку для кладовщика
+
+    // Получаем актульные товары и пересобираем заявку для кладовщика
     $dealData = getDealDetails($dealId);
     $products = getDealProducts($db, $dealId);
     $firstPidUpd = (!empty($products) && isset($products[0]['id'])) ? intval($products[0]['id']) : 0;
@@ -291,7 +291,41 @@ function handleDealUpdate($db, $data) {
     $cfg = require __DIR__ . '/bitrix/config.php';
     $gate = integrationMergedReserveGate($db, $cfg);
     $dealCtx = bitrixMergeDealWebhookAndCrm($deal, $dealData);
-    
+
+    // === ДИАГНОСТИКА ===
+    $logDir = __DIR__ . '/../logs';
+    if (!is_dir($logDir)) {
+        @mkdir($logDir, 0755, true);
+    }
+    $logFile = $logDir . '/bitrix_realization_check.log';
+
+    $cat = isset($dealData['CATEGORY_ID']) ? $dealData['CATEGORY_ID'] : 'NULL';
+    $stg = isset($dealData['STAGE_ID']) ? $dealData['STAGE_ID'] : 'NULL';
+    $sem = isset($dealData['SEMANTICS']) ? $dealData['SEMANTICS'] : 'NULL';
+
+    file_put_contents($logFile, date('c') . " [DEAL_#$dealId] CATEGORY_ID=$cat | STAGE_ID=$stg | SEMANTICS=$sem" . PHP_EOL, FILE_APPEND);
+
+    // Проверяем резерв
+    $checkReq = $db->prepare("SELECT id, status FROM b24_sale_requests WHERE b24_deal_id = ? LIMIT 1");
+    $checkReq->execute([$dealId]);
+    $reqData = $checkReq->fetch(PDO::FETCH_ASSOC);
+    if ($reqData) {
+        $reqId = $reqData['id'];
+        $checkLines = $db->prepare("SELECT COUNT(*) as cnt FROM b24_sale_lines WHERE request_id = ?");
+        $checkLines->execute([$reqId]);
+        $lineCnt = $checkLines->fetch(PDO::FETCH_ASSOC)['cnt'];
+
+        $checkCuts = $db->prepare("SELECT COUNT(*) as cnt FROM b24_sale_line_cuts WHERE line_id IN (SELECT id FROM b24_sale_lines WHERE request_id = ?)");
+        $checkCuts->execute([$reqId]);
+        $cutCnt = $checkCuts->fetch(PDO::FETCH_ASSOC)['cnt'];
+
+        file_put_contents($logFile, date('c') . " [DEAL_#$dealId] REQUEST_#$reqId: status={$reqData['status']} | lines=$lineCnt | cuts=$cutCnt" . PHP_EOL, FILE_APPEND);
+    } else {
+        file_put_contents($logFile, date('c') . " [DEAL_#$dealId] NO_REQUEST_IN_DB" . PHP_EOL, FILE_APPEND);
+    }
+    // === КОНЕЦ ДИАГНОСТИКИ ===
+
+    // 🔥 ОБРАБОТКА РЕЗЕРВА (warehouse_queue)
     if (!empty($products) && bitrixWarehouseQueueAllowed($dealCtx, $gate)) {
         $result = queueDealForWarehouse($db, [
             'deal_id' => $dealId,
@@ -321,20 +355,43 @@ function handleDealUpdate($db, $data) {
         echo json_encode(['status' => 'no_products', 'deal_id' => $dealId]);
     }
 
+    // 🔥 ОБРАБОТКА РЕАЛИЗАЦИИ (warehouse_realization)
     $realGate = integrationMergedRealizationGate($db, $cfg);
-    
-    $dealDataFresh = $dealData; // начальное значение
+
+    $dealDataFresh = $dealData;
 
     for ($i = 0; $i < 3; $i++) {
-    $dealDataFresh = getDealDetails($dealId);
+        $dealDataFresh = getDealDetails($dealId);
 
-    if (bitrixRealizationIsPaid($dealDataFresh, $realGate)) {
-        break;
+        $isPaid = bitrixRealizationIsPaid($dealDataFresh, $realGate);
+
+        file_put_contents($logFile, date('c') . " [DEAL_#$dealId] CHECK_$i: bitrixRealizationIsPaid=" . ($isPaid ? 'TRUE' : 'FALSE') . " | gate_filter=" . ($realGate['filter_enabled'] ? 'ON' : 'OFF') . PHP_EOL, FILE_APPEND);
+
+        if ($isPaid) {
+            file_put_contents($logFile, date('c') . " [DEAL_#$dealId] ✓ РЕАЛИЗАЦИЯ ДЕТЕКТИРОВАНА, прерываю цикл" . PHP_EOL, FILE_APPEND);
+            break;
+        }
+
+        if ($i < 2) {
+            usleep(300000);
+        }
     }
 
-    usleep(300000);
-}
-    applyDealPaidOrReserveMark($db, $dealId, $dealDataFresh, $realGate);
+    // Логируем решение перед применением
+    $isPaidFinal = bitrixRealizationIsPaid($dealDataFresh, $realGate);
+    file_put_contents($logFile, date('c') . " [DEAL_#$dealId] FINAL_DECISION: isPaid=" . ($isPaidFinal ? 'TRUE' : 'FALSE') . " | realGate=" . json_encode($realGate) . PHP_EOL, FILE_APPEND);
+
+    if ($isPaidFinal) {
+        file_put_contents($logFile, date('c') . " [DEAL_#$dealId] → CALLING realizeWarehouseDealFromReserve()" . PHP_EOL, FILE_APPEND);
+        try {
+            $realRes = realizeWarehouseDealFromReserve($db, $dealId);
+            file_put_contents($logFile, date('c') . " [DEAL_#$dealId] ✓ РЕАЛИЗАЦИЯ OK: " . json_encode($realRes, JSON_UNESCAPED_UNICODE) . PHP_EOL, FILE_APPEND);
+        } catch (Throwable $e) {
+            file_put_contents($logFile, date('c') . " [DEAL_#$dealId] ✗ РЕАЛИЗАЦИЯ EXCEPTION: " . $e->getMessage() . PHP_EOL . $e->getTraceAsString() . PHP_EOL, FILE_APPEND);
+        }
+    } else {
+        file_put_contents($logFile, date('c') . " [DEAL_#$dealId] → НЕ РЕАЛИЗОВАНА (isPaid=FALSE)" . PHP_EOL, FILE_APPEND);
+    }
 }
 
 function handleNewProduct($db, $data) {
@@ -493,8 +550,6 @@ function extractDynamicItemIds($data) {
 }
 
 function getUserName($db, $userId) {
-    // Здесь можно добавить получение имени пользователя из Б24
-    // Пока возвращаем ID
     return "User {$userId}";
 }
 
