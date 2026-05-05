@@ -118,3 +118,18 @@ if ($totalAvailable < $quantity) {
         'message' => $e->getMessage()
     ]);
 }
+
+# убедиться в ветке и состоянии
+git status
+git branch --show-current
+
+# получить последние изменения и вмержить
+git fetch origin
+git pull --rebase origin master
+
+# добавить изменённые файлы и закоммитить
+git add api/webhook.php api/bitrix/sale.php
+git commit -m "Добавить логирование решения реализации и диагностику обработки вебхуков B24"
+
+# запушить в master
+git push origin master

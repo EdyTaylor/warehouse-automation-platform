@@ -1,4 +1,4 @@
-<?php
+    <?php
 
 require_once __DIR__ . '/app_settings.php';
 
@@ -113,4 +113,99 @@ function integrationBuildGateFromPost($filterEnabled, $stagesPostMatrix)
         'filter_enabled' => !empty($filterEnabled),
         'rules' => integrationBuildRulesFromPostStageMatrix($stagesPostMatrix),
     );
+}
+
+/**
+ * Решение: считается ли сделка оплаченной/реализованной по правилам.
+ * - $dealData — результат crm.deal.get (массив).
+ * - $gate — структура из config.php (filter_enabled + rules).
+ *
+ * Правила:
+ * - Если gate.filter_enabled = false: старая эвристика — SEMANTICS == 's' или STAGE_ID содержит 'WON'/'FINAL_INVOICE'.
+ * - Если gate.filter_enabled = true: пройти по rules; для rule:
+ *     - если category_ids задан и CATEGORY_ID не входит — пропустить;
+ *     - если stages_exact задан и STAGE_ID строго совпадает с одним из них — true.
+ */
+if (!function_exists('bitrixRealizationIsPaid')) {
+    function bitrixRealizationIsPaid(array $dealData, array $gate = null) {
+        if (!is_array($dealData)) {
+            return false;
+        }
+
+        // Normalise
+        $category = null;
+        if (isset($dealData['CATEGORY_ID'])) {
+            $category = (string)$dealData['CATEGORY_ID'];
+        } elseif (isset($dealData['CATEGORY']) ) {
+            $category = (string)$dealData['CATEGORY'];
+        }
+
+        $stage = '';
+        if (isset($dealData['STAGE_ID'])) {
+            $stage = (string)$dealData['STAGE_ID'];
+        } elseif (isset($dealData['STATUS_ID'])) {
+            $stage = (string)$dealData['STATUS_ID'];
+        }
+        $stageNorm = strtoupper(trim($stage));
+
+        $sem = '';
+        if (isset($dealData['SEMANTICS'])) {
+            $sem = strtolower(trim((string)$dealData['SEMANTICS']));
+        }
+
+        // Use default gate if none
+        if ($gate === null) {
+            $gate = array('filter_enabled' => false, 'rules' => array());
+        }
+
+        // If filter disabled — legacy heuristic
+        if (empty($gate['filter_enabled'])) {
+            if ($sem === 's') {
+                return true;
+            }
+            if ($stageNorm !== '' && (strpos($stageNorm, 'WON') !== false || strpos($stageNorm, 'FINAL_INVOICE') !== false || strpos($stageNorm, 'CLOSED') !== false)) {
+                return true;
+            }
+            return false;
+        }
+
+        // Filter enabled — evaluate explicit rules
+        if (isset($gate['rules']) && is_array($gate['rules'])) {
+            foreach ($gate['rules'] as $rule) {
+                // category check (if present)
+                if (isset($rule['category_ids']) && is_array($rule['category_ids']) && !empty($rule['category_ids'])) {
+                    $matchedCategory = false;
+                    foreach ($rule['category_ids'] as $cid) {
+                        if ((string)$cid === (string)$category) {
+                            $matchedCategory = true;
+                            break;
+                        }
+                    }
+                    if (!$matchedCategory) {
+                        continue;
+                    }
+                }
+
+                // stages exact
+                if (isset($rule['stages_exact']) && is_array($rule['stages_exact']) && !empty($rule['stages_exact'])) {
+                    foreach ($rule['stages_exact'] as $s) {
+                        if ($stage === (string)$s || $stageNorm === strtoupper((string)$s) || strpos($stage, (string)$s) === 0) {
+                            return true;
+                        }
+                    }
+                }
+
+                // fallback: check semantics if provided in rule
+                if (isset($rule['semantics']) && is_array($rule['semantics'])) {
+                    foreach ($rule['semantics'] as $sv) {
+                        if ($sem === strtolower((string)$sv)) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
 }
