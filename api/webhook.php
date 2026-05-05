@@ -21,6 +21,87 @@ function webhookLoadHandlers() {
     require_once __DIR__ . '/bitrix/warehouse_gate.php';
     require_once __DIR__ . '/bitrix/send.php';
     require_once __DIR__ . '/../functions/stock_movements.php';
+    require_once __DIR__ . '/../functions/deal_rows_sync_service.php';
+}
+
+/**
+ * Не перезаписываем строки сделки в Б24 после закрытия заявки / отгрузки (избегаем лишних циклов).
+ *
+ * @param PDO $db
+ * @param int $requestId
+ * @return bool
+ */
+function webhookRequestShouldSkipPushingProductRowsToBitrix($db, $requestId) {
+    $requestId = intval($requestId);
+    if ($requestId <= 0) {
+        return true;
+    }
+    try {
+        $stmt = $db->prepare("SELECT status, picker_status FROM b24_sale_requests WHERE id = ? LIMIT 1");
+        $stmt->execute(array($requestId));
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    } catch (Exception $e) {
+        return false;
+    }
+    if (!$row) {
+        return true;
+    }
+    $status = isset($row['status']) ? (string)$row['status'] : '';
+    $picker = isset($row['picker_status']) ? (string)$row['picker_status'] : '';
+    if ($status === 'completed' || $status === 'cancelled') {
+        return true;
+    }
+    if ($picker === 'shipped') {
+        return true;
+    }
+    return false;
+}
+
+/**
+ * После queueDealForWarehouse: отправить в Б24 строки с ценами из b24_sale_lines (как в b24_sales / picker).
+ *
+ * @param PDO $db
+ * @param int $requestId
+ * @return array ok, skipped, reason|stage|error|idempotent|b24_deal_id
+ */
+function webhookSyncDealProductRowsAfterQueue($db, $requestId) {
+    $requestId = intval($requestId);
+    if ($requestId <= 0) {
+        return array('ok' => false, 'skipped' => true, 'reason' => 'invalid_request_id');
+    }
+    if (webhookRequestShouldSkipPushingProductRowsToBitrix($db, $requestId)) {
+        return array('ok' => true, 'skipped' => true, 'reason' => 'request_closed_or_completed');
+    }
+    if (!function_exists('pickerSyncDealRowsForRequest')) {
+        require_once __DIR__ . '/../functions/deal_rows_sync_service.php';
+    }
+    try {
+        $result = pickerSyncDealRowsForRequest($db, $requestId, false);
+        if (!empty($result['ok'])) {
+            return array(
+                'ok' => true,
+                'skipped' => false,
+                'stage' => isset($result['stage']) ? $result['stage'] : '',
+                'idempotent' => !empty($result['idempotent']),
+                'b24_deal_id' => isset($result['b24_deal_id']) ? $result['b24_deal_id'] : null
+            );
+        }
+        $stage = isset($result['stage']) ? (string)$result['stage'] : 'unknown';
+        $err = '';
+        if (isset($result['response']) && is_array($result['response'])) {
+            if (isset($result['response']['error_description'])) {
+                $err = (string)$result['response']['error_description'];
+            } elseif (isset($result['response']['error'])) {
+                $err = (string)$result['response']['error'];
+            }
+        }
+        if ($err === '' && isset($result['error'])) {
+            $err = (string)$result['error'];
+        }
+        return array('ok' => false, 'skipped' => false, 'stage' => $stage, 'error' => $err);
+    } catch (Exception $e) {
+        return array('ok' => false, 'skipped' => false, 'stage' => 'exception', 'error' => $e->getMessage());
+    }
 }
 
 /**
@@ -257,15 +338,29 @@ function handleNewDeal($db, $data) {
             'products' => $products
         ];
         $result = queueDealForWarehouse($db, $dealData);
+        $dealRowsSync = null;
+        if (!isset($result['error']) && isset($result['request_id']) && intval($result['request_id']) > 0) {
+            $dealRowsSync = webhookSyncDealProductRowsAfterQueue($db, intval($result['request_id']));
+        }
         if (isset($result['error'])) {
             webhookLogFinish($db, 'queue_error', $dealId, $logProductId, isset($result['error']) ? $result['error'] : null);
+        } elseif ($dealRowsSync !== null && isset($dealRowsSync['ok']) && !$dealRowsSync['ok'] && empty($dealRowsSync['skipped'])) {
+            $detailSync = isset($dealRowsSync['stage']) ? (string)$dealRowsSync['stage'] : '';
+            if (isset($dealRowsSync['error']) && (string)$dealRowsSync['error'] !== '') {
+                $detailSync = $detailSync !== '' ? $detailSync . ': ' : '';
+                $detailSync .= (string)$dealRowsSync['error'];
+            }
+            webhookLogFinish($db, 'deal_processed_productrows_sync_failed', $dealId, $logProductId, $detailSync !== '' ? $detailSync : null);
         } else {
             webhookLogFinish($db, 'deal_processed', $dealId, $logProductId);
         }
-        echo json_encode(isset($result['error'])
-            ? ['status' => 'error', 'deal_id' => $dealId, 'error' => $result['error']]
-            : array('status' => 'deal_processed', 'deal_id' => $dealId, 'request_id' => isset($result['request_id']) ? $result['request_id'] : null)
-        );
+        $outNew = isset($result['error'])
+            ? array('status' => 'error', 'deal_id' => $dealId, 'error' => $result['error'])
+            : array('status' => 'deal_processed', 'deal_id' => $dealId, 'request_id' => isset($result['request_id']) ? $result['request_id'] : null);
+        if ($dealRowsSync !== null) {
+            $outNew['deal_rows_sync'] = $dealRowsSync;
+        }
+        echo json_encode($outNew);
     } else {
         webhookFinishNoProducts($db, $dealId);
         echo json_encode(['status' => 'no_products', 'deal_id' => $dealId]);
@@ -404,15 +499,29 @@ function handleDealUpdate($db, $data) {
             'responsible' => isset($dealData['ASSIGNED_BY_ID']) ? getUserName($db, $dealData['ASSIGNED_BY_ID']) : '',
             'products' => $products
         ]);
+        $dealRowsSyncUpd = null;
+        if (!isset($result['error']) && isset($result['request_id']) && intval($result['request_id']) > 0) {
+            $dealRowsSyncUpd = webhookSyncDealProductRowsAfterQueue($db, intval($result['request_id']));
+        }
         if (isset($result['error'])) {
             webhookLogFinish($db, 'queue_error', $dealId, $logProductIdDeal, isset($result['error']) ? $result['error'] : null);
+        } elseif ($dealRowsSyncUpd !== null && isset($dealRowsSyncUpd['ok']) && !$dealRowsSyncUpd['ok'] && empty($dealRowsSyncUpd['skipped'])) {
+            $detailSyncU = isset($dealRowsSyncUpd['stage']) ? (string)$dealRowsSyncUpd['stage'] : '';
+            if (isset($dealRowsSyncUpd['error']) && (string)$dealRowsSyncUpd['error'] !== '') {
+                $detailSyncU = $detailSyncU !== '' ? $detailSyncU . ': ' : '';
+                $detailSyncU .= (string)$dealRowsSyncUpd['error'];
+            }
+            webhookLogFinish($db, 'deal_updated_productrows_sync_failed', $dealId, $logProductIdDeal, $detailSyncU !== '' ? $detailSyncU : null);
         } else {
             webhookLogFinish($db, 'deal_updated', $dealId, $logProductIdDeal);
         }
-        echo json_encode(isset($result['error'])
-            ? ['status' => 'error', 'deal_id' => $dealId, 'error' => $result['error']]
-            : array('status' => 'deal_updated', 'deal_id' => $dealId, 'request_id' => isset($result['request_id']) ? $result['request_id'] : null)
-        );
+        $outUpd = isset($result['error'])
+            ? array('status' => 'error', 'deal_id' => $dealId, 'error' => $result['error'])
+            : array('status' => 'deal_updated', 'deal_id' => $dealId, 'request_id' => isset($result['request_id']) ? $result['request_id'] : null);
+        if ($dealRowsSyncUpd !== null) {
+            $outUpd['deal_rows_sync'] = $dealRowsSyncUpd;
+        }
+        echo json_encode($outUpd);
     } elseif (!empty($products)) {
         webhookLogFinish($db, 'skipped_warehouse_gate', $dealId, $logProductIdDeal);
         echo json_encode([
