@@ -1,10 +1,10 @@
 <?php
 
 /**
- * При skipped_warehouse_gate: выравнивание итога через скидку на строке по тирам (products).
+ * При skipped_warehouse_gate: выровнять цену за единицу по тирам из products (цена_тира_за_рулон / roll_length),
+ * скидку на строке обнулять — без «моста» каталожная цена + огромная скидка.
  *
- * На порталах с новым CRM строки сделки живут в crm.item.productrow (+ list/update), а не в
- * crm.deal.productrows — поэтому сначала item API (discountTypeId=1 + discountSum), затем фолбэк classic.
+ * Сначала crm.item.productrow (list/update), затем фолбэк crm.deal.productrows.
  */
 
 require_once __DIR__ . '/pricing.php';
@@ -102,13 +102,13 @@ function bitrixTierSyncLoadProductByB24Id($db, $b24ProductId)
 }
 
 /**
- * Целевая сумма строки: метраж × (цена тира за рулон / длина рулона).
+ * Целевая цена за единицу в строке (метр): цена тира за рулон / длина рулона.
  *
  * @param array $product
- * @param float $qty
+ * @param float $qty метраж/кол-во в строке
  * @return float|null
  */
-function bitrixTierSyncTargetLineTotal($product, $qty)
+function bitrixTierSyncTargetUnitPrice($product, $qty)
 {
     $qty = floatval($qty);
     if ($qty <= 0) {
@@ -124,16 +124,15 @@ function bitrixTierSyncTargetLineTotal($product, $qty)
     if ($rollLen <= 0.0001) {
         return null;
     }
-    $perMeter = $tierMoney / $rollLen;
-    return round($perMeter * $qty, 2);
+    return round($tierMoney / $rollLen, 2);
 }
 
 /**
- * Универсальный API строк: discountTypeId 1 = абсолютная сумма, 2 = процент (apidocs.bitrix24.com).
+ * Универсальный API строк (crm.item.productrow.update): price + обнуление скидки.
  *
  * @param object $db
  * @param int $dealId
- * @return array ok, stage, api, rows_updated, discount_applied, error, row_errors
+ * @return array ok, stage, api, rows_updated, row_errors
  */
 function bitrixDealTierDiscountSyncViaItemRows($db, $dealId)
 {
@@ -164,7 +163,8 @@ function bitrixDealTierDiscountSyncViaItemRows($db, $dealId)
 
     $rowErrors = array();
     $updated = 0;
-    $anyDiscount = false;
+    $anyPriceWrite = false;
+    $tierCandidates = 0;
 
     foreach ($rows as $row) {
         if (!is_array($row)) {
@@ -189,30 +189,32 @@ function bitrixDealTierDiscountSyncViaItemRows($db, $dealId)
             continue;
         }
 
-        $gross = round($quantity * $unitPrice, 2);
-        $target = bitrixTierSyncTargetLineTotal($product, $quantity);
-        if ($target === null) {
+        $targetUnit = bitrixTierSyncTargetUnitPrice($product, $quantity);
+        if ($targetUnit === null) {
             continue;
         }
 
-        $discount = round($gross - $target, 2);
-        if ($discount < 0) {
-            $discount = 0.0;
+        $tierCandidates++;
+
+        $discSum = 0.0;
+        if (isset($row['discountSum']) && $row['discountSum'] !== '' && $row['discountSum'] !== null) {
+            $discSum = floatval($row['discountSum']);
         }
-        if ($discount > 0.005) {
-            $anyDiscount = true;
+        $needsWrite = (abs($unitPrice - $targetUnit) > 0.005) || ($discSum > 0.005);
+        if (!$needsWrite) {
+            continue;
         }
 
         $fields = array(
+            'price' => $targetUnit,
             'discountTypeId' => 1,
-            'discountSum' => round($discount, 2),
+            'discountSum' => 0,
             'discountRate' => 0,
+            'customized' => 'Y',
         );
-        if ($discount <= 0.005) {
-            $fields['discountSum'] = 0;
-        }
-        if ($discount > 0.005) {
-            $fields['customized'] = 'Y';
+
+        if (abs($unitPrice - $targetUnit) > 0.005) {
+            $anyPriceWrite = true;
         }
 
         $updResp = sendToBitrix('crm.item.productrow.update', array(
@@ -235,7 +237,7 @@ function bitrixDealTierDiscountSyncViaItemRows($db, $dealId)
         }
     }
 
-    if ($updated === 0 && empty($rowErrors) && !$anyDiscount) {
+    if ($updated === 0 && empty($rowErrors) && $tierCandidates === 0) {
         return array(
             'ok' => true,
             'stage' => 'item_no_matching_products',
@@ -245,19 +247,31 @@ function bitrixDealTierDiscountSyncViaItemRows($db, $dealId)
         );
     }
 
+    if ($updated === 0 && empty($rowErrors) && $tierCandidates > 0) {
+        return array(
+            'ok' => true,
+            'stage' => 'item_already_aligned',
+            'api' => 'item',
+            'skipped' => false,
+            'rows_seen' => count($rows),
+            'tier_candidates' => $tierCandidates
+        );
+    }
+
     return array(
         'ok' => count($rowErrors) === 0,
         'stage' => count($rowErrors) > 0 ? 'crm.item.productrow.update_partial' : 'done',
         'api' => 'item',
         'rows_updated' => $updated,
-        'discount_applied' => $anyDiscount,
+        'unit_price_applied' => $anyPriceWrite,
+        'discount_applied' => false,
         'row_errors' => $rowErrors,
         'error' => count($rowErrors) > 0 && isset($rowErrors[0]['error']) ? $rowErrors[0]['error'] : ''
     );
 }
 
 /**
- * Классический crm.deal.productrows: DISCOUNT_TYPE_ID в старом API часто 2 = денежная скидка, 1 = %%.
+ * Классический crm.deal.productrows: PRICE = цена за метр по тиру, скидка 0.
  *
  * @param object $db
  * @param int $dealId
@@ -285,7 +299,7 @@ function bitrixDealTierDiscountSyncViaClassicProductRows($db, $dealId)
     }
 
     $outRows = array();
-    $anyDiscount = false;
+    $anyPriceChange = false;
 
     foreach ($rows as $item) {
         if (!is_array($item)) {
@@ -324,34 +338,28 @@ function bitrixDealTierDiscountSyncViaClassicProductRows($db, $dealId)
             continue;
         }
 
-        $gross = round($quantity * $unitPrice, 2);
-        $target = bitrixTierSyncTargetLineTotal($product, $quantity);
-        if ($target === null) {
+        $targetUnit = bitrixTierSyncTargetUnitPrice($product, $quantity);
+        if ($targetUnit === null) {
             $outRows[] = $item;
             continue;
         }
 
-        $discount = round($gross - $target, 2);
-        if ($discount < 0) {
-            $discount = 0.0;
-        }
-        if ($discount > 0.005) {
-            $anyDiscount = true;
+        if (abs($unitPrice - $targetUnit) > 0.005) {
+            $anyPriceChange = true;
         }
 
         $newRow = $item;
-        if ($discount > 0.005) {
-            $newRow['DISCOUNT_TYPE_ID'] = 2;
-            $newRow['DISCOUNT_SUM'] = round($discount, 2);
-        } else {
-            $newRow['DISCOUNT_TYPE_ID'] = 0;
-            $newRow['DISCOUNT_SUM'] = 0;
-        }
+        $newRow['PRICE'] = $targetUnit;
+        $newRow['DISCOUNT_TYPE_ID'] = 0;
+        $newRow['DISCOUNT_SUM'] = 0;
         if (isset($newRow['discountTypeId'])) {
-            $newRow['discountTypeId'] = isset($newRow['DISCOUNT_TYPE_ID']) ? intval($newRow['DISCOUNT_TYPE_ID']) : 0;
+            $newRow['discountTypeId'] = 0;
         }
         if (isset($newRow['discountSum'])) {
-            $newRow['discountSum'] = isset($newRow['DISCOUNT_SUM']) ? floatval($newRow['DISCOUNT_SUM']) : 0;
+            $newRow['discountSum'] = 0;
+        }
+        if (isset($newRow['price'])) {
+            $newRow['price'] = $targetUnit;
         }
 
         $outRows[] = $newRow;
@@ -379,7 +387,8 @@ function bitrixDealTierDiscountSyncViaClassicProductRows($db, $dealId)
         'stage' => 'done',
         'api' => 'classic',
         'rows' => count($outRows),
-        'discount_applied' => $anyDiscount
+        'unit_price_applied' => $anyPriceChange,
+        'discount_applied' => false
     );
 }
 
