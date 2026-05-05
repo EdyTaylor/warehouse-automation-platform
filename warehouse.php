@@ -25,6 +25,39 @@ function getPrice($row, $qty) {
     return floatval($resolved['price']);
 }
 
+/**
+ * ID товара в CRM Битрикс24 для crm.product.get.
+ * rolls.product_id — это часто локальный products.id; подставлять его в API нельзя.
+ *
+ * @param PDO $db
+ * @param int $rollProductId
+ * @return int
+ */
+function warehouseResolveCrmProductIdForRoll($db, $rollProductId) {
+    $pid = intval($rollProductId);
+    if ($pid <= 0) {
+        return 0;
+    }
+    $stmt = $db->prepare("SELECT id, b24_product_id FROM products WHERE id = ? LIMIT 1");
+    $stmt->execute(array($pid));
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    if ($row) {
+        if (isset($row['b24_product_id']) && $row['b24_product_id'] !== null && $row['b24_product_id'] !== '') {
+            $b24 = intval($row['b24_product_id']);
+            if ($b24 > 0) {
+                return $b24;
+            }
+        }
+        return 0;
+    }
+    $stmt = $db->prepare("SELECT id FROM products WHERE b24_product_id = ? LIMIT 1");
+    $stmt->execute(array($pid));
+    if ($stmt->fetch(PDO::FETCH_ASSOC)) {
+        return $pid;
+    }
+    return 0;
+}
+
 function hydrateMissingRollProductNamesFromBitrix($db, &$rolls) {
     if (!is_array($rolls) || empty($rolls)) {
         return;
@@ -45,20 +78,28 @@ function hydrateMissingRollProductNamesFromBitrix($db, &$rolls) {
     }
 
     $resolved = array();
-    foreach (array_keys($missingIds) as $b24Id) {
+    $resolvedByCrmId = array();
+    $maxOutgoingProductLookups = 30;
+    $outgoingLookups = 0;
+
+    foreach (array_keys($missingIds) as $pid) {
+        $crmId = warehouseResolveCrmProductIdForRoll($db, $pid);
+        if ($crmId <= 0) {
+            continue;
+        }
+        if (isset($resolvedByCrmId[$crmId])) {
+            $resolved[$pid] = $resolvedByCrmId[$crmId];
+            continue;
+        }
+        if ($outgoingLookups >= $maxOutgoingProductLookups) {
+            continue;
+        }
+        $outgoingLookups++;
+
         $item = null;
-        $resp = sendToBitrix('crm.product.get', array('id' => $b24Id));
+        $resp = sendToBitrix('crm.product.get', array('id' => $crmId));
         if (is_array($resp) && !isset($resp['error']) && isset($resp['result']) && is_array($resp['result'])) {
             $item = $resp['result'];
-        }
-        if ($item === null) {
-            $resp = sendToBitrix('crm.product.list', array(
-                'filter' => array('ID' => $b24Id),
-                'start' => 0
-            ));
-            if (is_array($resp) && !isset($resp['error']) && isset($resp['result']) && is_array($resp['result']) && !empty($resp['result'][0])) {
-                $item = $resp['result'][0];
-            }
         }
         if (!is_array($item)) {
             continue;
@@ -68,11 +109,12 @@ function hydrateMissingRollProductNamesFromBitrix($db, &$rolls) {
         if ($name === '') {
             continue;
         }
-        $resolved[$b24Id] = $name;
+        $resolvedByCrmId[$crmId] = $name;
+        $resolved[$pid] = $name;
 
-        // Upsert minimal local product row to avoid repeated live calls.
+        // Upsert minimal local product row to avoid repeated live calls (по реальному CRM id).
         $sel = $db->prepare("SELECT id FROM products WHERE b24_product_id = ? LIMIT 1");
-        $sel->execute(array($b24Id));
+        $sel->execute(array($crmId));
         $existing = $sel->fetch(PDO::FETCH_ASSOC);
         if ($existing) {
             $db->prepare("UPDATE products SET name = ? WHERE id = ?")->execute(array($name, intval($existing['id'])));
@@ -80,7 +122,7 @@ function hydrateMissingRollProductNamesFromBitrix($db, &$rolls) {
             $db->prepare("
                 INSERT INTO products (name, roll_length, price_per_meter, b24_product_id)
                 VALUES (?, 30, 0, ?)
-            ")->execute(array($name, $b24Id));
+            ")->execute(array($name, $crmId));
         }
     }
 
