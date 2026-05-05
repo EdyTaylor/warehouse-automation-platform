@@ -322,7 +322,19 @@ function handleDealUpdate($db, $data) {
     }
 
     $realGate = integrationMergedRealizationGate($db, $cfg);
-    applyDealPaidOrReserveMark($db, $dealId, $dealData, $realGate);
+    
+    $dealDataFresh = $dealData; // начальное значение
+
+    for ($i = 0; $i < 3; $i++) {
+    $dealDataFresh = getDealDetails($dealId);
+
+    if (bitrixRealizationIsPaid($dealDataFresh, $realGate)) {
+        break;
+    }
+
+    usleep(300000);
+}
+    applyDealPaidOrReserveMark($db, $dealId, $dealDataFresh, $realGate);
 }
 
 function handleNewProduct($db, $data) {
