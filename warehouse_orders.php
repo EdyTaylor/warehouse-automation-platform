@@ -886,13 +886,13 @@ require __DIR__ . '/includes/header.php';
                     <label>Комментарий кладовщика / причина отклонения</label>
                     <textarea name="problem_text" rows="3" placeholder="Например: не могу предоставить данный товар, предлагаю аналог..."><?= h($request['picker_problem_text']) ?></textarea>
                 </div>
-                <div style="display:flex; gap:8px; flex-wrap:wrap;">
-                    <button class="btn btn-light" type="submit" name="action" value="save_pick">Сохранить комментарий</button>
-                    <button class="btn btn-success" type="submit" name="action" value="approve_pick" onclick="return confirm('Отправить в Б24 триггер Отгрузить?');">Отгрузить</button>
-                    <button class="btn btn-warning" type="submit" name="action" value="reject_pick" onclick="return confirm('Отправить в Б24 триггер Отклонить?');">Отклонить</button>
-                    <button class="btn btn-danger" type="submit" name="action" value="cancel_reserve" onclick="return confirm('Снять резерв по заявке? Сделка в Б24 не будет закрыта.');">Снять резерв</button>
-                </div>
-                <div style="display:flex; justify-content:flex-end; margin-top:20px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
+                    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                        <button class="btn btn-light" type="submit" name="action" value="save_pick">Сохранить комментарий</button>
+                        <button class="btn btn-success" type="submit" name="action" value="approve_pick" onclick="return confirm('Отправить в Б24 триггер Отгрузить?');">Отгрузить</button>
+                        <button class="btn btn-warning" type="submit" name="action" value="reject_pick" onclick="return confirm('Отправить в Б24 триггер Отклонить?');">Отклонить</button>
+                        <button class="btn btn-danger" type="submit" name="action" value="cancel_reserve" onclick="return confirm('Снять резерв по заявке? Сделка в Б24 не будет закрыта.');">Снять резерв</button>
+                    </div>
                     <button
                         class="btn btn-danger btn-sm"
                         type="submit"
