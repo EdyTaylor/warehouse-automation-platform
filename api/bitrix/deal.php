@@ -180,24 +180,152 @@ function replaceAllocationRoll($db, $requestId, $productId, $fromRollId, $toRoll
     }
 }
 
+function rollbackRealizedDealToStock($db, $dealId, $requestId) {
+    $productIdsToSync = array();
+
+    $cutsStmt = $db->prepare("
+        SELECT c.roll_id, c.meters, l.product_id
+        FROM b24_sale_line_cuts c
+        JOIN b24_sale_lines l ON l.id = c.line_id
+        WHERE l.request_id = ?
+        ORDER BY c.id DESC
+    ");
+    $cutsStmt->execute(array($requestId));
+    $cuts = $cutsStmt->fetchAll(PDO::FETCH_ASSOC);
+
+    foreach ($cuts as $cut) {
+        $rollId = intval(isset($cut['roll_id']) ? $cut['roll_id'] : 0);
+        $meters = floatval(isset($cut['meters']) ? $cut['meters'] : 0);
+        $productId = intval(isset($cut['product_id']) ? $cut['product_id'] : 0);
+        if ($rollId <= 0 || $meters <= 0) {
+            continue;
+        }
+
+        $rollStmt = $db->prepare("SELECT * FROM rolls WHERE id = ? FOR UPDATE");
+        $rollStmt->execute(array($rollId));
+        $roll = $rollStmt->fetch(PDO::FETCH_ASSOC);
+        if (!$roll) {
+            continue;
+        }
+
+        $currentLength = floatval(isset($roll['current_length']) ? $roll['current_length'] : 0);
+        $originalLength = floatval(isset($roll['original_length']) ? $roll['original_length'] : 0);
+        $restoredLength = $currentLength + $meters;
+        if ($originalLength > 0 && $restoredLength > $originalLength) {
+            $restoredLength = $originalLength;
+        }
+        if ($restoredLength < 0) {
+            $restoredLength = 0;
+        }
+
+        $newStatus = ($originalLength > 0 && $restoredLength + 0.0001 >= $originalLength) ? 'active' : 'cut';
+
+        $db->prepare("
+            UPDATE rolls
+            SET current_length = ?, status = ?, reserved = 0, deal_id = NULL, reserved_length = 0
+            WHERE id = ?
+        ")->execute(array($restoredLength, $newStatus, $rollId));
+
+        if ($productId > 0) {
+            $productIdsToSync[$productId] = $productId;
+        }
+    }
+
+    // Убираем следы реализации из отчетов по продажам (продажа отменена в Б24).
+    $db->prepare("DELETE FROM sales WHERE deal_id = ? AND type = 'meter'")
+        ->execute(array($dealId));
+
+    // Убираем складские движения реализации, чтобы не искажать журнал операций.
+    $db->prepare("
+        DELETE FROM stock_movements
+        WHERE deal_id = ?
+          AND movement_type = 'sale_meter'
+          AND comment LIKE 'Deal realized in B24%'
+    ")->execute(array($dealId));
+
+    $db->prepare("
+        UPDATE b24_sale_lines
+        SET status = 'new'
+        WHERE request_id = ?
+    ")->execute(array($requestId));
+
+    $db->prepare("
+        DELETE c
+        FROM b24_sale_line_cuts c
+        INNER JOIN b24_sale_lines l ON l.id = c.line_id
+        WHERE l.request_id = ?
+    ")->execute(array($requestId));
+
+    $db->prepare("
+        UPDATE b24_sale_requests
+        SET status = 'cancelled',
+            picker_status = 'cancelled',
+            shipped_at = NULL,
+            cancelled_at = NOW(),
+            updated_at = NOW()
+        WHERE id = ?
+    ")->execute(array($requestId));
+
+    $db->prepare("UPDATE deals SET status = 'cancelled' WHERE b24_deal_id = ?")
+        ->execute(array($dealId));
+
+    if (function_exists('syncProductAvailableToBitrix')) {
+        foreach ($productIdsToSync as $pid) {
+            syncProductAvailableToBitrix($db, intval($pid));
+        }
+    }
+}
+
 function cancelDealReservations($db, $dealId) {
     ensureOrderAllocationsTable($db);
-    $reqStmt = $db->prepare("SELECT id FROM b24_sale_requests WHERE b24_deal_id = ?");
+    $reqStmt = $db->prepare("SELECT * FROM b24_sale_requests WHERE b24_deal_id = ? LIMIT 1");
     $reqStmt->execute([$dealId]);
     $request = $reqStmt->fetch(PDO::FETCH_ASSOC);
     if (!$request) {
         return;
     }
     $requestId = intval($request['id']);
-    releaseRequestAllocations($db, $requestId, null);
-    $db->prepare("
-        UPDATE rolls
-        SET reserved = 0, deal_id = NULL, reserved_length = 0
-        WHERE deal_id = ?
-    ")->execute([$dealId]);
-    $db->prepare("DELETE FROM b24_sale_line_cuts WHERE line_id IN (SELECT id FROM b24_sale_lines WHERE request_id = ?)")
-        ->execute([$requestId]);
-    $db->prepare("UPDATE b24_sale_requests SET status='cancelled', updated_at=NOW() WHERE id=?")->execute([$requestId]);
+
+    $wasRealized = ((string)(isset($request['status']) ? $request['status'] : '') === 'completed')
+        || ((string)(isset($request['picker_status']) ? $request['picker_status'] : '') === 'shipped');
+
+    $db->beginTransaction();
+    try {
+        if ($wasRealized) {
+            rollbackRealizedDealToStock($db, $dealId, $requestId);
+        } else {
+            releaseRequestAllocations($db, $requestId, null);
+            $db->prepare("
+                UPDATE rolls
+                SET reserved = 0, deal_id = NULL, reserved_length = 0
+                WHERE deal_id = ?
+            ")->execute([$dealId]);
+            $db->prepare("DELETE FROM b24_sale_line_cuts WHERE line_id IN (SELECT id FROM b24_sale_lines WHERE request_id = ?)")
+                ->execute([$requestId]);
+            $db->prepare("
+                UPDATE b24_sale_lines
+                SET status = 'new'
+                WHERE request_id = ? AND status != 'completed'
+            ")->execute(array($requestId));
+            $db->prepare("
+                UPDATE b24_sale_requests
+                SET status='cancelled',
+                    picker_status='cancelled',
+                    cancelled_at = NOW(),
+                    updated_at=NOW()
+                WHERE id=?
+            ")->execute([$requestId]);
+            $db->prepare("UPDATE deals SET status = 'cancelled' WHERE b24_deal_id = ?")
+                ->execute(array($dealId));
+        }
+
+        $db->commit();
+    } catch (Exception $e) {
+        if ($db->inTransaction()) {
+            $db->rollBack();
+        }
+        throw $e;
+    }
 }
 
 function queueDealForWarehouse($db, $data) {

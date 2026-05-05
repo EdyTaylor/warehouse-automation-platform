@@ -477,6 +477,7 @@ $filterDate = isset($_GET['date']) ? trim($_GET['date']) : '';
 $filterDealId = intval(isset($_GET['deal_id']) ? $_GET['deal_id'] : 0);
 
 $allowedStatuses = array('new', 'picked', 'confirmed', 'shipped', 'cancelled');
+$filterVisibleStatuses = array('new', 'picked', 'shipped', 'cancelled');
 $where = array();
 $params = array();
 
@@ -538,7 +539,7 @@ require __DIR__ . '/includes/header.php';
                     <select name="status">
                         <option value="" <?= $filterStatusRaw === '' ? 'selected' : '' ?>>Активные</option>
                         <option value="all" <?= $filterStatusRaw === 'all' ? 'selected' : '' ?>>Все заявки</option>
-                        <?php foreach ($allowedStatuses as $status): ?>
+                        <?php foreach ($filterVisibleStatuses as $status): ?>
                             <option value="<?= h($status) ?>" <?= $filterStatusRaw === $status ? 'selected' : '' ?>><?= h(pickerStatusLabel($status)) ?></option>
                         <?php endforeach; ?>
                     </select>
