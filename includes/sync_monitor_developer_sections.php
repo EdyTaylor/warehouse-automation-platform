@@ -416,3 +416,36 @@
             </div>
         </div>
     </details>
+
+    <details class="card integration-section" id="sec-which-hooks">
+        <summary class="integration-section-summary">Какие хуки отправляются</summary>
+        <div class="integration-section-body">
+            <p class="text-muted">
+                Краткая памятка: какие события Битрикс24 должны приходить в <code>api/webhook.php</code> и какие REST-методы
+                приложение обычно вызывает в ответ через <code>sendToBitrix()</code>.
+            </p>
+
+            <h4 style="margin-top:8px;">Входящие хуки из Б24 → в это приложение</h4>
+            <ul style="margin-top:8px; line-height:1.55;">
+                <li><code>ONCRMDEALADD</code> — новая сделка, создаём/обновляем заявку в очереди кладовщика (<code>b24_sale_requests</code>).</li>
+                <li><code>ONCRMDEALUPDATE</code> — изменение сделки, пересборка строк и проверка правил резерв/реализация.</li>
+                <li><code>ONCRMPRODUCTADD</code> — новая карточка товара в CRM, обновление локального каталога.</li>
+                <li><code>ONCRMPRODUCTUPDATE</code> — изменение карточки товара, синк локальных данных.</li>
+                <li><code>ONCRMPRODUCTDELETE</code> — удаление товара в CRM, пометка/очистка локальной связки.</li>
+            </ul>
+
+            <h4 style="margin-top:14px;">Исходящие вызовы из приложения → в Б24</h4>
+            <ul style="margin-top:8px; line-height:1.55;">
+                <li><code>crm.deal.get</code> — дочитываем детали сделки для правил и диагностики.</li>
+                <li><code>crm.deal.productrows.get</code> / <code>crm.deal.productrows.set</code> — чтение и синк строк товаров сделки.</li>
+                <li><code>crm.deal.update</code> — комментарии/статусы из рабочего места кладовщика.</li>
+                <li><code>crm.product.*</code> — синк карточек товаров и отдельных полей.</li>
+                <li><code>catalog.document.*</code> и связанный обмен по складу — приход/проведение и операции по остаткам.</li>
+                <li><code>crm.timeline.comment.add</code> — комментарии в таймлайн сделки (движения/служебные записи).</li>
+            </ul>
+
+            <p class="text-muted" style="margin-bottom:0;">
+                Фактический журнал доставок входящих событий смотрите в блоке «Вебхук-события Битрикс24» выше.
+            </p>
+        </div>
+    </details>
