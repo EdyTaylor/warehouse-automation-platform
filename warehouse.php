@@ -484,8 +484,11 @@ try {
 
     if ($layout === 'rolls') {
         hydrateMissingRollProductNamesFromBitrix($db, $rolls);
+        // Bitrix API can take long; MySQL may close idle connection before the next query.
+        $db = getDB();
     }
 } catch (Exception $e) {
+    $db = getDB();
     $rolls = $db->query("SELECT * FROM rolls ORDER BY id DESC")->fetchAll(PDO::FETCH_ASSOC);
     foreach ($rolls as &$roll) {
         $roll['product_name'] = 'Архивный товар (ID ' . $roll['product_id'] . ')';
