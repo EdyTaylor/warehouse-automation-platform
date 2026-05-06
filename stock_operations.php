@@ -968,7 +968,6 @@ require 'includes/header.php';
             select.value = '0';
         }
         bindRow(newRow);
-        bindSearch(newRow);
         tableBody.appendChild(newRow);
     });
 })();
