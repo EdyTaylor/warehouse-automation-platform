@@ -8,6 +8,21 @@ $db = getDB();
 require_once __DIR__ . '/../functions/webhook_log_schema.php';
 require_once __DIR__ . '/../functions/b24_sale_pricing.php';
 
+/**
+ * WEBHOOK SECURITY: Validate incoming webhook
+ * Bitrix24 webhooks should be verified before processing
+ * Load webhook secret from environment or config
+ */
+$webhookSecret = getenv('BITRIX_WEBHOOK_SECRET') ?: '';
+if (!empty($webhookSecret)) {
+    $providedSecret = isset($_SERVER['HTTP_X_WEBHOOK_SECRET']) ? (string)$_SERVER['HTTP_X_WEBHOOK_SECRET'] : '';
+    if (!hash_equals($webhookSecret, $providedSecret)) {
+        http_response_code(401);
+        echo json_encode(['error' => 'Unauthorized']);
+        exit;
+    }
+}
+
 /** @var int|null Строка в webhook_log текущего запроса (для итога обработки). */
 $GLOBALS['webhook_log_id'] = null;
 

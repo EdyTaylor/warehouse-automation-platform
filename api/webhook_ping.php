@@ -12,7 +12,7 @@ header('Content-Type: application/json; charset=utf-8');
 require __DIR__ . '/../db.php';
 require_once __DIR__ . '/../functions/webhook_log_schema.php';
 
-const WEBHOOK_DIAG_WRITE_KEY = 'CHANGE_ME_FRIENDCRM_DIAG';
+const WEBHOOK_DIAG_WRITE_KEY = '';
 
 $db = getDB();
 webhookLogEnsureSchema($db);

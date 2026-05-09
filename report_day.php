@@ -12,7 +12,8 @@ function bitrixDealUrlById($dealId) {
     if ($id <= 0) {
         return '';
     }
-    return 'https://llumar.bitrix24.kz/crm/deal/details/' . $id . '/';
+    $bitrixPortalDomain = getenv('BITRIX_PORTAL_DOMAIN') ?: 'bitrix24.example.com';
+    return 'https://' . $bitrixPortalDomain . '/crm/deal/details/' . $id . '/';
 }
 
 function responsibleLabel($rawResponsible) {

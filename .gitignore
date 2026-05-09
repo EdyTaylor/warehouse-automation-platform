@@ -1,3 +1,26 @@
 STOCK_CREATES_OFF
 STOCK_CREATES_OFF.txt
 .cursor.zip
+
+# Environment variables - NEVER COMMIT
+.env
+.env.local
+.env.*.local
+
+# IDE and Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+

@@ -13,7 +13,8 @@ function bitrixDealUrlById($dealId) {
     if ($id <= 0) {
         return '';
     }
-    return 'https://llumar.bitrix24.kz/crm/deal/details/' . $id . '/';
+    $bitrixPortalDomain = getenv('BITRIX_PORTAL_DOMAIN') ?: 'bitrix24.example.com';
+    return 'https://' . $bitrixPortalDomain . '/crm/deal/details/' . $id . '/';
 }
 $from = isset($_GET['from']) ? trim($_GET['from']) : '';
 $to = isset($_GET['to']) ? trim($_GET['to']) : '';

@@ -4,9 +4,11 @@
 // Keep methods configurable because portals may differ by enabled modules.
 return [
     // Universal CRM webhook (crm scope).
-    'webhook' => 'https://llumar.bitrix24.kz/rest/13/s845opt8ba3jchft/',
+    // Load from environment variable or configuration file
+    'webhook' => getenv('BITRIX_WEBHOOK') ?: '',
     // Universal Catalog+CRM webhook (catalog + crm scopes).
-    'catalog_webhook' => 'https://llumar.bitrix24.kz/rest/13/8l0ds7zlh54wl1ou/',
+    // Load from environment variable or configuration file
+    'catalog_webhook' => getenv('BITRIX_CATALOG_WEBHOOK') ?: '',
     // Все crm.product.* (get/list/add/update) через catalog_webhook — один контур с catalog.document.* и типом для СУ.
     'use_catalog_webhook_for_crm_product' => true,
 
